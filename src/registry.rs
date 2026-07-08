@@ -1,0 +1,163 @@
+// Registry (ADR 0020): scans skills/ and capabilities/ into a resident catalog
+// (name + one-line description). Full text / execution happen only on activation.
+use crate::capability::CapabilityManifest;
+use std::path::Path;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EntryKind {
+    Skill,
+    Capability,
+}
+
+#[derive(Debug, Clone)]
+pub struct CatalogEntry {
+    pub name: String,
+    pub description: String,
+    pub kind: EntryKind,
+}
+
+/// The scanner/index (distinct from the lightweight `catalog` it produces).
+#[derive(Debug, Default)]
+pub struct Registry {
+    pub catalog: Vec<CatalogEntry>,
+}
+
+impl Registry {
+    /// Scan at startup and on `/reload`. Shell-authored changes only take effect
+    /// through this reload — no hot registration (ADR 0022).
+    pub fn scan(root: &Path) -> Self {
+        let mut catalog = Vec::new();
+        scan_skills(&root.join("skills"), &mut catalog);
+        scan_capabilities(&root.join("capabilities"), &mut catalog);
+        catalog.sort_by(|a, b| a.name.cmp(&b.name));
+        Registry { catalog }
+    }
+
+    /// Render the resident catalog for injection into the system prompt (ADR 0020).
+    pub fn render_catalog(&self) -> String {
+        if self.catalog.is_empty() {
+            return String::new();
+        }
+        let mut skills = Vec::new();
+        let mut caps = Vec::new();
+        for e in &self.catalog {
+            let line = format!("- {} — {}", e.name, e.description);
+            match e.kind {
+                EntryKind::Skill => skills.push(line),
+                EntryKind::Capability => caps.push(line),
+            }
+        }
+        let mut out = String::new();
+        if !skills.is_empty() {
+            out.push_str("Skills (activate with the `use_skill` tool):\n");
+            out.push_str(&skills.join("\n"));
+            out.push('\n');
+        }
+        if !caps.is_empty() {
+            out.push_str("Capabilities (run with the `run_capability` tool):\n");
+            out.push_str(&caps.join("\n"));
+            out.push('\n');
+        }
+        out
+    }
+}
+
+fn scan_skills(dir: &Path, out: &mut Vec<CatalogEntry>) {
+    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    for e in entries.flatten() {
+        let path = e.path();
+        if path.extension().and_then(|x| x.to_str()) != Some("md") {
+            continue;
+        }
+        let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("").to_string();
+        let text = std::fs::read_to_string(&path).unwrap_or_default();
+        let (name, description) = parse_skill_meta(&text, &stem);
+        out.push(CatalogEntry { name, description, kind: EntryKind::Skill });
+    }
+}
+
+fn scan_capabilities(dir: &Path, out: &mut Vec<CatalogEntry>) {
+    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    for e in entries.flatten() {
+        let manifest = e.path().join("manifest.json");
+        let Ok(raw) = std::fs::read_to_string(&manifest) else { continue };
+        let Ok(m) = serde_json::from_str::<CapabilityManifest>(&raw) else { continue };
+        out.push(CatalogEntry {
+            name: m.name,
+            description: m.description,
+            kind: EntryKind::Capability,
+        });
+    }
+}
+
+/// Extract (name, description) from a skill `.md`: optional `--- name: / description: ---`
+/// frontmatter, else name = filename stem and description = first non-empty line.
+fn parse_skill_meta(text: &str, stem: &str) -> (String, String) {
+    let mut name = stem.to_string();
+    let mut description = String::new();
+
+    let rest = if let Some(body) = text.strip_prefix("---") {
+        if let Some(end) = body.find("\n---") {
+            let front = &body[..end];
+            for line in front.lines() {
+                if let Some(v) = line.strip_prefix("name:") {
+                    name = v.trim().to_string();
+                } else if let Some(v) = line.strip_prefix("description:") {
+                    description = v.trim().to_string();
+                }
+            }
+            &body[end + 4..]
+        } else {
+            text
+        }
+    } else {
+        text
+    };
+
+    if description.is_empty() {
+        description = rest
+            .lines()
+            .map(str::trim)
+            .find(|l| !l.is_empty() && !l.starts_with('#'))
+            .unwrap_or("")
+            .to_string();
+    }
+    (name, description)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn scans_skill_frontmatter_and_capability_manifest() {
+        let dir = std::env::temp_dir().join(format!("cc_reg_{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("skills")).unwrap();
+        std::fs::create_dir_all(dir.join("capabilities/fetcher")).unwrap();
+        std::fs::write(
+            dir.join("skills/reviewing.md"),
+            "---\nname: reviewing\ndescription: how to review a PR\n---\nbody here",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("capabilities/fetcher/manifest.json"),
+            r#"{"name":"fetcher","description":"fetch a url","environment":"shell","lifecycle":"one_shot","entry":"curl $URL"}"#,
+        )
+        .unwrap();
+
+        let reg = Registry::scan(&dir);
+        assert_eq!(reg.catalog.len(), 2);
+        let cat = reg.render_catalog();
+        assert!(cat.contains("reviewing — how to review a PR"));
+        assert!(cat.contains("fetcher — fetch a url"));
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn skill_meta_falls_back_to_stem_and_first_line() {
+        let (n, d) = parse_skill_meta("# Title\n\nDo the thing.\n", "myskill");
+        assert_eq!(n, "myskill");
+        assert_eq!(d, "Do the thing.");
+    }
+}

@@ -1,0 +1,36 @@
+[package]
+name = "codecoder"
+version = "0.1.0"
+edition = "2024"
+description = "Autonomous AI agent — event-driven, filesystem-as-self"
+
+[dependencies]
+# Serialization: unified message model + session persistence (ADR 0015, 0004, 0017)
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# Errors
+anyhow = "1"
+thiserror = "2"
+# Blocking HTTP for the Provider — no async runtime, consistent with OS-threads kernel (ADR 0016)
+ureq = { version = "2", features = ["json"] }
+# TUI (ADR 0001, 0003)
+crossterm = "0.28"
+ratatui = "0.29"
+# Search tools: glob (file patterns) + regex (grep)
+glob = "0.3"
+regex = "1"
+# grep AST queries (tree-sitter) — Rust / Python / JavaScript grammars
+tree-sitter = "0.22"
+tree-sitter-rust = "0.21"
+tree-sitter-python = "0.21"
+tree-sitter-javascript = "0.21"
+tree-sitter-go = "0.21"
+tree-sitter-c = "0.21"
+# Accurate token counting for ctx% and compaction (ADR 0023)
+tiktoken-rs = "0.6"
+# Wasm capability environment: wasmtime + WASI isolation (ADR 0021)
+wasmtime = "27"
+wasmtime-wasi = "27"
+
+[profile.release]
+opt-level = 3

@@ -1,0 +1,8 @@
+/target
+/archived
+/sessions
+.DS_Store
+/.reasonix/skills
+*.log
+/coverage_report
+/.superpowers
