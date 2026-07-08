@@ -4,11 +4,16 @@
 
 ## 项目状态
 
-CodeCoder 是一个**计划中、尚未实现**的自主 AI agent，使用 Rust 编写。目前仓库中仅有规格说明——`README.md`（功能规格）和 `CONTEXT.md`（领域术语表）。`src/` 为空；没有 `Cargo.toml`、没有源文件、没有 `docs/` 目录，也还没有任何 git 提交。「预期架构」标题以下的所有内容描述的都是*目标*系统，而非现有代码。
+CodeCoder 是一个**已落地**的自主 AI agent，使用 Rust 编写。仓库已有 Cargo 项目、23 个源模块(`src/`)、24 个内置工具、48 个测试(46 通过 + 2 个 `#[ignore]` 的 Docker e2e),以及 16 份 ADR(`docs/adr/`)。架构总览见 `ARCHITECTURE.md`;领域术语以 `CONTEXT.md` 为准。
 
-实现时，请先搭建 Cargo 项目脚手架（`cargo init` / 添加 `Cargo.toml`），然后依据 `CONTEXT.md` 中的术语与设计契约来构建功能。
+**已知未实现的部分(文档中已标注,勿误以为已就绪):**
 
-## 命令（目标状态——待 Cargo 项目建立后可用）
+- **Compaction** — `compaction.rs` 目前是存根,原样返回全量历史;ADR 0023 的分层混合压缩是已决策但**未实现**的设计。
+- **Background Agent** — 仅是 `CONTEXT.md` 中命名的 post-v1 概念,**没有任何 runner 文件或 stub**。
+
+改动代码时依据 `CONTEXT.md` 的术语与 `docs/adr/` 的决策契约;新增/修改功能后请同步更新 `ARCHITECTURE.md`、`README.md` 中的相关数字与描述,使文档与代码保持一致。
+
+## 命令
 
 ```bash
 cargo build          # 编译
@@ -21,7 +26,7 @@ cargo run            # 启动 TUI / REPL
 
 关键环境变量：`CODECODER_API_KEY`（真实 LLM 必需）、`CODECODER_MODEL`（默认 `gpt-4o`）、`CODECODER_API_BASE`、`CODECODER_ROOT`（项目根目录，默认为当前工作目录）、`GITHUB_TOKEN`（提升 GitHub rate limit）。完整列表见 `README.md`。
 
-## 预期架构
+## 架构
 
 **「文件系统即自我」** 是核心设计原则：agent 的身份与能力由磁盘上的文件定义，而非硬编码，并在运行时加载/重载：
 
@@ -35,7 +40,7 @@ cargo run            # 启动 TUI / REPL
 
 **事件驱动、多线程内核(OS 线程 + channel,非 tokio/lunatic)。** TUI 线程经 `cmd_tx` 发 `AgentCommand`(仅用户主动意图:ProcessMessage、Shutdown、Cancel);agent 线程经 `event_rx` 回传 `AgentEvent`(流式增量 + 结构化状态)。权限/`ask_user` 应答走 `AgentEvent` 内嵌的 `reply_tx` oneshot,**不走** `cmd_tx`——故 `PermissionResponse` 不是 `AgentCommand`。一个 turn 内工具**串行**执行;取消是协作式(`Cancel` + cancellation token + 子进程 kill)。只有顶层 agent 拥有面向用户的通道;`agent` 工具派生的 sub-agent 汇报回父 agent,其 read-only 的精确含义 = 工具集仅限 `Permission::None` 那批,且深度锁定为 1。详见 `docs/adr/0016`、`0019`。
 
-**三分自我进化:Tool / Skill / Capability。** **Tool** 是编译进二进制的原生原语(约 22 个:读/写/编辑文件、运行命令、带 tree-sitter AST 查询的 glob/grep、web 与 GitHub 搜索、`reverse_api`、git `commit`、`plan`、`todo`、`ask_user`、`agent`、`generate_skill`、`generate_capability`、`use_skill`、`run_capability`)。**Skill** 是 agent 自撰的 `.md` 程序性知识(只改变「怎么想」,不执行);**Capability** 是 agent 自撰的可执行产物(长出新手脚)。二者由 `Registry` 扫描 `skills/`、`capabilities/` 成常驻目录、按需激活。Capability 在自己 manifest 里声明 **Environment**(`Shell`/`Wasm`/`Docker`)× **Lifecycle**(`OneShot`/`OnDemand`/`Persistent`);权限闸门在 `run_capability`(按 `能力名+环境` keying),`generate_*` 仅 `write_file` 级。消息模型 provider 中立,OpenAI 为规范协议。详见 `CONTEXT.md` 与 `docs/adr/0017`、`0018`、`0020`–`0022`。
+**三分自我进化:Tool / Skill / Capability。** **Tool** 是编译进二进制的原生原语(24 个:读/写/编辑文件、运行命令、带 tree-sitter AST 查询的 glob/grep、web 与 GitHub 搜索、`reverse_api`、git `commit`、`plan`、`todo`、`ask_user`、`agent`、`generate_skill`、`generate_capability`、`use_skill`、`run_capability`)。**Skill** 是 agent 自撰的 `.md` 程序性知识(只改变「怎么想」,不执行);**Capability** 是 agent 自撰的可执行产物(长出新手脚)。二者由 `Registry` 扫描 `skills/`、`capabilities/` 成常驻目录、按需激活。Capability 在自己 manifest 里声明 **Environment**(`Shell`/`Wasm`/`Docker`)× **Lifecycle**(`OneShot`/`OnDemand`/`Persistent`);权限闸门在 `run_capability`(按 `能力名+环境` keying),`generate_*` 仅 `write_file` 级。消息模型 provider 中立,OpenAI 为规范协议。详见 `CONTEXT.md` 与 `docs/adr/0017`、`0018`、`0020`–`0022`。
 
 ## 使用领域术语——重要
 

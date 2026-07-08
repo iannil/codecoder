@@ -1,5 +1,7 @@
 # Context compaction
 
+**Status**: Accepted; **not yet implemented**. `compaction.rs` currently returns the full history unchanged (see its `TODO`); the tiered-hybrid strategy below is the decided design, to be built later.
+
 A long-running self-evolving agent will overflow any model window, so the context sent to the provider is compacted — but **compaction only shapes a derived working set; it never destroys the persisted Session**. The on-disk `messages` stay full-fidelity; the `Context Working Set` is recomputed each run from those messages against the current model's window.
 
 ## Trigger and strategy

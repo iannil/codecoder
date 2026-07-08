@@ -29,7 +29,7 @@ cc> /exit      # 退出
 cargo run
 ```
 
-## 内置工具（约 22 个）
+## 内置工具（24 个）
 
 > **Tool / Skill / Capability 三分**:**Tool** 是编译进二进制的原生原语(下表);**Skill** 是 agent 自撰的 `.md` 程序性知识(改变怎么想);**Capability** 是 agent 自撰的可执行产物(长出新手脚)。详见 `CONTEXT.md` 与 `docs/adr/0020`–`0022`。
 
@@ -55,7 +55,9 @@ cargo run
 | `review` | 代码审查 |
 | `plan` | 任务计划 |
 | `todo` | Todo 管理（list/create/update/complete/delete） |
+| `memory` | 持久化 key-value 记忆读写 |
 | `ask_user` | 用户交互 |
+| `confirm` | yes/no 确认对话 |
 | `agent` | 子代理调用 |
 
 ## 文件系统即自我
@@ -127,7 +129,7 @@ project/
 
 ```bash
 cargo build      # 编译
-cargo test       # 运行 712 个测试
+cargo test       # 运行 48 个测试（46 通过 + 2 个 #[ignore] 的 Docker e2e）
 cargo run        # 启动 TUI / REPL
 ```
 

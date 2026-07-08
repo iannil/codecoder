@@ -102,16 +102,6 @@ impl Toolbox {
         self.tools.iter().find(|t| t.name() == name).map(|t| t.as_ref())
     }
 
-    /// Tools the sub-agent may use: exactly the `Permission::None` ones (ADR 0019).
-    /// (Probed with an empty-object arg, sufficient for the built-ins.)
-    pub fn read_only_names(&self, root: &Path) -> Vec<&str> {
-        self.tools
-            .iter()
-            .filter(|t| matches!(t.permission(&json!({}), root), Permission::None))
-            .map(|t| t.name())
-            .collect()
-    }
-
     /// The `tools` array for a chat-completions request.
     pub fn wire_schemas(&self) -> Vec<Value> {
         self.tools

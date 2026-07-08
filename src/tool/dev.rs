@@ -280,13 +280,16 @@ mod tests {
     use super::*;
 
     fn ctx_dir() -> std::path::PathBuf {
-        let d = std::env::temp_dir().join(format!("cc_dev_{}_{}", std::process::id(), rand_suffix()));
+        let d = std::env::temp_dir().join(format!("cc_dev_{}_{}", std::process::id(), unique_suffix()));
         std::fs::create_dir_all(&d).unwrap();
         d
     }
-    fn rand_suffix() -> u64 {
-        use std::time::{SystemTime, UNIX_EPOCH};
-        SystemTime::now().duration_since(UNIX_EPOCH).unwrap().subsec_nanos() as u64
+    // Monotonic per-process counter: guarantees each test gets its own dir even when
+    // the suite runs in parallel (subsec_nanos collided → shared dir → cross-test wipes).
+    fn unique_suffix() -> u64 {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static N: AtomicU64 = AtomicU64::new(0);
+        N.fetch_add(1, Ordering::Relaxed)
     }
 
     #[test]

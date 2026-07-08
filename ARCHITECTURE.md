@@ -1,6 +1,6 @@
 # CodeCoder 架构
 
-自主 AI agent,Rust 编写,**事件驱动、文件系统即自我**。本文串起 23 个源模块 ↔ 16 个 ADR ↔ 23 个内置工具 ↔ 6 点自我进化诉求,供人与未来 agent 导航。术语以 `CONTEXT.md` 为准,决策依据见 `docs/adr/`。
+自主 AI agent,Rust 编写,**事件驱动、文件系统即自我**。本文串起 23 个源模块 ↔ 16 个 ADR ↔ 24 个内置工具 ↔ 6 点自我进化诉求,供人与未来 agent 导航。术语以 `CONTEXT.md` 为准,决策依据见 `docs/adr/`。
 
 ## 一句话
 
@@ -36,7 +36,7 @@
 | `tool/builtin.rs` | 文件/执行/自我进化/委派工具 | 0018 0020 0022 |
 | `tool/{net,dev,search,wasm}.rs` | 联网 / 开发 / glob·grep(含 AST)/ wasm 运行器 | 0018 0021 |
 | `session.rs` | `Session`、自动落盘、前向迁移链、`/resume` | 0004 |
-| `compaction.rs` | 派生的 Context Working Set(不毁持久记录) | 0023 |
+| `compaction.rs` | 派生的 Context Working Set(不毁持久记录)。**v1 存根:原样返回全量历史;分层混合压缩见 0023,尚未实现** | 0023 |
 | `tokenizer.rs` | tiktoken 精确计数 + 模型→窗口表 | 0023 |
 | `registry.rs` | 扫 `skills/`+`capabilities/` → 常驻目录 | 0020 |
 | `capability.rs` | `Environment`/`Lifecycle`/manifest/`RunningServiceTable` | 0021 |
@@ -56,7 +56,7 @@
    - 执行 → `ToolResult` 回灌 → 再问 LLM,直到无工具调用或触及 `MAX_TOOL_ITERATIONS`。
 7. 无工具调用 → `TurnComplete`。
 
-## 工具体系(23 内置)
+## 工具体系(24 内置)
 
 `Tool` 自报 `Permission`(0018):`None`(只读免问)/ `Ask{key}`(细粒度 key,命令类/前缀甜点区)。**子 agent 只能用 `Permission::None` 的一个只读子集(9 个),且无 `agent`——深度锁 1(0019)。**
 
@@ -116,7 +116,7 @@ agent 深思 → generate_skill / generate_capability   (写文件到 skills//ca
 
 ## 测试与验证边界
 
-- **44 个离线单元/集成测试**(默认套件,hermetic)+ **Docker e2e**(`#[ignore]`,`cargo test -- --ignored`)。Wasm e2e 在默认套件内(纯进程内)。
+- **46 个离线单元/集成测试**(默认套件,hermetic)+ **2 个 Docker e2e**(`#[ignore]`,`cargo test -- --ignored`)。Wasm e2e 在默认套件内(纯进程内)。
 - **无法在无 TTY 环境验证 TUI 交互**——需真终端。TUI 观感由人工真机验收。
 - token 计数用 tiktoken(准确);`run_command`/`commit` 走真实 `git`/shell(运行期生效)。
 
