@@ -29,9 +29,9 @@ cc> /exit      # 退出
 cargo run
 ```
 
-## 内置工具（24 个）
+## 内置工具（25 个）
 
-> **Tool / Skill / Capability 三分**:**Tool** 是编译进二进制的原生原语(下表);**Skill** 是 agent 自撰的 `.md` 程序性知识(改变怎么想);**Capability** 是 agent 自撰的可执行产物(长出新手脚)。详见 `CONTEXT.md` 与 `docs/adr/0020`–`0022`。
+> **Tool / Skill / Capability 三分**:**Tool** 是编译进二进制的原生原语(下表);**Skill** 是 agent 自撰的 `.md` 程序性知识(改变怎么想);**Capability** 是 agent 自撰的可执行产物(长出新手脚)。**Skill** 另有一个草稿前身 **Prompt**(`prompts/`,经 `promote_prompt` 转正,见 `docs/adr/0025`)。详见 `CONTEXT.md` 与 `docs/adr/0020`–`0022`、`0025`。
 
 | 工具 | 功能 |
 |------|------|
@@ -43,7 +43,8 @@ cargo run
 | `search_github` | 搜索 GitHub 仓库 (`repos:`) 或代码 (`code:`) |
 | `reverse_api` | 抓取文档页面，提取 API endpoint 签名 |
 | `generate_skill` | 撰写 Skill(`.md` 程序性知识)到 `skills/` |
-| `generate_prompt` | 生成 prompt 模板 |
+| `generate_prompt` | 撰写 Prompt 草稿(Skill 草稿态)到 `prompts/` |
+| `promote_prompt` | 把 `prompts/` 草稿转正为 `skills/` 里的 Skill(删草稿,撞名报错) |
 | `generate_capability` | 撰写 Capability(自撰可执行产物)到 `capabilities/` |
 | `use_skill` | 激活某个 Skill,把全文注入后续 context |
 | `run_capability` | 在声明的 Environment/Lifecycle 中执行某个 Capability |

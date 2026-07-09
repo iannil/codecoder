@@ -6,6 +6,9 @@ use std::path::Path;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EntryKind {
     Skill,
+    /// Draft tier of the Skill kind (ADR 0025): a `prompts/` entry, activated the
+    /// same way as a Skill via `use_skill`, but lower maturity and lower priority.
+    Prompt,
     Capability,
 }
 
@@ -28,6 +31,7 @@ impl Registry {
     pub fn scan(root: &Path) -> Self {
         let mut catalog = Vec::new();
         scan_skills(&root.join("skills"), &mut catalog);
+        scan_prompts(&root.join("prompts"), &mut catalog);
         scan_capabilities(&root.join("capabilities"), &mut catalog);
         catalog.sort_by(|a, b| a.name.cmp(&b.name));
         Registry { catalog }
@@ -39,18 +43,25 @@ impl Registry {
             return String::new();
         }
         let mut skills = Vec::new();
+        let mut drafts = Vec::new();
         let mut caps = Vec::new();
         for e in &self.catalog {
             let line = format!("- {} — {}", e.name, e.description);
             match e.kind {
                 EntryKind::Skill => skills.push(line),
+                EntryKind::Prompt => drafts.push(line),
                 EntryKind::Capability => caps.push(line),
             }
         }
         let mut out = String::new();
-        if !skills.is_empty() {
+        if !skills.is_empty() || !drafts.is_empty() {
             out.push_str("Skills (activate with the `use_skill` tool):\n");
+            // Matured Skills first; lower-priority Prompt drafts after (ADR 0025).
             out.push_str(&skills.join("\n"));
+            if !skills.is_empty() && !drafts.is_empty() {
+                out.push('\n');
+            }
+            out.push_str(&drafts.join("\n"));
             out.push('\n');
         }
         if !caps.is_empty() {
@@ -73,6 +84,26 @@ fn scan_skills(dir: &Path, out: &mut Vec<CatalogEntry>) {
         let text = std::fs::read_to_string(&path).unwrap_or_default();
         let (name, description) = parse_skill_meta(&text, &stem);
         out.push(CatalogEntry { name, description, kind: EntryKind::Skill });
+    }
+}
+
+/// Scan `prompts/` (ADR 0025): draft-tier Skills. Same `.md` shape as a Skill, but
+/// the description is prefixed `[draft]` so the agent prefers matured Skills.
+fn scan_prompts(dir: &Path, out: &mut Vec<CatalogEntry>) {
+    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    for e in entries.flatten() {
+        let path = e.path();
+        if path.extension().and_then(|x| x.to_str()) != Some("md") {
+            continue;
+        }
+        let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("").to_string();
+        let text = std::fs::read_to_string(&path).unwrap_or_default();
+        let (name, description) = parse_skill_meta(&text, &stem);
+        out.push(CatalogEntry {
+            name,
+            description: format!("[draft] {description}"),
+            kind: EntryKind::Prompt,
+        });
     }
 }
 

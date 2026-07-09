@@ -1,5 +1,7 @@
 # Prompt as the draft tier of the Skill kind
 
+**Status**: Accepted; **implemented**. `Registry` scans `prompts/` with a `[draft]` marker, `use_skill` falls back `skills/` → `prompts/`, and `promote_prompt` (the 25th tool) atomically promotes a draft into a Skill. Tests cover the generate → use → promote lifecycle, missing-draft, and name-collision paths.
+
 `generate_prompt` authors a `.md` into `prompts/`. Before this ADR that file was a **write-only orphan** — nothing scanned, injected, or executed it, and the fourth artifact silently contradicted the load-bearing Tool/Skill/Capability triple ([[CONTEXT.md]]). We resolve it not by deleting the tool but by naming what it is: a **Prompt is the draft / probationary tier of the Skill _kind_**, not a fourth kind. Same nature as a Skill (self-authored procedural knowledge, injected into context, executes nothing), lower maturity and lower priority. The triple stands *by kind*; Prompt is a maturity stage *within* the "learned idea" kind.
 
 ## Decisions

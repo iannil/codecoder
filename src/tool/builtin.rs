@@ -219,12 +219,12 @@ impl Tool for UseSkill {
         "use_skill"
     }
     fn description(&self) -> &str {
-        "Activate a Skill by name, returning its full instructions to follow."
+        "Activate a Skill (or a [draft] Prompt) by name, returning its full instructions to follow."
     }
     fn schema(&self) -> Value {
         json!({
             "type": "object",
-            "properties": { "name": { "type": "string", "description": "Skill name (see the catalog)." } },
+            "properties": { "name": { "type": "string", "description": "Skill or draft-prompt name (see the catalog)." } },
             "required": ["name"]
         })
     }
@@ -236,10 +236,12 @@ impl Tool for UseSkill {
         if name.is_empty() {
             return Ok(ToolOutput::err("missing required arg: name"));
         }
-        let path = ctx.root.join("skills").join(format!("{name}.md"));
-        match std::fs::read_to_string(&path) {
+        // Matured Skill wins; fall back to a prompts/ draft of the same name (ADR 0025).
+        let skill = ctx.root.join("skills").join(format!("{name}.md"));
+        let draft = ctx.root.join("prompts").join(format!("{name}.md"));
+        match std::fs::read_to_string(&skill).or_else(|_| std::fs::read_to_string(&draft)) {
             Ok(text) => Ok(ToolOutput::ok(text)),
-            Err(_) => Ok(ToolOutput::err(format!("no such skill: {name}"))),
+            Err(_) => Ok(ToolOutput::err(format!("no such skill or draft: {name}"))),
         }
     }
 }
@@ -518,6 +520,67 @@ impl Tool for GeneratePrompt {
         std::fs::create_dir_all(&dir)?;
         std::fs::write(dir.join(format!("{name}.md")), content)?;
         Ok(ToolOutput::ok(format!("wrote prompt template 'prompts/{name}.md'")))
+    }
+}
+
+pub struct PromotePrompt;
+
+impl Tool for PromotePrompt {
+    fn name(&self) -> &str {
+        "promote_prompt"
+    }
+    fn description(&self) -> &str {
+        "Promote a draft prompts/<name>.md into a durable Skill at skills/<name>.md, \
+         removing the draft. Omit `content` to promote verbatim; pass it to land a \
+         refined version. Errors if the Skill already exists. Takes effect on /reload."
+    }
+    fn schema(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "name": { "type": "string", "description": "Draft prompt name (without .md)." },
+                "content": { "type": "string", "description": "Optional refined skill body; omit to promote the draft verbatim." }
+            },
+            "required": ["name"]
+        })
+    }
+    fn permission(&self, _args: &Value, _root: &Path) -> Permission {
+        // Crosses prompts/ → skills/ but only writes files — gated at write_file level (ADR 0022/0025).
+        Permission::Ask { key: "promote_prompt".into() }
+    }
+    fn run(&self, args: Value, ctx: &mut ToolCtx) -> anyhow::Result<ToolOutput> {
+        let name = args.get("name").and_then(Value::as_str).unwrap_or_default();
+        if name.is_empty() {
+            return Ok(ToolOutput::err("missing required arg: name"));
+        }
+        let draft = ctx.root.join("prompts").join(format!("{name}.md"));
+        let skill = ctx.root.join("skills").join(format!("{name}.md"));
+
+        // The draft must exist — promotion is "this draft earned it", not "create a skill".
+        let draft_body = match std::fs::read_to_string(&draft) {
+            Ok(t) => t,
+            Err(_) => return Ok(ToolOutput::err(format!("no such prompt draft: {name}"))),
+        };
+        // Refuse to clobber a matured, validated Skill (ADR 0025).
+        if skill.exists() {
+            return Ok(ToolOutput::err(format!(
+                "skill '{name}' already exists; refusing to overwrite — rename or edit it instead"
+            )));
+        }
+
+        let body = args.get("content").and_then(Value::as_str).unwrap_or(&draft_body);
+        std::fs::create_dir_all(ctx.root.join("skills"))?;
+        std::fs::write(&skill, body)?;
+        // Atomic intent: skill written, draft removed. If removal fails, the promotion
+        // still stands; surface it so a stale draft can be cleaned up.
+        match std::fs::remove_file(&draft) {
+            Ok(()) => Ok(ToolOutput::ok(format!(
+                "promoted '{name}': wrote skills/{name}.md, removed draft — run /reload to register it"
+            ))),
+            Err(e) => Ok(ToolOutput::ok(format!(
+                "promoted '{name}' to skills/{name}.md, but could not remove prompts/{name}.md ({e}); delete it manually. Run /reload."
+            ))),
+        }
     }
 }
 
@@ -816,6 +879,76 @@ mod tests {
         assert!(cat.contains("echoer — echoes"), "{cat}");
 
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn prompt_draft_lifecycle_generate_use_promote() {
+        use crate::registry::Registry;
+        let dir = std::env::temp_dir().join(format!("cc_prompt_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut ctx = ToolCtx { root: &dir };
+
+        // 1. Author a draft prompt.
+        GeneratePrompt
+            .run(
+                json!({ "name": "tone", "content": "---\nname: tone\ndescription: keep replies terse\n---\nbe terse" }),
+                &mut ctx,
+            )
+            .unwrap();
+
+        // 2. Registry surfaces it under Skills with a [draft] marker (ADR 0025).
+        let cat = Registry::scan(&dir).render_catalog();
+        assert!(cat.contains("tone — [draft] keep replies terse"), "{cat}");
+
+        // 3. use_skill activates the draft by name (skills/ miss → prompts/ fallback).
+        let used = UseSkill.run(json!({ "name": "tone" }), &mut ctx).unwrap();
+        assert!(!used.is_error);
+        assert!(used.content.contains("be terse"));
+
+        // 4. promote_prompt moves it to skills/ and deletes the draft.
+        let promoted = PromotePrompt.run(json!({ "name": "tone" }), &mut ctx).unwrap();
+        assert!(!promoted.is_error, "{}", promoted.content);
+        assert!(dir.join("skills/tone.md").exists());
+        assert!(!dir.join("prompts/tone.md").exists(), "draft should be removed");
+
+        // 5. It is now a matured Skill (no [draft] marker).
+        let cat2 = Registry::scan(&dir).render_catalog();
+        assert!(cat2.contains("tone — keep replies terse"), "{cat2}");
+        assert!(!cat2.contains("[draft]"), "{cat2}");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn promote_prompt_errors_on_missing_draft_and_name_collision() {
+        let dir = std::env::temp_dir().join(format!("cc_promerr_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut ctx = ToolCtx { root: &dir };
+
+        // No draft → error.
+        let miss = PromotePrompt.run(json!({ "name": "ghost" }), &mut ctx).unwrap();
+        assert!(miss.is_error);
+
+        // Draft exists AND a same-named Skill already exists → refuse to overwrite.
+        std::fs::create_dir_all(dir.join("prompts")).unwrap();
+        std::fs::create_dir_all(dir.join("skills")).unwrap();
+        std::fs::write(dir.join("prompts/dup.md"), "draft body").unwrap();
+        std::fs::write(dir.join("skills/dup.md"), "matured body").unwrap();
+        let clash = PromotePrompt.run(json!({ "name": "dup" }), &mut ctx).unwrap();
+        assert!(clash.is_error);
+        // The matured Skill is untouched and the draft survives.
+        assert_eq!(std::fs::read_to_string(dir.join("skills/dup.md")).unwrap(), "matured body");
+        assert!(dir.join("prompts/dup.md").exists());
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn promote_prompt_is_gated_at_write_level() {
+        match PromotePrompt.permission(&json!({ "name": "x" }), std::path::Path::new(".")) {
+            Permission::Ask { key } => assert_eq!(key, "promote_prompt"),
+            _ => panic!("expected Ask"),
+        }
     }
 
     #[test]

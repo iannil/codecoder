@@ -77,7 +77,7 @@ _Avoid_: index, message index, uuid (it is not a UUID; it is a session-local cou
 These three are the load-bearing distinction of the whole system: **Tool is innate, Skill is a learned idea, Capability is a grown limb.** A Skill only changes *how the agent thinks*; a Capability grows *a new hand that acts*. Confusing them is the single most damaging naming error in the codebase.
 
 **Tool**:
-A primitive compiled into the binary and shipped with the release (24 of them: `read_file`, `run_command`, `agent`, `generate_skill`, `generate_capability`, …). The uniform thing an LLM invokes as a `tool_call` within a turn (see `Tool` trait, [[0018-tool-trait-and-permission-keys]]). Fixed at build time — a runtime-authored executable is **not** a Tool, it is a Capability.
+A primitive compiled into the binary and shipped with the release (25 of them: `read_file`, `run_command`, `agent`, `generate_skill`, `generate_capability`, `promote_prompt`, …). The uniform thing an LLM invokes as a `tool_call` within a turn (see `Tool` trait, [[0018-tool-trait-and-permission-keys]]). Fixed at build time — a runtime-authored executable is **not** a Tool, it is a Capability.
 _Avoid_: capability, skill, function, command.
 
 **Skill**:
@@ -85,7 +85,7 @@ A self-authorable `.md` document under `skills/`, auto-registered, packaging **p
 _Avoid_: capability, tool, prompt, plugin.
 
 **Prompt**:
-A self-authored `.md` draft under `prompts/`, authored at runtime via `generate_prompt`. **Not a fourth kind** — it is the **draft / probationary tier of the [[skill]] kind** ("learned idea"): same nature as a Skill (injected procedural knowledge that changes *how the agent thinks*, executes nothing), but lower maturity and **lower priority** than a Skill. It is where the agent parks a half-formed heuristic before it has earned promotion to a durable Skill. The Tool/Skill/Capability triple remains the load-bearing distinction *by kind*; Prompt is a maturity stage *within* the Skill kind, not a peer of it. See [[0025-prompt-as-skill-draft-tier]].
+A self-authored `.md` draft under `prompts/`, authored at runtime via `generate_prompt`. **Not a fourth kind** — it is the **draft / probationary tier of the [[skill]] kind** ("learned idea"): same nature as a Skill (injected procedural knowledge that changes *how the agent thinks*, executes nothing), but lower maturity and **lower priority** than a Skill. It is where the agent parks a half-formed heuristic before it has earned promotion to a durable Skill — promotion is the `promote_prompt` tool, which atomically writes `skills/<name>.md` and deletes the draft (erroring if a Skill of that name already exists). The Tool/Skill/Capability triple remains the load-bearing distinction *by kind*; Prompt is a maturity stage *within* the Skill kind, not a peer of it. See [[0025-prompt-as-skill-draft-tier]].
 _Avoid_: skill (a Prompt is the pre-promotion draft, a Skill is the matured form), capability, tool, prompt-injecting slash command (unrelated — that is a TUI dispatch concept).
 
 **Capability**:
@@ -93,7 +93,7 @@ A self-authored **executable artifact** the agent builds to gain a genuinely new
 _Avoid_: tool (only built-ins are Tools), skill (only non-executing knowledge is a Skill), plugin, module, service (a service is one lifecycle shape of a Capability, not a synonym).
 
 **Registry**:
-The startup-and-`/reload`-time scanner that indexes `skills/` and `capabilities/` into a compact **catalog** (per entry: name + one-line description) kept resident in context, so the agent knows what exists and can autonomously decide whether to use it. Full skill text is injected only on activation (built-in `use_skill` tool); a Capability is executed only when invoked (built-in `run_capability { name, args }` dispatcher, [[0020-skills-and-capabilities-registry]]). Distinct from the OpenAI-facing tool list, which is fixed at the built-in Tools. The **catalog** (lightweight, always resident) is distinct from the **registry** (the scanner/index that produces it).
+The startup-and-`/reload`-time scanner that indexes `skills/`, `prompts/`, and `capabilities/` into a compact **catalog** (per entry: name + one-line description) kept resident in context, so the agent knows what exists and can autonomously decide whether to use it. `prompts/` entries (draft-tier Skills, [[0025-prompt-as-skill-draft-tier]]) are catalogued with a `[draft]` marker and sorted after matured Skills. Full skill text is injected only on activation (built-in `use_skill` tool, which resolves a name against `skills/` first, then `prompts/`); a Capability is executed only when invoked (built-in `run_capability { name, args }` dispatcher, [[0020-skills-and-capabilities-registry]]). Distinct from the OpenAI-facing tool list, which is fixed at the built-in Tools. The **catalog** (lightweight, always resident) is distinct from the **registry** (the scanner/index that produces it).
 _Avoid_: index, store, loader, registry (for the catalog), catalog (for the scanner) — keep the two named parts distinct.
 
 **Environment**:

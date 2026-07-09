@@ -1,6 +1,6 @@
 # CodeCoder 架构
 
-自主 AI agent,Rust 编写,**事件驱动、文件系统即自我**。本文串起 23 个源模块 ↔ 16 个 ADR ↔ 24 个内置工具 ↔ 6 点自我进化诉求,供人与未来 agent 导航。术语以 `CONTEXT.md` 为准,决策依据见 `docs/adr/`。
+自主 AI agent,Rust 编写,**事件驱动、文件系统即自我**。本文串起 23 个源模块 ↔ 17 个 ADR ↔ 25 个内置工具 ↔ 6 点自我进化诉求,供人与未来 agent 导航。术语以 `CONTEXT.md` 为准,决策依据见 `docs/adr/`。
 
 ## 一句话
 
@@ -38,7 +38,7 @@
 | `session.rs` | `Session`、自动落盘、前向迁移链、`/resume` | 0004 |
 | `compaction.rs` | 派生的 Context Working Set(不毁持久记录)。**v1:tier-1 已实现(丢 Reasoning + 占位化旧 ToolResult 正文,保护 anchor 与近端 tail);tier-2 摘要见 0023,仍 deferred** | 0023 |
 | `tokenizer.rs` | tiktoken 精确计数 + 模型→窗口表 | 0023 |
-| `registry.rs` | 扫 `skills/`+`capabilities/` → 常驻目录 | 0020 |
+| `registry.rs` | 扫 `skills/`+`prompts/`+`capabilities/` → 常驻目录(prompts 标 `[draft]`) | 0020 0025 |
 | `capability.rs` | `Environment`/`Lifecycle`/manifest/`RunningServiceTable` | 0021 |
 | `memory.rs` | `memory/<key>` 文件级 KV + 数据索引 | — |
 | `tui/{mod,render,run}` | `TuiApp`/派生 `Mode`/`Theme`/`Dialog`/`Popup`、渲染、主循环 | 0001 0003 0024 |
@@ -56,7 +56,7 @@
    - 执行 → `ToolResult` 回灌 → 再问 LLM,直到无工具调用或触及 `MAX_TOOL_ITERATIONS`。
 7. 无工具调用 → `TurnComplete`。
 
-## 工具体系(24 内置)
+## 工具体系(25 内置)
 
 `Tool` 自报 `Permission`(0018):`None`(只读免问)/ `Ask{key}`(细粒度 key,命令类/前缀甜点区)。**子 agent 只能用 `Permission::None` 的一个只读子集(9 个),且无 `agent`——深度锁 1(0019)。**
 
@@ -68,7 +68,7 @@
 | 执行 | run_command | Ask(`run_command:<类>`) | |
 | 自我进化 | use_skill | None | ✓ |
 | | run_capability | Ask(`run_capability:<名>@<env>`) | |
-| | generate_skill · generate_prompt · generate_capability | Ask | |
+| | generate_skill · generate_prompt · promote_prompt · generate_capability | Ask | |
 | 委派/交互 | agent(子 agent)· review(只读 review 子 agent)· ask_user | 拦截 | |
 | 联网 | search_web · search_github · reverse_api | None | ✓✓✓ |
 | 开发 | diff | None | ✓ |
@@ -80,10 +80,14 @@
 三分(`CONTEXT.md`):**Tool 天生(编译进二进制)· Skill 学来的想法(`.md` 知识,只改怎么想)· Capability 造出来的手脚(可执行物,真行动)。**
 
 ```
-agent 深思 → generate_skill / generate_capability   (写文件到 skills//capabilities/)
-           → /reload                                 (Registry 重扫 → 常驻目录 + System prompt)
-           → use_skill(注入全文) / run_capability(执行)  (后续按需自主选择)
+agent 深思 → generate_skill / generate_prompt / generate_capability
+                                                (写文件到 skills//prompts//capabilities/)
+           → /reload                            (Registry 重扫 → 常驻目录 + System prompt)
+           → use_skill(注入全文,含 [draft] Prompt) / run_capability(执行)
+           → promote_prompt                     (草稿证明有用后 → skills/,删草稿,ADR 0025)
 ```
+
+**Skill 有一个更低成熟度的草稿前身 `Prompt`(`prompts/`,0025):同为注入式知识,`Registry` 标 `[draft]`、排在 Skills 之后,`use_skill` 按 `skills/`→`prompts/` 回退激活;`promote_prompt` 原子地把草稿转正为 Skill 并删草稿(撞名报错)。它不是第四种 kind,是"学来的想法"这一类的草稿台阶。**
 
 **Capability 执行**(0021)= `Environment` × `Lifecycle`:
 
@@ -112,7 +116,7 @@ agent 深思 → generate_skill / generate_capability   (写文件到 skills//ca
 
 ## ADR 索引
 
-`0001` TUI 键位与 Mode 语义 · `0002` slash 本地派发 · `0003` 中心 Theme · `0004` Session 持久化与迁移 · `0005` 权限 scope 与 allowlist · `0007` prompt 注入 slash · `0015` 统一消息模型 · `0016` channel 拓扑与事件模型 · `0017` provider 中立消息模型 · `0018` Tool trait 与 PermissionKey · `0019` 子 agent 能力边界 · `0020` Skills/Capabilities Registry · `0021` Capability 环境与生命周期 · `0022` 自撰安全回路 · `0023` 上下文压缩 · `0024` TUI 视口与渲染循环。
+`0001` TUI 键位与 Mode 语义 · `0002` slash 本地派发 · `0003` 中心 Theme · `0004` Session 持久化与迁移 · `0005` 权限 scope 与 allowlist · `0007` prompt 注入 slash · `0015` 统一消息模型 · `0016` channel 拓扑与事件模型 · `0017` provider 中立消息模型 · `0018` Tool trait 与 PermissionKey · `0019` 子 agent 能力边界 · `0020` Skills/Capabilities Registry · `0021` Capability 环境与生命周期 · `0022` 自撰安全回路 · `0023` 上下文压缩 · `0024` TUI 视口与渲染循环 · `0025` Prompt 作为 Skill 草稿层。
 
 ## 测试与验证边界
 

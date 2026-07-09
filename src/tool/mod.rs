@@ -60,6 +60,7 @@ impl Toolbox {
                 Box::new(builtin::RunCapability),
                 Box::new(builtin::GenerateSkill),
                 Box::new(builtin::GeneratePrompt),
+                Box::new(builtin::PromotePrompt),
                 Box::new(builtin::GenerateCapability),
                 Box::new(builtin::Agent),
                 Box::new(builtin::AskUser),
