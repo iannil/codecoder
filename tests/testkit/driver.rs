@@ -154,6 +154,102 @@ pub fn run_turn(
     }
 }
 
+/// A single step in a multi-step drive of one long-lived agent thread.
+pub enum Step {
+    /// Send `ProcessMessage(_)` and drain to `TurnComplete`.
+    Msg(String),
+    /// Send `AgentCommand::Reload` (rescan skills/prompts/capabilities + rebuild
+    /// system prompt) and drain to its `TurnComplete`.
+    Reload,
+}
+
+/// Drive several steps over ONE agent thread, so state authored in an early step
+/// (e.g. a skill written by `generate_skill`) is visible to a later step after a
+/// `Reload`. Reuses `reply_for` for permission round-trips (no duplicated match).
+/// Ends with `Shutdown` + join and returns the accumulated `RunOutcome` (all
+/// events across all steps, plus every recorded provider request).
+pub fn run_steps(
+    root: PathBuf,
+    provider: Arc<dyn Provider>,
+    recorder: Recorder,
+    steps: Vec<Step>,
+    perm: PermPolicy,
+) -> RunOutcome {
+    let (cmd_tx, cmd_rx) = mpsc::channel::<AgentCommand>();
+    let (event_tx, event_rx) = mpsc::channel::<AgentEvent>();
+    let agent = AgentLoop::new(provider, "test-model", 4096, 0.0, root);
+    let handle = thread::spawn(move || agent.run(cmd_rx, event_tx));
+
+    let mut events = Vec::new();
+    let start = Instant::now();
+    let deadline = Duration::from_secs(5);
+
+    for step in steps {
+        match step {
+            Step::Msg(m) => {
+                cmd_tx.send(AgentCommand::ProcessMessage(m)).unwrap();
+            }
+            Step::Reload => {
+                cmd_tx.send(AgentCommand::Reload).unwrap();
+            }
+        }
+        // Both ProcessMessage and Reload terminate with a `TurnComplete`; drain
+        // (answering any blocking round-trip) until it arrives or we time out.
+        loop {
+            match event_rx.recv_timeout(deadline) {
+                Ok(AgentEvent::TurnComplete) => {
+                    events.push(AgentEvent::TurnComplete);
+                    break;
+                }
+                Ok(AgentEvent::PermissionRequest {
+                    key,
+                    preview,
+                    reply_tx,
+                }) => {
+                    let _ = reply_tx.send(reply_for(perm));
+                    events.push(AgentEvent::PermissionRequest {
+                        key,
+                        preview,
+                        reply_tx: mpsc::channel().0,
+                    });
+                }
+                Ok(AgentEvent::AskUser { prompt, reply_tx }) => {
+                    let _ = reply_tx.send(String::new());
+                    events.push(AgentEvent::AskUser {
+                        prompt,
+                        reply_tx: mpsc::channel().0,
+                    });
+                }
+                Ok(AgentEvent::Confirm { prompt, reply_tx }) => {
+                    let _ = reply_tx.send(true);
+                    events.push(AgentEvent::Confirm {
+                        prompt,
+                        reply_tx: mpsc::channel().0,
+                    });
+                }
+                Ok(AgentEvent::PlanApproval { plan, reply_tx }) => {
+                    let _ = reply_tx.send(true);
+                    events.push(AgentEvent::PlanApproval {
+                        plan,
+                        reply_tx: mpsc::channel().0,
+                    });
+                }
+                Ok(other) => events.push(other),
+                Err(_) => break, // timeout — move on to the next step
+            }
+        }
+    }
+
+    let _ = cmd_tx.send(AgentCommand::Shutdown);
+    let _ = handle.join();
+    let requests = recorder.lock().unwrap().clone();
+    RunOutcome {
+        events,
+        requests,
+        elapsed: start.elapsed(),
+    }
+}
+
 /// Cooperative-cancellation variant. Drives one turn, but the instant the first
 /// `ToolStarted` event arrives it trips the agent's real `CancelToken` (the same
 /// mechanism the TUI uses — a shared atomic flag, ADR 0016) and, belt-and-braces,
