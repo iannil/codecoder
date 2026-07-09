@@ -161,6 +161,10 @@ pub enum Step {
     /// Send `AgentCommand::Reload` (rescan skills/prompts/capabilities + rebuild
     /// system prompt) and drain to its `TurnComplete`.
     Reload,
+    /// Send `AgentCommand::Resume` (load + forward-migrate the latest session on
+    /// disk and adopt it as the live session, ADR 0004). Terminates with a
+    /// `Notice` + `TurnComplete`, drained by the same loop as the other steps.
+    Resume,
 }
 
 /// Drive several steps over ONE agent thread, so state authored in an early step
@@ -191,6 +195,9 @@ pub fn run_steps(
             }
             Step::Reload => {
                 cmd_tx.send(AgentCommand::Reload).unwrap();
+            }
+            Step::Resume => {
+                cmd_tx.send(AgentCommand::Resume).unwrap();
             }
         }
         // Both ProcessMessage and Reload terminate with a `TurnComplete`; drain
