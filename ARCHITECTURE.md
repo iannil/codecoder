@@ -36,7 +36,7 @@
 | `tool/builtin.rs` | 文件/执行/自我进化/委派工具 | 0018 0020 0022 |
 | `tool/{net,dev,search,wasm}.rs` | 联网 / 开发 / glob·grep(含 AST)/ wasm 运行器 | 0018 0021 |
 | `session.rs` | `Session`、自动落盘、前向迁移链、`/resume` | 0004 |
-| `compaction.rs` | 派生的 Context Working Set(不毁持久记录)。**v1 存根:原样返回全量历史;分层混合压缩见 0023,尚未实现** | 0023 |
+| `compaction.rs` | 派生的 Context Working Set(不毁持久记录)。**v1:tier-1 已实现(丢 Reasoning + 占位化旧 ToolResult 正文,保护 anchor 与近端 tail);tier-2 摘要见 0023,仍 deferred** | 0023 |
 | `tokenizer.rs` | tiktoken 精确计数 + 模型→窗口表 | 0023 |
 | `registry.rs` | 扫 `skills/`+`capabilities/` → 常驻目录 | 0020 |
 | `capability.rs` | `Environment`/`Lifecycle`/manifest/`RunningServiceTable` | 0021 |

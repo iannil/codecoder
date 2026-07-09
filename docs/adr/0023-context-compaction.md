@@ -1,6 +1,6 @@
 # Context compaction
 
-**Status**: Accepted; **not yet implemented**. `compaction.rs` currently returns the full history unchanged (see its `TODO`); the tiered-hybrid strategy below is the decided design, to be built later.
+**Status**: Accepted; **tier 1 implemented, tier 2 deferred**. `compaction.rs::working_set` now applies tier 1 (drop `Reasoning`, elide old `ToolResult` bodies) when the full history crosses the threshold, protecting the anchor and a recent tail. Tier 2 (LLM summarization of the oldest span) is still unbuilt.
 
 A long-running self-evolving agent will overflow any model window, so the context sent to the provider is compacted — but **compaction only shapes a derived working set; it never destroys the persisted Session**. The on-disk `messages` stay full-fidelity; the `Context Working Set` is recomputed each run from those messages against the current model's window.
 
@@ -21,3 +21,10 @@ If compaction rewrote history in place, the autosaved Session (see [[0004-sessio
 - switching to a larger-window model automatically "decompresses" an old conversation.
 
 This mirrors the derived-`Mode` principle ([[0001-tui-keybinding-and-mode-semantics]]): anything derivable is derived, never stored as state that can drift.
+
+## Implementation notes (tier 1)
+
+- **The threshold is evaluated against the full history size, never the compacted size.** `working_set` recomputes `count_tokens` on the untouched `messages` each turn. Feeding the post-compaction count back into `should_compact` would lower it, un-trip the threshold, and oscillate (compact → shrink → grow → overflow).
+- **`ToolResult` bodies are elided, not removed.** The item is kept with a `[elided …]` placeholder so the `tool_call` ↔ `tool_call_id` pairing survives — OpenAI rejects a `tool_call` with no matching tool response.
+- **Evicting `Reasoning` does not shrink the provider request** — the wire layer already skips it ([[0004-session-persistence-and-migration]]). Its removal instead realigns `count_tokens` (which *does* count it) with what is actually sent, so `ctx%` stops overstating the payload. Only `ToolResult` elision reduces the real request.
+- `should_compact` is now live (called inside `working_set`); it is no longer a wired-to-nothing detector.

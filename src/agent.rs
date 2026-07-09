@@ -251,7 +251,7 @@ impl AgentLoop {
 
             // Only the derived working set is sent to the provider (ADR 0023),
             // prefixed by the System prompt (AGENTS.md + catalog, ADR 0020).
-            let working = compaction::working_set(&self.session.messages, self.model_window);
+            let working = compaction::working_set(&self.model, &self.session.messages, self.model_window);
             let mut messages = Vec::with_capacity(working.len() + 1);
             if !self.system_prompt.is_empty() {
                 messages.push(Message::text(u64::MAX, Role::System, self.system_prompt.clone()));
