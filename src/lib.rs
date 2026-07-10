@@ -4,6 +4,7 @@
 #![allow(dead_code)]
 
 pub mod agent;
+pub mod background;
 pub mod capability;
 pub mod compaction;
 pub mod config;
@@ -22,6 +23,7 @@ use std::sync::mpsc;
 use std::thread;
 
 pub use agent::{AgentCommand, AgentEvent, AgentLoop, PermissionReply};
+pub use background::BgOutcome;
 pub use config::Config;
 pub use message::{Message, MessageItem, Role};
 pub use permission::PermScope;
@@ -37,6 +39,32 @@ pub fn select_provider(cfg: &Config) -> Arc<dyn Provider> {
         Some(_) => Arc::new(provider::openai::OpenAiClient::new(cfg)),
         None => Arc::new(provider::stub::StubClient),
     }
+}
+
+/// Headless Background Agent entry (ADR 0026): pick the provider, run one task,
+/// print a report to stdout, persist the session. Scheduling is external.
+pub fn run_background(cfg: Config, task: String) -> anyhow::Result<()> {
+    let provider = select_provider(&cfg);
+    let outcome = background::run_background(
+        provider,
+        cfg.model.clone(),
+        cfg.max_tokens,
+        cfg.temperature,
+        cfg.root.clone(),
+        task,
+    )?;
+    println!("=== background agent result ===");
+    if !outcome.final_text.trim().is_empty() {
+        println!("{}", outcome.final_text.trim());
+    }
+    if !outcome.tool_calls.is_empty() {
+        println!("tools executed: {}", outcome.tool_calls.join(", "));
+    }
+    if !outcome.denied.is_empty() {
+        println!("denied/errors: {}", outcome.denied.join(" | "));
+    }
+    println!("=== summary: {} tools, {} denied ===", outcome.tool_calls.len(), outcome.denied.len());
+    Ok(())
 }
 
 /// Kernel wiring (ADR 0016): OS threads + channels; TUI owns the main thread (0024).
