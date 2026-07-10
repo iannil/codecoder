@@ -120,6 +120,10 @@ pub struct AgentLoop {
     temperature: f32,
     next_id: MessageId,
     cancel: CancelToken,
+    /// No user is present (Background Agent, ADR 0026). Changes the permission
+    /// gate: an Ask-tool not in an allowlist is auto-denied instead of prompting,
+    /// and ask_user/confirm/plan short-circuit — there is no one to answer.
+    headless: bool,
     /// Derived tier-2 summary overlay (ADR 0023); never persisted.
     tier2: Option<Tier2Summary>,
 }
@@ -132,7 +136,28 @@ impl AgentLoop {
         temperature: f32,
         root: PathBuf,
     ) -> Self {
-        Self::build(provider, model.into(), max_tokens, temperature, root, Toolbox::builtin(), true)
+        Self::build(provider, model.into(), max_tokens, temperature, root, Toolbox::builtin(), true, false)
+    }
+
+    /// A Background Agent (ADR 0026): full builtin toolbox, persists its session,
+    /// but runs headless (no user present) — the permission gate auto-denies any
+    /// Ask-tool not pre-authorized in an allowlist.
+    pub fn new_background(
+        provider: Arc<dyn Provider>,
+        model: impl Into<String>,
+        max_tokens: u32,
+        temperature: f32,
+        root: PathBuf,
+    ) -> Self {
+        Self::build(provider, model.into(), max_tokens, temperature, root, Toolbox::builtin(), true, true)
+    }
+
+    /// Drive exactly one turn to completion (headless). Thin public wrapper over
+    /// the internal turn loop so a Background runner can invoke it without the
+    /// full command-channel run loop.
+    pub fn run_one_turn(&mut self, task: String, event_tx: &Sender<AgentEvent>) {
+        self.cancel.reset();
+        self.process_turn(task, event_tx);
     }
 
     /// A depth-1 sub-agent (ADR 0019): read-only toolbox (only `Permission::None`
@@ -144,7 +169,7 @@ impl AgentLoop {
         temperature: f32,
         root: PathBuf,
     ) -> Self {
-        Self::build(provider, model, max_tokens, temperature, root, Toolbox::read_only_child(), false)
+        Self::build(provider, model, max_tokens, temperature, root, Toolbox::read_only_child(), false, false)
     }
 
     fn build(
@@ -155,6 +180,7 @@ impl AgentLoop {
         root: PathBuf,
         toolbox: Toolbox,
         persist: bool,
+        headless: bool,
     ) -> Self {
         let stamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -178,6 +204,7 @@ impl AgentLoop {
             temperature,
             next_id: 0,
             cancel: CancelToken::default(),
+            headless,
             tier2: None,
         }
     }
@@ -433,6 +460,13 @@ impl AgentLoop {
         if name == "agent" {
             return self.spawn_sub_agent(call_id, &args, event_tx);
         }
+        if self.headless && (name == "ask_user" || name == "confirm" || name == "plan") {
+            return ToolOutcome::Result(MessageItem::ToolResult {
+                call_id: call_id.to_string(),
+                output: format!("denied: '{name}' requires a user, none present (headless)"),
+                is_error: true,
+            });
+        }
         if name == "ask_user" {
             return self.ask_user(call_id, &args, event_tx);
         }
@@ -472,6 +506,13 @@ impl AgentLoop {
         // allowlist, else a blocking prompt over the embedded reply_tx (ADR 0016).
         if let Permission::Ask { key } = tool.permission(&args, &self.root) {
             if !self.allowlist.allows(&key) && !self.project_allowlist.allows(&key) {
+                if self.headless {
+                    return ToolOutcome::Result(MessageItem::ToolResult {
+                        call_id: call_id.to_string(),
+                        output: format!("denied: no user present; '{key}' not in project allowlist"),
+                        is_error: true,
+                    });
+                }
                 let (reply_tx, reply_rx) = channel();
                 let _ = event_tx.send(AgentEvent::PermissionRequest {
                     key: key.clone(),
@@ -999,6 +1040,43 @@ mod tests {
         let last = agent.session.messages.last().unwrap();
         assert!(matches!(&last.items[0], MessageItem::Text { text } if text == "done"));
 
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn headless_auto_denies_unauthorized_ask_tool_without_prompting() {
+        use std::sync::mpsc::channel;
+        // Scripted provider: first reply calls write_file; second reply is bare text
+        // so the tool loop terminates.
+        struct WriteThenStop { n: std::sync::Mutex<u32> }
+        impl Provider for WriteThenStop {
+            fn name(&self) -> &str { "write-then-stop" }
+            fn complete(&self, _req: &CompletionRequest) -> anyhow::Result<Message> {
+                let mut n = self.n.lock().unwrap();
+                *n += 1;
+                if *n == 1 {
+                    Ok(Message::new(0, Role::Assistant, vec![MessageItem::ToolCall {
+                        id: "c1".into(), name: "write_file".into(),
+                        args: serde_json::json!({"path": "hacked.txt", "content": "x"}),
+                    }]))
+                } else {
+                    Ok(Message::text(0, Role::Assistant, "done"))
+                }
+            }
+        }
+        let dir = std::env::temp_dir().join(format!("cc_bg_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let provider = std::sync::Arc::new(WriteThenStop { n: std::sync::Mutex::new(0) });
+        let mut agent = AgentLoop::new_background(provider, "test-model", 4096, 0.0, dir.clone());
+        let (tx, rx) = channel();
+        agent.run_one_turn("write a file".into(), &tx);
+        drop(tx);
+        let events: Vec<_> = rx.into_iter().collect();
+        // No permission prompt was emitted (no one to answer in headless).
+        assert!(!events.iter().any(|e| matches!(e, AgentEvent::PermissionRequest { .. })),
+            "headless must not emit PermissionRequest");
+        // The unauthorized write did not happen.
+        assert!(!dir.join("hacked.txt").exists(), "unauthorized write_file must be denied");
         std::fs::remove_dir_all(&dir).ok();
     }
 }
