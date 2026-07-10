@@ -199,3 +199,41 @@ fn generate_capability_writes_manifest_and_runs_shell() {
         out.permission_keys()
     );
 }
+
+// Cooperative cancellation reaches a long-running shell Capability too (ADR 0016):
+// run_capability runs `sh -c <entry>` through the shared run_shell_cancellable
+// helper, so flipping the token mid-run kills the child. Pre-seed a slow shell
+// capability on disk (run_capability reads the manifest directly — no reload
+// needed), then cancel it right after it starts.
+#[test]
+fn cancel_interrupts_long_running_capability() {
+    let ws = Workspace::new();
+    ws.write("AGENTS.md", "x");
+    ws.write(
+        "capabilities/slow/manifest.json",
+        r#"{"name":"slow","description":"sleeps","environment":"shell","lifecycle":"one_shot","entry":"sleep 5"}"#,
+    );
+    let (p, rec) = ScriptedProvider::new(vec![assistant_tool_call(
+        "c1",
+        "run_capability",
+        json!({"name": "slow"}),
+    )]);
+    let out = run_turn_with_cancel(
+        ws.root(),
+        p,
+        rec,
+        "run the slow capability",
+        PermPolicy::GrantOnce,
+    );
+
+    assert!(
+        out.elapsed < std::time::Duration::from_secs(3),
+        "cancelling an in-flight shell capability must return promptly; took {:?}",
+        out.elapsed
+    );
+    let finished = out.tool_outputs("run_capability");
+    assert!(
+        !finished.iter().any(|(is_err, _)| !is_err),
+        "the cancelled capability must not report a successful finish; got {finished:?}"
+    );
+}
