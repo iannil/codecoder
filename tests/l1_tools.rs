@@ -124,11 +124,28 @@ fn write_file_denied_leaves_no_file() {
         json!({"path": "no.txt", "content": "X"}),
     )]);
     let out = run_turn(ws.root(), p, rec, "write", PermPolicy::Deny, vec![]);
+    // Positive controls — prove the GUARD fired, not that the tool was simply
+    // never reached (a hang or mis-dispatch would also leave the file absent):
+    //   (a) the turn ran to completion (did not hit the 5s driver timeout),
+    //   (b) the Ask gate actually asked before denying (a write_file perm key),
+    // and only THEN (c) the absence assertion is meaningful.
+    assert!(
+        out.completed,
+        "turn must run to completion, not hang; a timed-out turn also leaves the file absent"
+    );
+    assert!(
+        out.permission_keys().iter().any(|k| k.contains("write_file")),
+        "denied write must still pass through the Ask gate (write_file perm key); keys were {:?}",
+        out.permission_keys()
+    );
     assert!(
         !ws.exists("no.txt"),
         "denied write must not create the file"
     );
-    let _ = out;
+    // NOTE: on Deny the agent returns the denial `ToolResult` and short-circuits
+    // BEFORE emitting the `ToolStarted`/`ToolFinished` pair (src/agent.rs), so
+    // `out.tool_outputs("write_file")` is intentionally empty — we do not assert
+    // on it here (see brief's optional clause).
 }
 
 #[test]
@@ -254,11 +271,24 @@ fn run_command_denied_does_not_execute() {
         json!({"cmd": "touch denied.flag"}),
     )]);
     let out = run_turn(ws.root(), p, rec, "run", PermPolicy::Deny, vec![]);
+    // Positive controls (see write_file_denied_leaves_no_file): prove the turn
+    // completed and the Ask gate fired, so absence reflects a real denial rather
+    // than a hung/mis-dispatched turn.
+    assert!(
+        out.completed,
+        "turn must run to completion, not hang; a timed-out turn also leaves the file absent"
+    );
+    assert!(
+        out.permission_keys()
+            .iter()
+            .any(|k| k.starts_with("run_command")),
+        "denied run_command must still pass through the Ask gate (run_command perm key); keys were {:?}",
+        out.permission_keys()
+    );
     assert!(
         !ws.exists("denied.flag"),
         "denied run_command must not execute the command"
     );
-    let _ = out;
 }
 
 // ---------------------------------------------------------------------------

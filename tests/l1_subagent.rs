@@ -95,12 +95,43 @@ fn subagent_cannot_write_files() {
     ]);
     let out = run_turn(ws.root(), p, rec, "delegate-write", PermPolicy::GrantOnce, vec![]);
 
+    // Positive control #1 — the turn ran to completion (no hang). Without this, a
+    // driver 5s timeout (or a mis-dispatched turn where the child never ran) would
+    // ALSO leave `hacked.txt` absent and pass this test vacuously.
+    assert!(
+        out.completed,
+        "turn must run to completion, not hang; a timed-out turn also leaves hacked.txt absent"
+    );
+
+    // Positive control #2 — prove the child ACTUALLY ATTEMPTED the write and was
+    // REFUSED, rather than the write simply never being reached. When the child
+    // calls a tool absent from `read_only_child()`, `dispatch_tool` returns an
+    // error `ToolResult` ("unknown tool: write_file") for call_id "s1"
+    // (src/agent.rs). That result is carried into the child's next recorded
+    // request. Finding it proves the guard fired at the toolset boundary.
+    let write_refused = out.requests.iter().any(|r| {
+        r.messages.iter().any(|m| {
+            m.items.iter().any(|it| {
+                matches!(it, MessageItem::ToolResult { call_id, output, is_error }
+                    if call_id == "s1"
+                        && *is_error
+                        && output.contains("unknown tool")
+                        && output.contains("write_file"))
+            })
+        })
+    });
+    assert!(
+        write_refused,
+        "sub-agent's write_file attempt must be refused with an error ToolResult \
+         (unknown tool: write_file) — proving the write was attempted and guarded, \
+         not merely never reached"
+    );
+
     // Read-only enforcement: the write must not have landed on disk.
     assert!(
         !ws.exists("hacked.txt"),
         "read-only sub-agent must not be able to write files"
     );
-    let _ = out;
 }
 
 #[test]

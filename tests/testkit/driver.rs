@@ -35,6 +35,14 @@ pub struct RunOutcome {
     /// Wall-clock duration the driver observed for the turn. Only meaningful for
     /// `run_turn_with_cancel`; `run_turn` reports the full drive time.
     pub elapsed: Duration,
+    /// True iff the drive loop exited because it observed `AgentEvent::TurnComplete`
+    /// (the turn ran to completion); false if it exited via the 5s `recv_timeout`
+    /// (a hung/mis-dispatched turn). Negative "absence" tests read this to prove a
+    /// tool was actually reached and guarded — not merely never run. For
+    /// `run_steps` this reflects whether the LAST step completed; for
+    /// `run_turn_with_cancel` it is left `false` (that path intentionally may not
+    /// complete).
+    pub completed: bool,
 }
 
 impl RunOutcome {
@@ -91,10 +99,12 @@ pub fn run_turn(
     let mut events = Vec::new();
     let deadline = Duration::from_secs(5);
     let start = Instant::now();
+    let mut completed = false;
     loop {
         match event_rx.recv_timeout(deadline) {
             Ok(AgentEvent::TurnComplete) => {
                 events.push(AgentEvent::TurnComplete);
+                completed = true;
                 break;
             }
             Ok(AgentEvent::PermissionRequest {
@@ -151,6 +161,7 @@ pub fn run_turn(
         events,
         requests,
         elapsed: start.elapsed(),
+        completed,
     }
 }
 
@@ -187,8 +198,12 @@ pub fn run_steps(
     let mut events = Vec::new();
     let start = Instant::now();
     let deadline = Duration::from_secs(5);
+    // Tracks whether the CURRENT step reached `TurnComplete`; after the loop it
+    // reflects the LAST step's outcome (true = completed, false = timed out).
+    let mut completed = false;
 
     for step in steps {
+        completed = false;
         match step {
             Step::Msg(m) => {
                 cmd_tx.send(AgentCommand::ProcessMessage(m)).unwrap();
@@ -206,6 +221,7 @@ pub fn run_steps(
             match event_rx.recv_timeout(deadline) {
                 Ok(AgentEvent::TurnComplete) => {
                     events.push(AgentEvent::TurnComplete);
+                    completed = true;
                     break;
                 }
                 Ok(AgentEvent::PermissionRequest {
@@ -254,6 +270,7 @@ pub fn run_steps(
         events,
         requests,
         elapsed: start.elapsed(),
+        completed,
     }
 }
 
@@ -332,5 +349,9 @@ pub fn run_turn_with_cancel(
         events,
         requests,
         elapsed,
+        // This path intentionally may not run to completion (it trips cancel
+        // mid-turn); leave `completed` false. Its callers assert on cancellation
+        // signals, not on `completed`.
+        completed: false,
     }
 }
