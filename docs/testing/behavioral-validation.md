@@ -32,9 +32,11 @@ CodeCoder 的测试套件是一个**黑盒行为验证**分层：集成测试只
 
 - **L2 pty 冒烟**（`tests/l2_pty_smoke.rs`）：在伪终端下 spawn 真实二进制，注入
   `CODECODER_SCRIPT`（一个序列化 `Vec<Message>` 的 JSON，单条 `assistant_text` 回合）+
-  `CODECODER_ROOT`=临时目录，发一行用户输入后读取输出，断言脚本文本被 TUI 渲染，再发 `/exit`
-  收尾。这是一个**最小、门控**的骨架：pty 时序天然易抖，契约是「可编译 + opt-in 时可跑」，
-  非「绝对鲁棒」。
+  `CODECODER_ROOT`=临时目录，发一行用户输入（Enter 单独发送，避免批量 CR 被吞）后读取输出，
+  断言脚本文本被 TUI 渲染，再发 `/exit` 收尾。测试**自限时**（reader 线程 + `recv_timeout` +
+  `kill()` 收尾，**永不挂死**）。CI（`.github/workflows/ci.yml`）以**非阻塞 job**（`continue-on-error`
+  + 硬 `timeout-minutes`）运行它——pty 时序在无头 runner 上可能抖动，故不作合并门禁；主门禁是
+  hermetic 的 `cargo test`。本机实测稳定通过（~1.8s）。
 - **L3 真实 LLM 冒烟**（`tests/l3_llm_smoke.rs`，**优先冒烟项**）：走与 L1 相同的
   `AgentLoop` + 真实工具，但用 `select_provider(&cfg)` 换成真实 provider，请模型创建
   `hello.txt`，只断言文件系统面（文件存在）。

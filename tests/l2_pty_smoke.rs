@@ -65,40 +65,68 @@ fn tui_boots_and_renders_turn() {
     let mut writer = pty.master.take_writer().expect("pty writer");
 
     // 3) Give the TUI a moment to enter its alternate screen + first render,
-    //    then send a user line (submitted with Enter) followed by `/exit`.
+    //    then type a user line and submit it with a separate Enter (some terminals
+    //    drop a CR batched onto the same write as the text).
     std::thread::sleep(Duration::from_millis(800));
-    let _ = writer.write_all(b"hello there\r");
+    let _ = writer.write_all(b"hello there");
     let _ = writer.flush();
-    std::thread::sleep(Duration::from_millis(600));
+    std::thread::sleep(Duration::from_millis(300));
+    let _ = writer.write_all(b"\r");
+    let _ = writer.flush();
+    std::thread::sleep(Duration::from_millis(400));
 
-    // Drain output for a bounded window, watching for the scripted text.
+    // Drain output for a bounded window, watching for the scripted text. A reader
+    // thread pumps bytes into a channel so the main loop enforces a REAL wall-clock
+    // deadline via recv_timeout — portable_pty's reader.read() blocks, so polling it
+    // directly would ignore the deadline and hang if the child goes quiet.
+    let (byte_tx, byte_rx) = std::sync::mpsc::channel::<Vec<u8>>();
+    std::thread::spawn(move || {
+        let mut buf = [0u8; 4096];
+        loop {
+            match reader.read(&mut buf) {
+                Ok(0) | Err(_) => break, // EOF or error: child gone
+                Ok(n) => {
+                    if byte_tx.send(buf[..n].to_vec()).is_err() {
+                        break;
+                    }
+                }
+            }
+        }
+    });
+
     let mut seen = String::new();
-    let mut buf = [0u8; 4096];
-    let deadline = Instant::now() + Duration::from_secs(6);
+    let deadline = Instant::now() + Duration::from_secs(8);
     let mut sent_exit = false;
     while Instant::now() < deadline {
-        // Non-blocking-ish read: portable_pty's reader blocks, so we rely on the
-        // periodic writes + the child eventually closing on /exit to unblock.
-        match reader.read(&mut buf) {
-            Ok(0) => break, // EOF: child exited
-            Ok(n) => {
-                seen.push_str(&String::from_utf8_lossy(&buf[..n]));
+        match byte_rx.recv_timeout(Duration::from_millis(200)) {
+            Ok(chunk) => {
+                seen.push_str(&String::from_utf8_lossy(&chunk));
                 if seen.contains(SCRIPT_TEXT) && !sent_exit {
                     sent_exit = true;
                     let _ = writer.write_all(b"/exit\r");
                     let _ = writer.flush();
                 }
             }
-            Err(_) => break,
+            // Quiet tick: stop early once we've seen the text; otherwise keep
+            // waiting until the deadline.
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                if seen.contains(SCRIPT_TEXT) {
+                    break;
+                }
+            }
+            // Reader thread ended (child EOF) — nothing more will arrive.
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
         }
     }
 
-    // Belt-and-braces: ensure /exit is sent even if the text was missed, so the
-    // child does not linger, then reap it.
+    // Always terminate the child — never block on wait(): the TUI may not exit on
+    // its own, so send /exit, then kill() unconditionally and reap. This is what
+    // makes the test incapable of hanging.
     if !sent_exit {
         let _ = writer.write_all(b"/exit\r");
         let _ = writer.flush();
     }
+    let _ = child.kill();
     let _ = child.wait();
 
     assert!(
