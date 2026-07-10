@@ -44,15 +44,20 @@ CodeCoder 的测试套件是一个**黑盒行为验证**分层：集成测试只
 - 设计规格 + §5 覆盖矩阵：`docs/superpowers/specs/2026-07-09-codecoder-behavioral-validation-design.md`
 - 术语以 `CONTEXT.md` 为准；架构见 `ARCHITECTURE.md`；决策契约见 `docs/adr/`。
 
-## 本套件暴露的 2 个产品缺口（REVEALS）
+## 本套件暴露的产品缺口（REVEALS）
 
-黑盒测试有意保留两个 `#[ignore]`d 的 **REVEALS** 测试：它们描述**期望的**行为并当前失败，
-用以钉住已知产品缺口（而非绿灯掩盖）：
+黑盒测试有意保留 `#[ignore]`d 的 **REVEALS** 测试：它们描述**期望的**行为并当前失败，
+用以钉住已知产品缺口（而非绿灯掩盖）。修复 `src/` 后即摘掉 `#[ignore]`，测试转为回归守卫。
 
-1. **取消 in-flight `run_command`**（`tests/l1_kernel.rs`）——协作式取消（`Cancel` +
-   cancellation token + 子进程 kill）尚不能可靠中断一个正在执行的长命令；测试记录了这一
-   time-to-cancel 的缺口。
-2. **`AlwaysThisProject` 权限非持久化**（`tests/l1_permission.rs`）——项目级 allowlist
+**当前剩余 1 个：**
+
+1. **`AlwaysThisProject` 权限非持久化**（`tests/l1_permission.rs`）——项目级 allowlist
    应持久化到 `codecoder.json` 并跨会话生效，但当前授予未落盘；测试记录该 gap。
 
-移除这两个 `#[ignore]` 前，应先在 `src/` 修复对应行为。
+**已修复：**
+
+- ~~取消 in-flight `run_command`~~ ✅ 已修复：`run_command` 改为 `spawn` + 轮询 cancel token +
+  杀子进程（`ToolCtx.cancel`，见 ADR 0016）；`cancel_interrupts_long_running_command`
+  （`tests/l1_kernel.rs`）已转为常规回归测试。**注意**：该修复打通的是 token→tool 一段；
+  把 `Cancel` 从 TUI 在 turn 执行中送达 token 仍未接线（run 循环在 `process_turn` 上阻塞），
+  属独立缺口。

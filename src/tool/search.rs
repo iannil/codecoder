@@ -208,7 +208,7 @@ mod tests {
     #[test]
     fn glob_matches_recursively() {
         let dir = tmp("glob");
-        let mut ctx = ToolCtx { root: &dir };
+        let mut ctx = ToolCtx::new(&dir);
         let out = Glob.run(json!({ "pattern": "**/*.rs" }), &mut ctx).unwrap();
         assert!(out.content.contains("src/main.rs"), "{}", out.content);
         assert!(!out.content.contains("README.md"));
@@ -218,7 +218,7 @@ mod tests {
     #[test]
     fn grep_finds_regex_matches_with_locations() {
         let dir = tmp("grep");
-        let mut ctx = ToolCtx { root: &dir };
+        let mut ctx = ToolCtx::new(&dir);
         let out = Grep.run(json!({ "pattern": "answer\\s*=\\s*\\d+" }), &mut ctx).unwrap();
         assert!(out.content.contains("src/main.rs:2:"), "{}", out.content);
         // The README's "answer here" doesn't match the regex.
@@ -231,7 +231,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("cc_ast_{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("lib.rs"), "fn alpha() {}\nfn beta(x: i32) -> i32 { x }\n").unwrap();
-        let mut ctx = ToolCtx { root: &dir };
+        let mut ctx = ToolCtx::new(&dir);
         let out = Grep
             .run(json!({ "ast_query": "(function_item name: (identifier) @n)" }), &mut ctx)
             .unwrap();
@@ -249,7 +249,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("cc_astpy_{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("m.py"), "def alpha():\n    pass\ndef beta(x):\n    return x\n").unwrap();
-        let mut ctx = ToolCtx { root: &dir };
+        let mut ctx = ToolCtx::new(&dir);
         let out = Grep
             .run(json!({ "ast_query": "(function_definition name: (identifier) @n)", "lang": "python" }), &mut ctx)
             .unwrap();
@@ -261,7 +261,7 @@ mod tests {
     #[test]
     fn grep_bad_regex_errors() {
         let dir = tmp("bad");
-        let mut ctx = ToolCtx { root: &dir };
+        let mut ctx = ToolCtx::new(&dir);
         let out = Grep.run(json!({ "pattern": "(" }), &mut ctx).unwrap();
         assert!(out.is_error);
         std::fs::remove_dir_all(&dir).ok();

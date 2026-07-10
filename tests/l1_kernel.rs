@@ -147,14 +147,17 @@ fn tool_loop_caps_at_max_iterations() {
 /// agent's real cancel token the instant the tool starts, and require the turn to
 /// return promptly (< 3s) without the long command reporting a successful finish.
 ///
-/// REVEALS a product gap: `run_command` (src/tool/builtin.rs) runs the subprocess
-/// with a blocking `Command::output()` that neither polls the cancel token nor
-/// kills the child. The cancel flag is only checked *between* tool-loop iterations
-/// (src/agent.rs), so an in-flight `sleep 5` blocks the whole agent thread for the
-/// full 5 seconds — cancellation cannot interrupt a running command. The turn
-/// therefore does NOT return within the 3s cooperative-cancellation budget.
+/// Cooperative cancellation of an in-flight `run_command` (ADR 0016).
+/// `run_command` spawns its child and polls the cancel token, killing the child
+/// when the turn is cancelled; the tool loop then ends at its next top-of-loop
+/// cancel check. A `sleep 5` must therefore be interrupted well within the 3s
+/// cooperative-cancellation budget rather than blocking the agent thread.
+///
+/// NOTE: this exercises the token→tool path only. Delivering `Cancel` from the
+/// TUI to the token mid-turn is a separate, still-unwired path (the run loop
+/// blocks on `process_turn`); this test flips the shared token directly, as a
+/// correctly-wired front end would.
 #[test]
-#[ignore = "REVEALS: run_command uses blocking Command::output() with no cancel-token poll or child kill, so an in-flight command (sleep 5) cannot be cancelled mid-run"]
 fn cancel_interrupts_long_running_command() {
     let ws = Workspace::new();
     ws.write("AGENTS.md", "x");

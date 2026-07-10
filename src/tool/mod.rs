@@ -12,6 +12,27 @@ use std::path::Path;
 
 pub struct ToolCtx<'a> {
     pub root: &'a Path,
+    /// Cooperative-cancellation flag (ADR 0016). Present on real turns so a
+    /// long-running tool (e.g. `run_command`) can poll it and kill its child;
+    /// `None` in unit tests that never cancel.
+    pub cancel: Option<&'a crate::agent::CancelToken>,
+}
+
+impl<'a> ToolCtx<'a> {
+    /// A context with no cancellation signal (unit tests, one-shot helpers).
+    pub fn new(root: &'a Path) -> Self {
+        ToolCtx { root, cancel: None }
+    }
+
+    /// A context wired to the turn's cancel token (the live agent loop).
+    pub fn with_cancel(root: &'a Path, cancel: &'a crate::agent::CancelToken) -> Self {
+        ToolCtx { root, cancel: Some(cancel) }
+    }
+
+    /// True once the turn has been cancelled; long-running tools should stop.
+    pub fn is_cancelled(&self) -> bool {
+        self.cancel.is_some_and(|c| c.is_cancelled())
+    }
 }
 
 #[derive(Debug)]

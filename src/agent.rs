@@ -414,7 +414,7 @@ impl AgentLoop {
             name: name.to_string(),
             preview: preview_args(&args),
         });
-        let mut ctx = ToolCtx { root: &self.root };
+        let mut ctx = ToolCtx::with_cancel(&self.root, &self.cancel);
         let output = match self.toolbox.get(name).unwrap().run(args, &mut ctx) {
             Ok(o) => o,
             Err(e) => crate::tool::ToolOutput::err(format!("tool error: {e}")),

@@ -295,7 +295,7 @@ mod tests {
     #[test]
     fn todo_crud_roundtrip() {
         let dir = ctx_dir();
-        let mut ctx = ToolCtx { root: &dir };
+        let mut ctx = ToolCtx::new(&dir);
         Todo.run(json!({ "action": "create", "text": "write tests" }), &mut ctx).unwrap();
         Todo.run(json!({ "action": "create", "text": "ship it" }), &mut ctx).unwrap();
         Todo.run(json!({ "action": "complete", "id": 1 }), &mut ctx).unwrap();
@@ -309,14 +309,14 @@ mod tests {
     fn memory_persists_across_instances() {
         let dir = ctx_dir();
         {
-            let mut ctx = ToolCtx { root: &dir };
+            let mut ctx = ToolCtx::new(&dir);
             Memory.run(json!({ "action": "set", "key": "goal", "value": "ship v1" }), &mut ctx).unwrap();
             Memory
                 .run(json!({ "action": "set", "key": "data:acme", "value": "{\"path\":\"data/acme.json\"}" }), &mut ctx)
                 .unwrap();
         }
         // A fresh tool call (new "session") reads it back from disk.
-        let mut ctx = ToolCtx { root: &dir };
+        let mut ctx = ToolCtx::new(&dir);
         let got = Memory.run(json!({ "action": "get", "key": "goal" }), &mut ctx).unwrap();
         assert_eq!(got.content, "ship v1");
         let list = Memory.run(json!({ "action": "list" }), &mut ctx).unwrap();

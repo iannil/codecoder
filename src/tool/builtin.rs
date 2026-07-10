@@ -4,8 +4,9 @@ use super::{Tool, ToolCtx, ToolOutput};
 use crate::capability::{CapabilityManifest, Environment, Lifecycle};
 use crate::permission::Permission;
 use serde_json::{Value, json};
+use std::io::Read;
 use std::path::Path;
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 pub struct ReadFile;
 
@@ -72,18 +73,58 @@ impl Tool for RunCommand {
         if cmd.is_empty() {
             return Ok(ToolOutput::err("missing required arg: cmd"));
         }
-        let out = Command::new("sh")
+        if ctx.is_cancelled() {
+            return Ok(ToolOutput::err("cancelled"));
+        }
+        // Spawn (not `.output()`) so a cooperative cancel can kill the child
+        // mid-run (ADR 0016). stdout/stderr are drained on their own threads so
+        // a chatty command can't fill the pipe buffer and deadlock the poll loop.
+        let mut child = Command::new("sh")
             .arg("-c")
             .arg(cmd)
             .current_dir(ctx.root)
-            .output()?;
-        let mut buf = String::from_utf8_lossy(&out.stdout).into_owned();
-        if !out.stderr.is_empty() {
-            buf.push_str(&String::from_utf8_lossy(&out.stderr));
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()?;
+        let mut stdout = child.stdout.take().expect("piped stdout");
+        let mut stderr = child.stderr.take().expect("piped stderr");
+        let out_reader = std::thread::spawn(move || {
+            let mut b = Vec::new();
+            let _ = stdout.read_to_end(&mut b);
+            b
+        });
+        let err_reader = std::thread::spawn(move || {
+            let mut b = Vec::new();
+            let _ = stderr.read_to_end(&mut b);
+            b
+        });
+
+        // Poll for exit while watching the cancel token; kill the child on cancel.
+        let status = loop {
+            if ctx.is_cancelled() {
+                let _ = child.kill();
+                let _ = child.wait();
+                break None;
+            }
+            match child.try_wait()? {
+                Some(status) => break Some(status),
+                None => std::thread::sleep(std::time::Duration::from_millis(20)),
+            }
+        };
+        let stdout_buf = out_reader.join().unwrap_or_default();
+        let stderr_buf = err_reader.join().unwrap_or_default();
+
+        let status = match status {
+            Some(status) => status,
+            None => return Ok(ToolOutput::err("cancelled")),
+        };
+        let mut buf = String::from_utf8_lossy(&stdout_buf).into_owned();
+        if !stderr_buf.is_empty() {
+            buf.push_str(&String::from_utf8_lossy(&stderr_buf));
         }
-        let is_error = !out.status.success();
+        let is_error = !status.success();
         if is_error {
-            buf = format!("exit {}: {buf}", out.status.code().unwrap_or(-1));
+            buf = format!("exit {}: {buf}", status.code().unwrap_or(-1));
         }
         Ok(ToolOutput { content: buf, is_error })
     }
@@ -783,7 +824,7 @@ mod tests {
     #[test]
     fn run_command_executes() {
         let root = std::env::temp_dir();
-        let mut ctx = ToolCtx { root: &root };
+        let mut ctx = ToolCtx::new(&root);
         let out = RunCommand.run(json!({ "cmd": "echo hi" }), &mut ctx).unwrap();
         assert!(!out.is_error);
         assert_eq!(out.content.trim(), "hi");
@@ -793,7 +834,7 @@ mod tests {
     fn write_then_edit_then_read() {
         let dir = std::env::temp_dir().join(format!("cc_tool_{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        let mut ctx = ToolCtx { root: &dir };
+        let mut ctx = ToolCtx::new(&dir);
 
         let w = WriteFile
             .run(json!({ "path": "sub/f.txt", "content": "alpha beta" }), &mut ctx)
@@ -835,7 +876,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("cc_skill_{}", std::process::id()));
         std::fs::create_dir_all(dir.join("skills")).unwrap();
         std::fs::write(dir.join("skills/greet.md"), "always say hi").unwrap();
-        let mut ctx = ToolCtx { root: &dir };
+        let mut ctx = ToolCtx::new(&dir);
         let out = UseSkill.run(json!({ "name": "greet" }), &mut ctx).unwrap();
         assert!(!out.is_error);
         assert_eq!(out.content, "always say hi");
@@ -849,7 +890,7 @@ mod tests {
         use crate::registry::Registry;
         let dir = std::env::temp_dir().join(format!("cc_gen_{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        let mut ctx = ToolCtx { root: &dir };
+        let mut ctx = ToolCtx::new(&dir);
 
         GenerateSkill
             .run(
@@ -886,7 +927,7 @@ mod tests {
         use crate::registry::Registry;
         let dir = std::env::temp_dir().join(format!("cc_prompt_{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        let mut ctx = ToolCtx { root: &dir };
+        let mut ctx = ToolCtx::new(&dir);
 
         // 1. Author a draft prompt.
         GeneratePrompt
@@ -923,7 +964,7 @@ mod tests {
     fn promote_prompt_errors_on_missing_draft_and_name_collision() {
         let dir = std::env::temp_dir().join(format!("cc_promerr_{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        let mut ctx = ToolCtx { root: &dir };
+        let mut ctx = ToolCtx::new(&dir);
 
         // No draft → error.
         let miss = PromotePrompt.run(json!({ "name": "ghost" }), &mut ctx).unwrap();
@@ -955,7 +996,7 @@ mod tests {
     fn generate_capability_rejects_bad_environment() {
         let dir = std::env::temp_dir().join(format!("cc_genbad_{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        let mut ctx = ToolCtx { root: &dir };
+        let mut ctx = ToolCtx::new(&dir);
         let out = GenerateCapability
             .run(
                 json!({ "name": "x", "description": "d", "environment": "nope", "lifecycle": "one_shot" }),
@@ -976,7 +1017,7 @@ mod tests {
             r#"{"name":"server","description":"d","environment":"shell","lifecycle":"persistent","entry":"sleep 5","address":"127.0.0.1:9999"}"#,
         )
         .unwrap();
-        let mut ctx = ToolCtx { root: &dir };
+        let mut ctx = ToolCtx::new(&dir);
 
         let first = RunCapability.run(json!({ "name": "server" }), &mut ctx).unwrap();
         assert!(!first.is_error, "{}", first.content);
@@ -1007,7 +1048,7 @@ mod tests {
             Permission::Ask { key } => assert_eq!(key, "run_capability:box@docker"),
             _ => panic!("expected Ask"),
         }
-        let mut ctx = ToolCtx { root: &dir };
+        let mut ctx = ToolCtx::new(&dir);
         let out = RunCapability.run(json!({ "name": "box" }), &mut ctx).unwrap();
         assert!(out.is_error);
         assert!(out.content.contains("image"), "{}", out.content);
@@ -1025,7 +1066,7 @@ mod tests {
             r#"{"name":"dpers","description":"d","environment":"docker","lifecycle":"persistent","image":"alpine","entry":"sleep 30","address":"127.0.0.1:1234"}"#,
         )
         .unwrap();
-        let mut ctx = ToolCtx { root: &dir };
+        let mut ctx = ToolCtx::new(&dir);
         let first = RunCapability.run(json!({ "name": "dpers" }), &mut ctx).unwrap();
         assert!(!first.is_error, "{}", first.content);
         assert!(first.content.contains("started persistent container"), "{}", first.content);
@@ -1046,7 +1087,7 @@ mod tests {
             r#"{"name":"hello","description":"d","environment":"docker","lifecycle":"one_shot","image":"alpine","entry":"echo from-container"}"#,
         )
         .unwrap();
-        let mut ctx = ToolCtx { root: &dir };
+        let mut ctx = ToolCtx::new(&dir);
         let out = RunCapability.run(json!({ "name": "hello" }), &mut ctx).unwrap();
         assert!(!out.is_error, "{}", out.content);
         assert!(out.content.contains("from-container"), "{}", out.content);
@@ -1069,7 +1110,7 @@ mod tests {
             _ => panic!("expected Ask"),
         }
 
-        let mut ctx = ToolCtx { root: &dir };
+        let mut ctx = ToolCtx::new(&dir);
         let out = RunCapability.run(json!({ "name": "echoer" }), &mut ctx).unwrap();
         assert!(!out.is_error, "{}", out.content);
         assert_eq!(out.content.trim(), "from-capability");
