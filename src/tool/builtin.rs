@@ -73,61 +73,65 @@ impl Tool for RunCommand {
         if cmd.is_empty() {
             return Ok(ToolOutput::err("missing required arg: cmd"));
         }
-        if ctx.is_cancelled() {
-            return Ok(ToolOutput::err("cancelled"));
-        }
-        // Spawn (not `.output()`) so a cooperative cancel can kill the child
-        // mid-run (ADR 0016). stdout/stderr are drained on their own threads so
-        // a chatty command can't fill the pipe buffer and deadlock the poll loop.
-        let mut child = Command::new("sh")
-            .arg("-c")
-            .arg(cmd)
-            .current_dir(ctx.root)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()?;
-        let mut stdout = child.stdout.take().expect("piped stdout");
-        let mut stderr = child.stderr.take().expect("piped stderr");
-        let out_reader = std::thread::spawn(move || {
-            let mut b = Vec::new();
-            let _ = stdout.read_to_end(&mut b);
-            b
-        });
-        let err_reader = std::thread::spawn(move || {
-            let mut b = Vec::new();
-            let _ = stderr.read_to_end(&mut b);
-            b
-        });
-
-        // Poll for exit while watching the cancel token; kill the child on cancel.
-        let status = loop {
-            if ctx.is_cancelled() {
-                let _ = child.kill();
-                let _ = child.wait();
-                break None;
-            }
-            match child.try_wait()? {
-                Some(status) => break Some(status),
-                None => std::thread::sleep(std::time::Duration::from_millis(20)),
-            }
-        };
-        let stdout_buf = out_reader.join().unwrap_or_default();
-        let stderr_buf = err_reader.join().unwrap_or_default();
-
-        let status = match status {
-            Some(status) => status,
-            None => return Ok(ToolOutput::err("cancelled")),
-        };
-        let mut buf = String::from_utf8_lossy(&stdout_buf).into_owned();
-        if !stderr_buf.is_empty() {
-            buf.push_str(&String::from_utf8_lossy(&stderr_buf));
-        }
-        let is_error = !status.success();
-        if is_error {
-            buf = format!("exit {}: {buf}", status.code().unwrap_or(-1));
-        }
-        Ok(ToolOutput { content: buf, is_error })
+        let mut command = Command::new("sh");
+        command.arg("-c").arg(cmd).current_dir(ctx.root);
+        run_shell_cancellable(command, ctx)
     }
+}
+
+/// Run a shell `Command` to completion, killing the child if the turn is
+/// cancelled mid-run (ADR 0016). Spawns (not `.output()`) and drains stdout/stderr
+/// on their own threads so a chatty command can't fill the pipe buffer and
+/// deadlock the poll loop. Shared by `run_command` and shell Capabilities.
+fn run_shell_cancellable(mut command: Command, ctx: &ToolCtx) -> anyhow::Result<ToolOutput> {
+    if ctx.is_cancelled() {
+        return Ok(ToolOutput::err("cancelled"));
+    }
+    let mut child = command
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    let mut stdout = child.stdout.take().expect("piped stdout");
+    let mut stderr = child.stderr.take().expect("piped stderr");
+    let out_reader = std::thread::spawn(move || {
+        let mut b = Vec::new();
+        let _ = stdout.read_to_end(&mut b);
+        b
+    });
+    let err_reader = std::thread::spawn(move || {
+        let mut b = Vec::new();
+        let _ = stderr.read_to_end(&mut b);
+        b
+    });
+
+    // Poll for exit while watching the cancel token; kill the child on cancel.
+    let status = loop {
+        if ctx.is_cancelled() {
+            let _ = child.kill();
+            let _ = child.wait();
+            break None;
+        }
+        match child.try_wait()? {
+            Some(status) => break Some(status),
+            None => std::thread::sleep(std::time::Duration::from_millis(20)),
+        }
+    };
+    let stdout_buf = out_reader.join().unwrap_or_default();
+    let stderr_buf = err_reader.join().unwrap_or_default();
+
+    let status = match status {
+        Some(status) => status,
+        None => return Ok(ToolOutput::err("cancelled")),
+    };
+    let mut buf = String::from_utf8_lossy(&stdout_buf).into_owned();
+    if !stderr_buf.is_empty() {
+        buf.push_str(&String::from_utf8_lossy(&stderr_buf));
+    }
+    let is_error = !status.success();
+    if is_error {
+        buf = format!("exit {}: {buf}", status.code().unwrap_or(-1));
+    }
+    Ok(ToolOutput { content: buf, is_error })
 }
 
 pub struct ListDirectory;
@@ -338,21 +342,13 @@ impl Tool for RunCapability {
             Environment::Shell => {
                 let dir = ctx.root.join("capabilities").join(name);
                 let cap_args = args.get("args").cloned().unwrap_or(json!({}));
-                let out = Command::new("sh")
+                let mut command = Command::new("sh");
+                command
                     .arg("-c")
                     .arg(&m.entry)
                     .current_dir(&dir)
-                    .env("CODECODER_CAPABILITY_ARGS", cap_args.to_string())
-                    .output()?;
-                let mut buf = String::from_utf8_lossy(&out.stdout).into_owned();
-                if !out.stderr.is_empty() {
-                    buf.push_str(&String::from_utf8_lossy(&out.stderr));
-                }
-                let is_error = !out.status.success();
-                if is_error {
-                    buf = format!("exit {}: {buf}", out.status.code().unwrap_or(-1));
-                }
-                Ok(ToolOutput { content: buf, is_error })
+                    .env("CODECODER_CAPABILITY_ARGS", cap_args.to_string());
+                run_shell_cancellable(command, ctx)
             }
             Environment::Docker => {
                 if m.image.trim().is_empty() {
@@ -828,6 +824,41 @@ mod tests {
         let out = RunCommand.run(json!({ "cmd": "echo hi" }), &mut ctx).unwrap();
         assert!(!out.is_error);
         assert_eq!(out.content.trim(), "hi");
+    }
+
+    #[test]
+    fn shell_cancellable_kills_child_when_cancelled_mid_run() {
+        let token = crate::agent::CancelToken::default();
+        let dir = std::env::temp_dir();
+        let ctx = ToolCtx::with_cancel(&dir, &token);
+        let t2 = token.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            t2.cancel();
+        });
+        let mut command = Command::new("sh");
+        command.arg("-c").arg("sleep 5");
+        let start = std::time::Instant::now();
+        let out = run_shell_cancellable(command, &ctx).unwrap();
+        assert!(out.content.contains("cancelled"), "got: {}", out.content);
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(2),
+            "the child must be killed promptly on cancel; took {:?}",
+            start.elapsed()
+        );
+    }
+
+    #[test]
+    fn shell_cancellable_short_circuits_when_already_cancelled() {
+        let token = crate::agent::CancelToken::default();
+        token.cancel();
+        let dir = std::env::temp_dir();
+        let ctx = ToolCtx::with_cancel(&dir, &token);
+        let mut command = Command::new("sh");
+        command.arg("-c").arg("echo should-not-matter");
+        let out = run_shell_cancellable(command, &ctx).unwrap();
+        assert!(out.is_error);
+        assert!(out.content.contains("cancelled"));
     }
 
     #[test]

@@ -20,7 +20,7 @@
 
 - **无 async 运行时**:阻塞式,HTTP 用 ureq,子 agent/服务用 OS 线程/子进程。
 - **权限/ask 应答走 oneshot**,不走 cmd_tx——待决请求的答复不会被新消息错序。
-- **取消**是协作式:TUI 的 `Esc`(仅当有 turn 在跑时)**直接翻转共享 `CancelToken`**——`cmd_tx` 的 `Cancel` 到不了正在 `process_turn` 阻塞的 agent 线程。`run_command` 轮询该 token 并 kill 子进程,turn 循环在每次迭代顶部再检查一次(不硬杀线程)。
+- **取消**是协作式:TUI 的 `Esc`(仅当有 turn 在跑时)**直接翻转共享 `CancelToken`**——`cmd_tx` 的 `Cancel` 到不了正在 `process_turn` 阻塞的 agent 线程。`run_command` 与 shell Capability 经同一 `run_shell_cancellable` 轮询该 token 并 kill 子进程,turn 循环在每次迭代顶部再检查一次(不硬杀线程)。
 
 ## 模块地图
 
@@ -120,7 +120,7 @@ agent 深思 → generate_skill / generate_prompt / generate_capability
 
 ## 测试与验证边界
 
-- **89 个离线单元/集成测试**(默认套件,hermetic)+ **4 个 `#[ignore]`**(2 Docker e2e + L2 pty 冒烟 + L3 真实 LLM 冒烟;`cargo test -- --ignored`,部分另需门控 env)。Wasm e2e 在默认套件内(纯进程内)。
+- **91 个离线单元/集成测试**(默认套件,hermetic)+ **4 个 `#[ignore]`**(2 Docker e2e + L2 pty 冒烟 + L3 真实 LLM 冒烟;`cargo test -- --ignored`,部分另需门控 env)。Wasm e2e 在默认套件内(纯进程内)。
 - `tests/` 下为**黑盒行为验证分层**:只编译于 `src/lib.rs` 公共 API,驱动真实 `AgentLoop`+真实工具,断言只落三面(`AgentEvent` 流 / 文件系统+git / `ScriptedProvider` 记录的 `CompletionRequest`)。分层与门控开关见 `docs/testing/behavioral-validation.md`。
 - **无法在无 TTY 环境验证 TUI 交互**——需真终端。TUI 观感由人工真机验收。
 - token 计数用 tiktoken(准确);`run_command`/`commit` 走真实 `git`/shell(运行期生效)。
