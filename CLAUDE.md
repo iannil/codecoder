@@ -4,7 +4,7 @@
 
 ## 项目状态
 
-CodeCoder 是一个**已落地**的自主 AI agent，使用 Rust 编写。仓库已有 Cargo 项目、24 个源模块(`src/`,含 `background.rs`)、25 个内置工具、107 个测试(103 通过 + 4 个 `#[ignore]`:2 Docker e2e + L2 pty 冒烟 + L3 真实 LLM 冒烟),以及 18 份 ADR(`docs/adr/`)。`tests/` 下为黑盒行为验证分层(L1 默认;L2/L3 门控),见 `docs/testing/behavioral-validation.md`。架构总览见 `ARCHITECTURE.md`;领域术语以 `CONTEXT.md` 为准。
+CodeCoder 是一个**已落地**的自主 AI agent，使用 Rust 编写。仓库已有 Cargo 项目、24 个源模块(`src/`,含 `background.rs`)、25 个内置工具、109 个测试(105 通过 + 4 个 `#[ignore]`:2 Docker e2e + L2 pty 冒烟 + L3 真实 LLM 冒烟),以及 18 份 ADR(`docs/adr/`)。`tests/` 下为黑盒行为验证分层(L1 默认;L2/L3 门控),见 `docs/testing/behavioral-validation.md`。架构总览见 `ARCHITECTURE.md`;领域术语以 `CONTEXT.md` 为准。
 
 **已知未实现的部分(文档中已标注,勿误以为已就绪):**
 
