@@ -58,6 +58,6 @@ CodeCoder 的测试套件是一个**黑盒行为验证**分层：集成测试只
   + `shell_capability_project_grant_capped_not_persisted`（`tests/l1_permission.rs`）为回归守卫。
 - ~~取消 in-flight `run_command`~~ ✅ 已修复：`run_command` 改为 `spawn` + 轮询 cancel token +
   杀子进程（`ToolCtx.cancel`，见 ADR 0016）；`cancel_interrupts_long_running_command`
-  （`tests/l1_kernel.rs`）已转为常规回归测试。**注意**：该修复打通的是 token→tool 一段；
-  把 `Cancel` 从 TUI 在 turn 执行中送达 token 仍未接线（run 循环在 `process_turn` 上阻塞），
-  属独立缺口。
+  （`tests/l1_kernel.rs`）已转为常规回归测试。TUI 侧也已接线：有 turn 在跑时按 `Esc` 直接翻转
+  共享 `CancelToken`（不走 `cmd_tx`，因 agent 线程 turn 内阻塞在 `process_turn`），
+  由 `esc_during_activity_flips_the_cancel_token`（`src/tui/run.rs`）守卫。端到端取消现已可用。

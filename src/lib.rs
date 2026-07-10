@@ -52,9 +52,12 @@ pub fn run(cfg: Config) -> anyhow::Result<()> {
         cfg.temperature,
         cfg.root.clone(),
     );
+    // Clone the cancel token before moving the agent into its thread so the TUI
+    // can interrupt an in-flight turn directly (ADR 0016).
+    let cancel = agent.cancel_token();
     let agent_thread = thread::spawn(move || agent.run(cmd_rx, event_tx));
 
-    let result = tui::run::run(cfg.model.clone(), cfg.root.clone(), cmd_tx.clone(), event_rx);
+    let result = tui::run::run(cfg.model.clone(), cfg.root.clone(), cmd_tx.clone(), event_rx, cancel);
 
     let _ = cmd_tx.send(AgentCommand::Shutdown);
     let _ = agent_thread.join();

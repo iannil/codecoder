@@ -2,7 +2,7 @@
 pub mod render;
 pub mod run;
 
-use crate::agent::PermissionReply;
+use crate::agent::{CancelToken, PermissionReply};
 use crate::permission::PermScope;
 use ratatui::style::Color;
 use std::path::PathBuf;
@@ -258,6 +258,12 @@ pub struct TuiApp {
     pub search_query: String,
     pub help_open: bool,
 
+    /// Clone of the agent's cooperative-cancellation token (ADR 0016). Flipping
+    /// it interrupts the in-flight turn directly — the command channel can't,
+    /// because the agent loop blocks in `process_turn` and won't read it until
+    /// the turn ends. Set by `run()`; default token in tests.
+    pub cancel: CancelToken,
+
     pub should_quit: bool,
 }
 
@@ -286,6 +292,7 @@ impl TuiApp {
             reverse_search: false,
             search_query: String::new(),
             help_open: false,
+            cancel: CancelToken::default(),
             should_quit: false,
         }
     }

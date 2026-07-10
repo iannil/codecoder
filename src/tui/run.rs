@@ -1,7 +1,7 @@
 // TUI run loop (ADR 0024): fullscreen alternate screen, unified channel with an
 // input thread + AgentEvent forwarder + animation tick, blocking recv (0 idle CPU).
 use super::{Activity, AskDialog, Block, ConfirmDialog, Dialog, PermissionDialog, PlanDialog, ToolResultView, TuiApp};
-use crate::agent::{AgentCommand, AgentEvent};
+use crate::agent::{AgentCommand, AgentEvent, CancelToken};
 use std::path::PathBuf;
 use crossterm::event::{
     self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
@@ -31,6 +31,7 @@ pub fn run(
     root: PathBuf,
     cmd_tx: Sender<AgentCommand>,
     event_rx: Receiver<AgentEvent>,
+    cancel: CancelToken,
 ) -> anyhow::Result<()> {
     // --- terminal setup ---
     enable_raw_mode()?;
@@ -82,6 +83,7 @@ pub fn run(
 
     // --- main loop: draw, then block on the next message ---
     let mut app = TuiApp::new(model, root);
+    app.cancel = cancel;
     let result = (|| -> anyhow::Result<()> {
         loop {
             terminal.draw(|f| super::render::draw(f, &app))?;
@@ -348,6 +350,10 @@ fn handle_insert_key(app: &mut TuiApp, k: KeyEvent, cmd_tx: &Sender<AgentCommand
         KeyCode::Enter if shift => app.insert_char('\n'),
         KeyCode::Char('j') if ctrl => app.insert_char('\n'),
         KeyCode::Enter => submit(app, cmd_tx),
+        // Esc while the agent is working cancels the in-flight turn by flipping
+        // the shared token directly (ADR 0016) — the command channel can't reach
+        // the agent loop mid-turn. With no turn active, Esc is a no-op here.
+        KeyCode::Esc if app.activity.is_some() => app.cancel.cancel(),
         KeyCode::Char('c') if ctrl => app.should_quit = true,
         KeyCode::Char('f') if ctrl => app.begin_search(false),
         KeyCode::Char('r') if ctrl => app.begin_search(true),
@@ -461,5 +467,42 @@ fn history_next(app: &mut TuiApp) {
     } else {
         app.history_idx = None;
         app.clear_input();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::mpsc::channel;
+
+    fn app_with_token() -> (TuiApp, CancelToken) {
+        let mut app = TuiApp::new("m".into(), std::env::temp_dir());
+        let token = CancelToken::default();
+        app.cancel = token.clone();
+        (app, token)
+    }
+
+    #[test]
+    fn esc_during_activity_flips_the_cancel_token() {
+        let (mut app, token) = app_with_token();
+        app.activity = Some(Activity {
+            label: "working".into(),
+            started: std::time::Instant::now(),
+        });
+        let (tx, _rx) = channel::<AgentCommand>();
+        handle_insert_key(&mut app, KeyEvent::from(KeyCode::Esc), &tx);
+        assert!(token.is_cancelled(), "Esc while a turn is active must cancel it");
+    }
+
+    #[test]
+    fn esc_with_no_active_turn_does_not_cancel() {
+        let (mut app, token) = app_with_token();
+        app.activity = None;
+        let (tx, _rx) = channel::<AgentCommand>();
+        handle_insert_key(&mut app, KeyEvent::from(KeyCode::Esc), &tx);
+        assert!(
+            !token.is_cancelled(),
+            "Esc with no turn in progress must be a no-op"
+        );
     }
 }
