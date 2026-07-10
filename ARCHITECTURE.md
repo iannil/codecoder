@@ -1,6 +1,6 @@
 # CodeCoder 架构
 
-自主 AI agent,Rust 编写,**事件驱动、文件系统即自我**。本文串起 23 个源模块 ↔ 17 个 ADR ↔ 25 个内置工具 ↔ 6 点自我进化诉求,供人与未来 agent 导航。术语以 `CONTEXT.md` 为准,决策依据见 `docs/adr/`。
+自主 AI agent,Rust 编写,**事件驱动、文件系统即自我**。本文串起 24 个源模块 ↔ 18 个 ADR ↔ 25 个内置工具 ↔ 6 点自我进化诉求,供人与未来 agent 导航。术语以 `CONTEXT.md` 为准,决策依据见 `docs/adr/`。
 
 ## 一句话
 
@@ -31,6 +31,7 @@
 | `message.rs` | `Message`/`MessageItem`/`MessageId`/`Role`(provider 中立) | 0015 0017 |
 | `provider/{mod,openai,stub}` | `Provider` trait;`OpenAiClient`(chat-completions)/`StubClient` | 0017 |
 | `agent.rs` | `AgentLoop`、turn 循环、工具分派、子 agent、ask_user、reload | 0016 0019 |
+| `background.rs` | Background Agent headless one-shot runner:`run_background` 驱动一个 turn 到结束,汇总为 `BgOutcome`(final_text/tool_calls/denied/events);无用户在场,未授权 Ask 工具自动拒绝 | 0026 |
 | `permission.rs` | `PermScope`/`Permission`/`PermissionKey`/`SessionAllowlist` | 0005 0018 |
 | `tool/mod.rs` | `Tool` trait、`Toolbox`(父/子 read-only)、wire schema | 0018 0019 |
 | `tool/builtin.rs` | 文件/执行/自我进化/委派工具 | 0018 0020 0022 |

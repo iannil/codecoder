@@ -124,13 +124,14 @@ project/
 | `CODECODER_MAX_TOKENS` | `4096` | 最大 token 数 |
 | `CODECODER_TEMPERATURE` | `0.7` | 温度参数 |
 | `CODECODER_ROOT` | 当前目录 | 项目根目录 |
+| `CODECODER_BG_TASK` | — | 设置后以 Background Agent headless 模式跑完该 task 即退出（无 TUI、无用户在场；权限走 `codecoder.json` 预授权，见 ADR 0026） |
 | `GITHUB_TOKEN` | — | GitHub API token（提升 rate limit） |
 
 ## 开发
 
 ```bash
 cargo build      # 编译
-cargo test       # 运行 103 个测试（99 通过 + 4 个 #[ignore]：2 Docker e2e + L2 pty + L3 LLM 冒烟）
+cargo test       # 运行 107 个测试（103 通过 + 4 个 #[ignore]：2 Docker e2e + L2 pty + L3 LLM 冒烟）
                  # tests/ 下为黑盒行为验证分层（L1 默认；L2/L3 门控，见 docs/testing/behavioral-validation.md）
 cargo run        # 启动 TUI / REPL
 ```

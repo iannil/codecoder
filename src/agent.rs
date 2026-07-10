@@ -461,9 +461,17 @@ impl AgentLoop {
             return self.spawn_sub_agent(call_id, &args, event_tx);
         }
         if self.headless && (name == "ask_user" || name == "confirm" || name == "plan") {
+            let output = format!("denied: '{name}' requires a user, none present (headless)");
+            // Emit a ToolFinished error so the denial is observable in the event
+            // stream (the Background Agent runner records these into BgOutcome.denied).
+            let _ = event_tx.send(AgentEvent::ToolFinished {
+                name: name.to_string(),
+                is_error: true,
+                output: output.clone(),
+            });
             return ToolOutcome::Result(MessageItem::ToolResult {
                 call_id: call_id.to_string(),
-                output: format!("denied: '{name}' requires a user, none present (headless)"),
+                output,
                 is_error: true,
             });
         }
@@ -507,9 +515,17 @@ impl AgentLoop {
         if let Permission::Ask { key } = tool.permission(&args, &self.root) {
             if !self.allowlist.allows(&key) && !self.project_allowlist.allows(&key) {
                 if self.headless {
+                    let output = format!("denied: no user present; '{key}' not in project allowlist");
+                    // Emit a ToolFinished error so the denial is observable in the
+                    // event stream (BgOutcome.denied is drained from these events).
+                    let _ = event_tx.send(AgentEvent::ToolFinished {
+                        name: name.to_string(),
+                        is_error: true,
+                        output: output.clone(),
+                    });
                     return ToolOutcome::Result(MessageItem::ToolResult {
                         call_id: call_id.to_string(),
-                        output: format!("denied: no user present; '{key}' not in project allowlist"),
+                        output,
                         is_error: true,
                     });
                 }
