@@ -291,7 +291,7 @@ impl AgentLoop {
     /// Derive the Context Working Set: tier-1 always; tier-2 (summarize the oldest
     /// span) only when tier-1 is still over the window threshold. Degrades to tier-1
     /// if the summary call fails. Caches the summary in-memory (one call per turn).
-    fn context_working_set(&mut self, _event_tx: &Sender<AgentEvent>) -> Vec<Message> {
+    fn context_working_set(&mut self, event_tx: &Sender<AgentEvent>) -> Vec<Message> {
         let tier1 = compaction::working_set(&self.model, &self.session.messages, self.model_window);
         if !compaction::should_compact(
             crate::tokenizer::count_tokens(&self.model, &tier1),
@@ -318,6 +318,9 @@ impl AgentLoop {
                 match self.summarize_span(&rendered) {
                     Ok(t) => {
                         self.tier2 = Some(Tier2Summary { covered_last_id, text: t.clone() });
+                        let _ = event_tx.send(AgentEvent::Notice(
+                            "compacting context (summarizing earlier turns)…".into(),
+                        ));
                         t
                     }
                     Err(_) => return tier1, // graceful degrade

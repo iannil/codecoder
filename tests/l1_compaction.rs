@@ -238,4 +238,11 @@ fn tier2_degrades_to_tier1_when_summary_is_empty() {
         out.events.iter().any(|e| matches!(e, codecoder::AgentEvent::TurnComplete)),
         "the turn must still complete under graceful degrade"
     );
+
+    // Positive control: tier-2 must have ATTEMPTED the summary (a regression that
+    // skipped tier-2 entirely would otherwise pass this degrade test vacuously).
+    assert!(
+        out.requests.iter().any(|r| format!("{:?}", r.messages).contains("compacting an agent's conversation")),
+        "the summary call must be attempted before degrading to tier-1"
+    );
 }
