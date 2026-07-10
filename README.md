@@ -130,7 +130,8 @@ project/
 
 ```bash
 cargo build      # 编译
-cargo test       # 运行 48 个测试（46 通过 + 2 个 #[ignore] 的 Docker e2e）
+cargo test       # 运行 89 个测试（83 通过 + 6 个 #[ignore]：2 Docker e2e + 2 REVEALS + L2 pty + L3 LLM 冒烟）
+                 # tests/ 下为黑盒行为验证分层（L1 默认；L2/L3 门控，见 docs/testing/behavioral-validation.md）
 cargo run        # 启动 TUI / REPL
 ```
 
