@@ -1,6 +1,6 @@
 # Context compaction
 
-**Status**: Accepted; **tier 1 implemented, tier 2 deferred**. `compaction.rs::working_set` now applies tier 1 (drop `Reasoning`, elide old `ToolResult` bodies) when the full history crosses the threshold, protecting the anchor and a recent tail. Tier 2 (LLM summarization of the oldest span) is still unbuilt.
+**Status**: Accepted; **tier 1 and tier 2 implemented**. `compaction.rs::working_set` applies tier 1 (drop `Reasoning`, elide old `ToolResult` bodies); when the tier-1 result is still over threshold, `AgentLoop::context_working_set` applies tier 2 — one cached LLM call summarizes the oldest span (`[anchor+1 .. last_user]`) into a synthetic `System` message. The persisted Session stays full-fidelity.
 
 A long-running self-evolving agent will overflow any model window, so the context sent to the provider is compacted — but **compaction only shapes a derived working set; it never destroys the persisted Session**. The on-disk `messages` stay full-fidelity; the `Context Working Set` is recomputed each run from those messages against the current model's window.
 

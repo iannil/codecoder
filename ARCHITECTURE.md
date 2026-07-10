@@ -36,7 +36,7 @@
 | `tool/builtin.rs` | 文件/执行/自我进化/委派工具 | 0018 0020 0022 |
 | `tool/{net,dev,search,wasm}.rs` | 联网 / 开发 / glob·grep(含 AST)/ wasm 运行器 | 0018 0021 |
 | `session.rs` | `Session`、自动落盘、前向迁移链、`/resume` | 0004 |
-| `compaction.rs` | 派生的 Context Working Set(不毁持久记录)。**v1:tier-1 已实现(丢 Reasoning + 占位化旧 ToolResult 正文,保护 anchor 与近端 tail);tier-2 摘要见 0023,仍 deferred** | 0023 |
+| `compaction.rs` | 派生的 Context Working Set(不毁持久记录)。**tier-1 已实现(丢 Reasoning + 占位化旧 ToolResult 正文,保护 anchor 与近端 tail);tier-2 已实现(tier-1 后仍超阈值时,`AgentLoop::context_working_set` 用一次带缓存的 LLM 调用把最旧跨度摘要为合成 System 消息)** | 0023 |
 | `tokenizer.rs` | tiktoken 精确计数 + 模型→窗口表 | 0023 |
 | `registry.rs` | 扫 `skills/`+`prompts/`+`capabilities/` → 常驻目录(prompts 标 `[draft]`) | 0020 0025 |
 | `capability.rs` | `Environment`/`Lifecycle`/manifest/`RunningServiceTable` | 0021 |
@@ -120,7 +120,7 @@ agent 深思 → generate_skill / generate_prompt / generate_capability
 
 ## 测试与验证边界
 
-- **92 个离线单元/集成测试**(默认套件,hermetic)+ **4 个 `#[ignore]`**(2 Docker e2e + L2 pty 冒烟 + L3 真实 LLM 冒烟;`cargo test -- --ignored`,部分另需门控 env)。Wasm e2e 在默认套件内(纯进程内)。
+- **99 个离线单元/集成测试**(默认套件,hermetic)+ **4 个 `#[ignore]`**(2 Docker e2e + L2 pty 冒烟 + L3 真实 LLM 冒烟;`cargo test -- --ignored`,部分另需门控 env)。Wasm e2e 在默认套件内(纯进程内)。
 - `tests/` 下为**黑盒行为验证分层**:只编译于 `src/lib.rs` 公共 API,驱动真实 `AgentLoop`+真实工具,断言只落三面(`AgentEvent` 流 / 文件系统+git / `ScriptedProvider` 记录的 `CompletionRequest`)。分层与门控开关见 `docs/testing/behavioral-validation.md`。
 - **无法在无 TTY 环境验证 TUI 交互**——需真终端。TUI 观感由人工真机验收。
 - token 计数用 tiktoken(准确);`run_command`/`commit` 走真实 `git`/shell(运行期生效)。

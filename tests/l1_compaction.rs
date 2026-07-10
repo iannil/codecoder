@@ -155,3 +155,87 @@ fn compaction_does_not_mutate_persisted_session() {
         "compaction placeholder must never be written to the persisted session"
     );
 }
+
+#[test]
+fn tier2_summarizes_oldest_span_into_a_system_message() {
+    let ws = Workspace::new();
+    ws.write("AGENTS.md", "x");
+    // ~40k tokens each; 3 in history (~120k) exceeds the 96k threshold (0.75 * 128k
+    // default window for "test-model") even after tier-1 (Text is not elided).
+    let big = "LOREM ".repeat(20_000);
+    let (p, rec) = ScriptedProvider::new(vec![
+        assistant_text(&format!("{big} OLD_TURN_MARK")), // turn 1 reply (in the middle)
+        assistant_text(&big),                             // turn 2 reply
+        assistant_text(&big),                             // turn 3 reply
+        assistant_text("SUMMARY_MARK a concise summary"), // turn 4: the summary call
+        assistant_text("final reply"),                    // turn 4: the actual turn reply
+    ]);
+    let out = run_steps(
+        ws.root(),
+        p,
+        rec,
+        vec![
+            Step::Msg("ORIGINAL_GOAL".into()),
+            Step::Msg("t2".into()),
+            Step::Msg("t3".into()),
+            Step::Msg("current CURRENT_MARK".into()),
+        ],
+        PermPolicy::GrantOnce,
+    );
+
+    // The summary request (issued inside context_working_set) is the one carrying the
+    // tier-2 system prompt; select it by that marker (OLD_TURN_MARK alone is ambiguous —
+    // the turn-1 reply is still in history on earlier normal turn requests too), then
+    // assert the summary call actually rendered the old span.
+    let summary_req = out
+        .requests
+        .iter()
+        .find(|r| format!("{:?}", r.messages).contains("compacting an agent's conversation"))
+        .expect("a summary call should have been issued");
+    assert!(
+        format!("{:?}", summary_req.messages).contains("OLD_TURN_MARK"),
+        "the summary call must render the old span it is summarizing"
+    );
+
+    // The final actual-turn request replaces the middle with the summary System message.
+    let last = out.requests.last().expect("at least one request");
+    let dump = format!("{:?}", last.messages);
+    assert!(dump.contains("SUMMARY_MARK"), "summary must be injected into the turn context");
+    assert!(dump.contains("ORIGINAL_GOAL"), "anchor (first goal) must survive");
+    assert!(!dump.contains("OLD_TURN_MARK"), "the summarized middle must be gone from the turn request");
+}
+
+#[test]
+fn tier2_degrades_to_tier1_when_summary_is_empty() {
+    let ws = Workspace::new();
+    ws.write("AGENTS.md", "x");
+    let big = "LOREM ".repeat(20_000);
+    let (p, rec) = ScriptedProvider::new(vec![
+        assistant_text(&format!("{big} OLD_TURN_MARK")),
+        assistant_text(&big),
+        assistant_text(&big),
+        assistant_text(""),            // turn 4: summary call returns EMPTY → degrade
+        assistant_text("final reply"), // turn 4: actual reply
+    ]);
+    let out = run_steps(
+        ws.root(),
+        p,
+        rec,
+        vec![
+            Step::Msg("ORIGINAL_GOAL".into()),
+            Step::Msg("t2".into()),
+            Step::Msg("t3".into()),
+            Step::Msg("current CURRENT_MARK".into()),
+        ],
+        PermPolicy::GrantOnce,
+    );
+
+    // Empty summary → no System summary injected; the turn still completes on tier-1.
+    let last = out.requests.last().expect("at least one request");
+    let dump = format!("{:?}", last.messages);
+    assert!(!dump.contains("先前对话摘要"), "empty summary must not be injected");
+    assert!(
+        out.events.iter().any(|e| matches!(e, codecoder::AgentEvent::TurnComplete)),
+        "the turn must still complete under graceful degrade"
+    );
+}

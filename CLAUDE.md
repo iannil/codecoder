@@ -4,12 +4,13 @@
 
 ## 项目状态
 
-CodeCoder 是一个**已落地**的自主 AI agent，使用 Rust 编写。仓库已有 Cargo 项目、23 个源模块(`src/`)、25 个内置工具、96 个测试(92 通过 + 4 个 `#[ignore]`:2 Docker e2e + L2 pty 冒烟 + L3 真实 LLM 冒烟),以及 17 份 ADR(`docs/adr/`)。`tests/` 下为黑盒行为验证分层(L1 默认;L2/L3 门控),见 `docs/testing/behavioral-validation.md`。架构总览见 `ARCHITECTURE.md`;领域术语以 `CONTEXT.md` 为准。
+CodeCoder 是一个**已落地**的自主 AI agent，使用 Rust 编写。仓库已有 Cargo 项目、23 个源模块(`src/`)、25 个内置工具、103 个测试(99 通过 + 4 个 `#[ignore]`:2 Docker e2e + L2 pty 冒烟 + L3 真实 LLM 冒烟),以及 17 份 ADR(`docs/adr/`)。`tests/` 下为黑盒行为验证分层(L1 默认;L2/L3 门控),见 `docs/testing/behavioral-validation.md`。架构总览见 `ARCHITECTURE.md`;领域术语以 `CONTEXT.md` 为准。
 
 **已知未实现的部分(文档中已标注,勿误以为已就绪):**
 
-- **Compaction** — `compaction.rs` 的 **tier-1 已实现**(超阈值时丢 `Reasoning` + 占位化旧 `ToolResult` 正文,保护 anchor 与近端 tail);**tier-2**(对最旧对话跨度做 LLM 摘要)仍**未实现**,见 ADR 0023。
 - **Background Agent** — 仅是 `CONTEXT.md` 中命名的 post-v1 概念,**没有任何 runner 文件或 stub**。
+
+> **Compaction 已全量实现**(tier-1 + tier-2,见 ADR 0023):tier-1 超阈值时丢 `Reasoning` + 占位化旧 `ToolResult` 正文,保护 anchor 与近端 tail;tier-1 后仍超阈值时,`AgentLoop::context_working_set` 用一次带缓存的 LLM 调用把最旧跨度摘要为合成 `System` 消息,摘要失败/为空则降级回 tier-1。
 
 改动代码时依据 `CONTEXT.md` 的术语与 `docs/adr/` 的决策契约;新增/修改功能后请同步更新 `ARCHITECTURE.md`、`README.md` 中的相关数字与描述,使文档与代码保持一致。
 
