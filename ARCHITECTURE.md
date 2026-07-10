@@ -120,7 +120,7 @@ agent 深思 → generate_skill / generate_prompt / generate_capability
 
 ## 测试与验证边界
 
-- **84 个离线单元/集成测试**(默认套件,hermetic)+ **5 个 `#[ignore]`**(2 Docker e2e + 1 REVEALS 产品缺口 + L2 pty 冒烟 + L3 真实 LLM 冒烟;`cargo test -- --ignored`,部分另需门控 env)。Wasm e2e 在默认套件内(纯进程内)。
+- **87 个离线单元/集成测试**(默认套件,hermetic)+ **4 个 `#[ignore]`**(2 Docker e2e + L2 pty 冒烟 + L3 真实 LLM 冒烟;`cargo test -- --ignored`,部分另需门控 env)。Wasm e2e 在默认套件内(纯进程内)。
 - `tests/` 下为**黑盒行为验证分层**:只编译于 `src/lib.rs` 公共 API,驱动真实 `AgentLoop`+真实工具,断言只落三面(`AgentEvent` 流 / 文件系统+git / `ScriptedProvider` 记录的 `CompletionRequest`)。分层与门控开关见 `docs/testing/behavioral-validation.md`。
 - **无法在无 TTY 环境验证 TUI 交互**——需真终端。TUI 观感由人工真机验收。
 - token 计数用 tiktoken(准确);`run_command`/`commit` 走真实 `git`/shell(运行期生效)。

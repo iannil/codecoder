@@ -44,18 +44,18 @@ CodeCoder 的测试套件是一个**黑盒行为验证**分层：集成测试只
 - 设计规格 + §5 覆盖矩阵：`docs/superpowers/specs/2026-07-09-codecoder-behavioral-validation-design.md`
 - 术语以 `CONTEXT.md` 为准；架构见 `ARCHITECTURE.md`；决策契约见 `docs/adr/`。
 
-## 本套件暴露的产品缺口（REVEALS）
+## 本套件曾暴露的产品缺口（REVEALS）
 
-黑盒测试有意保留 `#[ignore]`d 的 **REVEALS** 测试：它们描述**期望的**行为并当前失败，
-用以钉住已知产品缺口（而非绿灯掩盖）。修复 `src/` 后即摘掉 `#[ignore]`，测试转为回归守卫。
-
-**当前剩余 1 个：**
-
-1. **`AlwaysThisProject` 权限非持久化**（`tests/l1_permission.rs`）——项目级 allowlist
-   应持久化到 `codecoder.json` 并跨会话生效，但当前授予未落盘；测试记录该 gap。
+黑盒测试用 `#[ignore]`d 的 **REVEALS** 测试钉住已知产品缺口：它们描述**期望的**行为、当前失败，
+而非绿灯掩盖。修复 `src/` 后即摘掉 `#[ignore]`，测试转为回归守卫。**目前两处均已修复，无剩余 REVEALS。**
 
 **已修复：**
 
+- ~~`AlwaysThisProject` 权限非持久化~~ ✅ 已修复：新增 `permission::ProjectAllowlist`，`AlwaysThisProject`
+  授予落盘到 `<root>/codecoder.json` 并在启动时 `load` 回内存、与 session allowlist 并列参与闸门判定
+  （ADR 0005）；同时按 ADR 0022 ceiling 规则把 `@shell` capability 授予降级为 session、绝不落盘。
+  `grant_project_persists_allowlist_to_disk` + `persisted_project_grant_is_loaded_and_suppresses_prompt`
+  + `shell_capability_project_grant_capped_not_persisted`（`tests/l1_permission.rs`）为回归守卫。
 - ~~取消 in-flight `run_command`~~ ✅ 已修复：`run_command` 改为 `spawn` + 轮询 cancel token +
   杀子进程（`ToolCtx.cancel`，见 ADR 0016）；`cancel_interrupts_long_running_command`
   （`tests/l1_kernel.rs`）已转为常规回归测试。**注意**：该修复打通的是 token→tool 一段；

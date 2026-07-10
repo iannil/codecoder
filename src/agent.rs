@@ -1,7 +1,7 @@
 // Agent kernel channel types (ADR 0016). OS threads + channels, no async runtime.
 use crate::compaction;
 use crate::message::{Message, MessageId, MessageItem, Role};
-use crate::permission::{PermScope, Permission, SessionAllowlist};
+use crate::permission::{PermScope, Permission, ProjectAllowlist, SessionAllowlist, scope_ceiling};
 use crate::provider::{CompletionRequest, Provider};
 use crate::registry::Registry;
 use crate::session::{self, Session};
@@ -96,6 +96,9 @@ pub struct AgentLoop {
     session: Session,
     toolbox: Toolbox,
     allowlist: SessionAllowlist,
+    /// Persisted project-scope grants (`codecoder.json`, ADR 0005), loaded at
+    /// startup and consulted alongside the in-memory session allowlist.
+    project_allowlist: ProjectAllowlist,
     root: PathBuf,
     session_path: PathBuf,
     /// AGENTS.md identity + the skills/capabilities catalog (ADR 0020), injected
@@ -154,6 +157,7 @@ impl AgentLoop {
             session: Session::new(model.clone()),
             toolbox,
             allowlist: SessionAllowlist::default(),
+            project_allowlist: ProjectAllowlist::load(&root),
             root,
             session_path,
             system_prompt,
@@ -379,7 +383,7 @@ impl AgentLoop {
         // Permission gate (ADR 0018): None runs freely; Ask consults the session
         // allowlist, else a blocking prompt over the embedded reply_tx (ADR 0016).
         if let Permission::Ask { key } = tool.permission(&args, &self.root) {
-            if !self.allowlist.allows(&key) {
+            if !self.allowlist.allows(&key) && !self.project_allowlist.allows(&key) {
                 let (reply_tx, reply_rx) = channel();
                 let _ = event_tx.send(AgentEvent::PermissionRequest {
                     key: key.clone(),
@@ -387,14 +391,24 @@ impl AgentLoop {
                     reply_tx,
                 });
                 match reply_rx.recv() {
-                    Ok(PermissionReply::Grant(scope)) => {
-                        if matches!(
-                            scope,
-                            PermScope::AlwaysThisSession | PermScope::AlwaysThisProject
-                        ) {
+                    Ok(PermissionReply::Grant(scope)) => match scope {
+                        PermScope::Once => {}
+                        // Persist to codecoder.json (ADR 0005) — but honor the
+                        // ceiling rule (ADR 0022): a Shell-env capability may never
+                        // reach project scope, so cap it at the session set.
+                        PermScope::AlwaysThisProject
+                            if scope_ceiling(&key) == PermScope::AlwaysThisProject =>
+                        {
+                            if let Err(e) = self.project_allowlist.grant(&self.root, key) {
+                                let _ = event_tx.send(AgentEvent::Notice(format!(
+                                    "could not persist project permission: {e}"
+                                )));
+                            }
+                        }
+                        PermScope::AlwaysThisSession | PermScope::AlwaysThisProject => {
                             self.allowlist.grant(key);
                         }
-                    }
+                    },
                     Ok(PermissionReply::Deny) => {
                         return ToolOutcome::Result(MessageItem::ToolResult {
                             call_id: call_id.to_string(),

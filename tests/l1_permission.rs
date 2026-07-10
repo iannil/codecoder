@@ -72,17 +72,11 @@ fn grant_once_prompts_each_time() {
     );
 }
 
-// REVEALS: AlwaysThisProject does NOT persist an allowlist to disk. The
-// permission gate (src/agent.rs:381-397) treats AlwaysThisProject exactly like
-// AlwaysThisSession — it grants into the in-memory `SessionAllowlist` and
-// nothing more. No code path in the codebase writes `codecoder.json` (or any
-// other file) for a project-scoped grant, so a fresh process would re-prompt.
-// permission.rs only *documents* a persisted project allowlist "keyed
-// identically"; the implementation is absent. The assertion below encodes the
-// TRUE ADR-0005 intent (project scope must survive to disk) and is kept intact;
-// the test is ignored until the persistence gap is closed.
+// AlwaysThisProject persists the granted key to `<root>/codecoder.json` (ADR
+// 0005) so the grant survives a fresh process; the permission gate consults the
+// loaded project allowlist alongside the in-memory session set. This test pins
+// that persistence: the file must exist and contain the granted key.
 #[test]
-#[ignore = "REVEALS: AlwaysThisProject never persists to disk — no codecoder.json is written (ADR 0005 project-scope persistence unimplemented)"]
 fn grant_project_persists_allowlist_to_disk() {
     let ws = Workspace::new();
     ws.write("AGENTS.md", "x");
@@ -97,4 +91,72 @@ fn grant_project_persists_allowlist_to_disk() {
         "persisted allowlist must contain the granted write_file key"
     );
     let _ = out;
+}
+
+// The other half of ADR 0005: a persisted project grant is LOADED on a fresh
+// agent and suppresses the prompt. Seed codecoder.json as a prior session would,
+// then run under Deny — if the gate prompted, Deny would block the write and no
+// file would appear. It must not prompt.
+#[test]
+fn persisted_project_grant_is_loaded_and_suppresses_prompt() {
+    let ws = Workspace::new();
+    ws.write("AGENTS.md", "x");
+    ws.write("codecoder.json", "{\"allowlist\":[\"write_file\"]}");
+    let (p, rec) = ScriptedProvider::new(vec![
+        assistant_tool_call("c1", "write_file", json!({"path": "a.txt", "content": "1"})),
+        assistant_text("done"),
+    ]);
+    let out = run_turn(ws.root(), p, rec, "write", PermPolicy::Deny, vec![]);
+    assert!(
+        out.permission_keys().is_empty(),
+        "a loaded project grant must suppress the prompt; got {:?}",
+        out.permission_keys()
+    );
+    assert!(
+        ws.exists("a.txt"),
+        "the write must proceed under the loaded project grant, even under a Deny policy"
+    );
+}
+
+// Ceiling rule (ADR 0022): a Shell-environment capability grant may never reach
+// project scope. Even under GrantProject, a `run_capability:<name>@shell` key
+// must be capped to the session set and never written to codecoder.json.
+#[test]
+fn shell_capability_project_grant_capped_not_persisted() {
+    let ws = Workspace::new();
+    ws.write("AGENTS.md", "x");
+    let (p, rec) = ScriptedProvider::new(vec![
+        assistant_tool_call(
+            "c1",
+            "generate_capability",
+            json!({
+                "name": "capx", "description": "d", "environment": "shell",
+                "lifecycle": "one_shot", "script": "echo hi"
+            }),
+        ),
+        assistant_tool_call("c2", "run_capability", json!({"name": "capx"})),
+        assistant_text("done"),
+    ]);
+    let out = run_steps(
+        ws.root(),
+        p,
+        rec,
+        vec![Step::Msg("make".into()), Step::Reload, Step::Msg("run".into())],
+        PermPolicy::GrantProject,
+    );
+    // The @shell run_capability prompt actually fired (grant path exercised)...
+    assert!(
+        out.permission_keys()
+            .iter()
+            .any(|k| k.contains("run_capability") && k.contains("@shell")),
+        "expected the @shell run_capability prompt; got {:?}",
+        out.permission_keys()
+    );
+    // ...yet no @shell key may be persisted to the project allowlist.
+    if ws.exists("codecoder.json") {
+        assert!(
+            !ws.read("codecoder.json").contains("@shell"),
+            "ceiling rule violated: an @shell key reached codecoder.json"
+        );
+    }
 }
