@@ -88,6 +88,14 @@ impl CancelToken {
     }
 }
 
+/// In-memory tier-2 summary cache (ADR 0023). Keyed by the covered span's last
+/// message id: stable within a turn (tools append non-User messages), so at most
+/// one summary LLM call fires per turn. Not persisted — recomputed after /resume.
+struct Tier2Summary {
+    covered_last_id: MessageId,
+    text: String,
+}
+
 /// The top-level agent: owns the Provider and the Session, runs on its own thread,
 /// and is driven by AgentCommands (ADR 0016). Sub-agents reuse the turn logic but
 /// with a restricted tool set and no user channel (ADR 0019).
@@ -112,6 +120,8 @@ pub struct AgentLoop {
     temperature: f32,
     next_id: MessageId,
     cancel: CancelToken,
+    /// Derived tier-2 summary overlay (ADR 0023); never persisted.
+    tier2: Option<Tier2Summary>,
 }
 
 impl AgentLoop {
@@ -168,6 +178,7 @@ impl AgentLoop {
             temperature,
             next_id: 0,
             cancel: CancelToken::default(),
+            tier2: None,
         }
     }
 
@@ -199,6 +210,7 @@ impl AgentLoop {
                 let count = session.messages.len();
                 self.session = session;
                 self.session_path = path;
+                self.tier2 = None;
                 let _ = event_tx.send(AgentEvent::Notice(format!("resumed {count} messages")));
             }
             Err(e) => {
@@ -229,6 +241,7 @@ impl AgentLoop {
                     self.session.messages.clear();
                     self.next_id = 0;
                     self.session.token_count = 0;
+                    self.tier2 = None;
                     if self.persist {
                         let _ = self.session.save(&self.session_path);
                     }
@@ -240,6 +253,78 @@ impl AgentLoop {
                 AgentCommand::Shutdown => break,
             }
         }
+    }
+
+    /// One-shot LLM summary of a rendered span (ADR 0023 tier-2). Provider-neutral
+    /// request with no tools; returns Err on transport failure or empty output.
+    fn summarize_span(&self, rendered: &str) -> anyhow::Result<String> {
+        let system = "You are compacting an agent's conversation history. Summarize the \
+            following earlier messages into a concise brief that preserves the task/goals, \
+            decisions made, key facts and file paths, tool outcomes, and open threads. Omit \
+            chit-chat. Output plain prose, no preamble.";
+        let req = CompletionRequest {
+            model: self.model.clone(),
+            messages: vec![
+                Message::text(0, Role::System, system),
+                Message::text(1, Role::User, rendered.to_string()),
+            ],
+            max_tokens: 1024,
+            temperature: 0.0,
+            tools: vec![],
+        };
+        let reply = self.provider.complete(&req)?;
+        let text: String = reply
+            .items
+            .iter()
+            .filter_map(|it| match it {
+                MessageItem::Text { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("");
+        if text.trim().is_empty() {
+            anyhow::bail!("empty summary");
+        }
+        Ok(text)
+    }
+
+    /// Derive the Context Working Set: tier-1 always; tier-2 (summarize the oldest
+    /// span) only when tier-1 is still over the window threshold. Degrades to tier-1
+    /// if the summary call fails. Caches the summary in-memory (one call per turn).
+    fn context_working_set(&mut self, _event_tx: &Sender<AgentEvent>) -> Vec<Message> {
+        let tier1 = compaction::working_set(&self.model, &self.session.messages, self.model_window);
+        if !compaction::should_compact(
+            crate::tokenizer::count_tokens(&self.model, &tier1),
+            self.model_window,
+        ) {
+            return tier1;
+        }
+        let Some((start, end)) = compaction::summary_span(&self.session.messages) else {
+            return tier1;
+        };
+        let anchor_id = self.session.messages[start - 1].id;
+        let covered_last_id = self.session.messages[end - 1].id;
+
+        // Reuse cache if it still covers the same span; else summarize once.
+        let cached = self
+            .tier2
+            .as_ref()
+            .filter(|s| s.covered_last_id == covered_last_id)
+            .map(|s| s.text.clone());
+        let text = match cached {
+            Some(t) => t,
+            None => {
+                let rendered = compaction::render_span(&self.session.messages[start..end]);
+                match self.summarize_span(&rendered) {
+                    Ok(t) => {
+                        self.tier2 = Some(Tier2Summary { covered_last_id, text: t.clone() });
+                        t
+                    }
+                    Err(_) => return tier1, // graceful degrade
+                }
+            }
+        };
+        compaction::apply_tier2(&tier1, anchor_id, covered_last_id, &text)
     }
 
     /// One turn: query → if the reply calls tools, execute them (permission-gated),
@@ -255,7 +340,7 @@ impl AgentLoop {
 
             // Only the derived working set is sent to the provider (ADR 0023),
             // prefixed by the System prompt (AGENTS.md + catalog, ADR 0020).
-            let working = compaction::working_set(&self.model, &self.session.messages, self.model_window);
+            let working = self.context_working_set(event_tx);
             let mut messages = Vec::with_capacity(working.len() + 1);
             if !self.system_prompt.is_empty() {
                 messages.push(Message::text(u64::MAX, Role::System, self.system_prompt.clone()));
