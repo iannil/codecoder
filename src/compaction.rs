@@ -144,6 +144,31 @@ pub fn collect_file_paths(span: &[Message], read: &mut BTreeSet<String>, modifie
     }
 }
 
+/// 把读/改文件集合渲染成附加在摘要末尾的块。两集合都空时返回空串（不占 token）。
+pub fn render_file_blocks(read: &BTreeSet<String>, modified: &BTreeSet<String>) -> String {
+    if read.is_empty() && modified.is_empty() {
+        return String::new();
+    }
+    let mut s = String::from("\n\n");
+    if !read.is_empty() {
+        s.push_str("<read-files>\n");
+        for p in read {
+            s.push_str(p);
+            s.push('\n');
+        }
+        s.push_str("</read-files>\n");
+    }
+    if !modified.is_empty() {
+        s.push_str("<modified-files>\n");
+        for p in modified {
+            s.push_str(p);
+            s.push('\n');
+        }
+        s.push_str("</modified-files>\n");
+    }
+    s
+}
+
 /// Rewrite the tier-1 result: drop every message whose id is in
 /// `(anchor_id, covered_last_id]` and insert one synthetic `System` summary right
 /// after the anchor. Works by **id** because tier-1 may have dropped Reasoning-only
@@ -329,5 +354,24 @@ mod tests {
         collect_file_paths(&span, &mut read, &mut modified);
         assert_eq!(read.into_iter().collect::<Vec<_>>(), vec!["a.rs".to_string()]);
         assert_eq!(modified.into_iter().collect::<Vec<_>>(), vec!["b.rs".to_string()]);
+    }
+
+    #[test]
+    fn render_file_blocks_omits_empty_and_formats_present() {
+        use std::collections::BTreeSet;
+        let empty = BTreeSet::new();
+        assert_eq!(render_file_blocks(&empty, &empty), "");
+
+        let read: BTreeSet<String> = ["a.rs".to_string(), "b.rs".to_string()].into_iter().collect();
+        let modified: BTreeSet<String> = ["c.rs".to_string()].into_iter().collect();
+        let s = render_file_blocks(&read, &modified);
+        assert!(s.starts_with("\n\n"));
+        assert!(s.contains("<read-files>\na.rs\nb.rs\n</read-files>"));
+        assert!(s.contains("<modified-files>\nc.rs\n</modified-files>"));
+
+        // 只有 read 非空时不渲染 modified 块。
+        let only_read = render_file_blocks(&read, &empty);
+        assert!(only_read.contains("<read-files>"));
+        assert!(!only_read.contains("<modified-files>"));
     }
 }
