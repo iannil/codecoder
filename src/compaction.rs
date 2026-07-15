@@ -110,7 +110,7 @@ pub fn render_span(span: &[Message]) -> String {
                     s.push_str(&format!("{role}: [tool_call {name}]\n"));
                 }
                 MessageItem::ToolResult { output, .. } => {
-                    let snippet: String = output.chars().take(200).collect();
+                    let snippet: String = output.chars().take(2000).collect();
                     s.push_str(&format!("tool: [result: {snippet}]\n"));
                 }
             }
@@ -277,11 +277,12 @@ mod tests {
                 MessageItem::Text { text: "hello".into() },
                 MessageItem::Reasoning { text: "SECRET".into() },
             ]),
-            msg(2, Role::Tool, vec![MessageItem::ToolResult { call_id: "c".into(), output: "x".repeat(500), is_error: false }]),
+            msg(2, Role::Tool, vec![MessageItem::ToolResult { call_id: "c".into(), output: "x".repeat(5000), is_error: false }]),
         ];
         let s = render_span(&span);
         assert!(s.contains("hello"));
-        assert!(!s.contains("SECRET"));           // reasoning omitted
-        assert!(s.len() < 400);                   // tool result truncated, not 500 chars
+        assert!(!s.contains("SECRET"));        // reasoning omitted
+        assert!(s.len() > 1000);               // keeps well past the old 200 cap
+        assert!(s.len() < 2200);               // but still truncated near 2000
     }
 }
