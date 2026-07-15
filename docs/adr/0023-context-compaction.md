@@ -28,3 +28,14 @@ This mirrors the derived-`Mode` principle ([[0001-tui-keybinding-and-mode-semant
 - **`ToolResult` bodies are elided, not removed.** The item is kept with a `[elided …]` placeholder so the `tool_call` ↔ `tool_call_id` pairing survives — OpenAI rejects a `tool_call` with no matching tool response.
 - **Evicting `Reasoning` does not shrink the provider request** — the wire layer already skips it ([[0004-session-persistence-and-migration]]). Its removal instead realigns `count_tokens` (which *does* count it) with what is actually sent, so `ctx%` stops overstating the payload. Only `ToolResult` elision reduces the real request.
 - `should_compact` is now live (called inside `working_set`); it is no longer a wired-to-nothing detector.
+
+## 增强说明（2026-07-15，第一批，非契约变更）
+
+借鉴 pi-mono 的 compaction 实践，在不改变"派生、非破坏"核心立场下增强 tier-2：
+
+- **结构化摘要模板**：`summarize_span` 产出固定小节（目标 / 约束与偏好 / 进展 / 关键决策 / 下一步 / 关键上下文）的散文。
+- **迭代式摘要**：span 增长时只摘增量切片，并把上一版摘要作为 `previous` 传入合并，提升连续性、省 token。
+- **累积文件追踪**：`collect_file_paths` 跨轮累积 span 内 `read_file`/`write_file`/`edit_file` 的路径，由 `render_file_blocks` 附在摘要末尾的 `<read-files>`/`<modified-files>` 块。
+- **tool-result 截断** 由 200 放宽到 2000 字符。
+
+摘要仍不写入持久化 Session；缓存 `Tier2Summary` 为进程内、`/resume` 后重算。
