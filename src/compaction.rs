@@ -2,6 +2,7 @@
 // nears the model window (~75%). Never destroys the persisted Session.
 use crate::message::{Message, MessageId, MessageItem, Role};
 use crate::tokenizer::count_tokens;
+use std::collections::BTreeSet;
 
 /// Fraction of the model window at which compaction kicks in.
 pub const COMPACTION_THRESHOLD: f32 = 0.75;
@@ -110,11 +111,60 @@ pub fn render_span(span: &[Message]) -> String {
                     s.push_str(&format!("{role}: [tool_call {name}]\n"));
                 }
                 MessageItem::ToolResult { output, .. } => {
-                    let snippet: String = output.chars().take(200).collect();
+                    let snippet: String = output.chars().take(2000).collect();
                     s.push_str(&format!("tool: [result: {snippet}]\n"));
                 }
             }
         }
+    }
+    s
+}
+
+/// 扫描 span 内的 ToolCall，按工具名把 `path` 参数分入读/改集合。
+/// `read_file` → `read`；`write_file`/`edit_file` → `modified`。就地累积，
+/// 便于跨多次 compaction 叠加历史。
+pub fn collect_file_paths(span: &[Message], read: &mut BTreeSet<String>, modified: &mut BTreeSet<String>) {
+    for m in span {
+        for it in &m.items {
+            if let MessageItem::ToolCall { name, args, .. } = it {
+                let Some(path) = args.get("path").and_then(|v| v.as_str()) else {
+                    continue;
+                };
+                match name.as_str() {
+                    "read_file" => {
+                        read.insert(path.to_string());
+                    }
+                    "write_file" | "edit_file" => {
+                        modified.insert(path.to_string());
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+}
+
+/// 把读/改文件集合渲染成附加在摘要末尾的块。两集合都空时返回空串（不占 token）。
+pub fn render_file_blocks(read: &BTreeSet<String>, modified: &BTreeSet<String>) -> String {
+    if read.is_empty() && modified.is_empty() {
+        return String::new();
+    }
+    let mut s = String::from("\n\n");
+    if !read.is_empty() {
+        s.push_str("<read-files>\n");
+        for p in read {
+            s.push_str(p);
+            s.push('\n');
+        }
+        s.push_str("</read-files>\n");
+    }
+    if !modified.is_empty() {
+        s.push_str("<modified-files>\n");
+        for p in modified {
+            s.push_str(p);
+            s.push('\n');
+        }
+        s.push_str("</modified-files>\n");
     }
     s
 }
@@ -277,11 +327,51 @@ mod tests {
                 MessageItem::Text { text: "hello".into() },
                 MessageItem::Reasoning { text: "SECRET".into() },
             ]),
-            msg(2, Role::Tool, vec![MessageItem::ToolResult { call_id: "c".into(), output: "x".repeat(500), is_error: false }]),
+            msg(2, Role::Tool, vec![MessageItem::ToolResult { call_id: "c".into(), output: "x".repeat(5000), is_error: false }]),
         ];
         let s = render_span(&span);
         assert!(s.contains("hello"));
-        assert!(!s.contains("SECRET"));           // reasoning omitted
-        assert!(s.len() < 400);                   // tool result truncated, not 500 chars
+        assert!(!s.contains("SECRET"));        // reasoning omitted
+        assert!(s.len() > 1000);               // keeps well past the old 200 cap
+        assert!(s.len() < 2200);               // but still truncated near 2000
+    }
+
+    #[test]
+    fn collect_file_paths_splits_read_and_modified_and_dedups() {
+        use std::collections::BTreeSet;
+        fn call(id: &str, name: &str, args: serde_json::Value) -> Message {
+            msg(0, Role::Assistant, vec![MessageItem::ToolCall { id: id.into(), name: name.into(), args }])
+        }
+        let span = vec![
+            call("c1", "read_file", json!({ "path": "a.rs" })),
+            call("c2", "edit_file", json!({ "path": "b.rs", "old": "x", "new": "y" })),
+            call("c3", "write_file", json!({ "path": "b.rs", "content": "z" })), // dup modified
+            call("c4", "run_command", json!({ "cmd": "ls" })),                    // no path
+            call("c5", "read_file", json!({})),                                  // missing path
+        ];
+        let mut read = BTreeSet::new();
+        let mut modified = BTreeSet::new();
+        collect_file_paths(&span, &mut read, &mut modified);
+        assert_eq!(read.into_iter().collect::<Vec<_>>(), vec!["a.rs".to_string()]);
+        assert_eq!(modified.into_iter().collect::<Vec<_>>(), vec!["b.rs".to_string()]);
+    }
+
+    #[test]
+    fn render_file_blocks_omits_empty_and_formats_present() {
+        use std::collections::BTreeSet;
+        let empty = BTreeSet::new();
+        assert_eq!(render_file_blocks(&empty, &empty), "");
+
+        let read: BTreeSet<String> = ["a.rs".to_string(), "b.rs".to_string()].into_iter().collect();
+        let modified: BTreeSet<String> = ["c.rs".to_string()].into_iter().collect();
+        let s = render_file_blocks(&read, &modified);
+        assert!(s.starts_with("\n\n"));
+        assert!(s.contains("<read-files>\na.rs\nb.rs\n</read-files>"));
+        assert!(s.contains("<modified-files>\nc.rs\n</modified-files>"));
+
+        // 只有 read 非空时不渲染 modified 块。
+        let only_read = render_file_blocks(&read, &empty);
+        assert!(only_read.contains("<read-files>"));
+        assert!(!only_read.contains("<modified-files>"));
     }
 }

@@ -12,7 +12,7 @@ CodeCoder 是一个**已落地**的自主 AI agent，使用 Rust 编写。仓库
 
 > **Background Agent 已落地 headless one-shot runner**(见 ADR 0026):由 `CODECODER_BG_TASK=<task>` 触发,无用户在场地跑完一个 task 即退出;权限走 `codecoder.json` 预授权,任何未授权的 Ask 工具被自动拒绝(记入 `BgOutcome.denied`、发 `ToolFinished{is_error}` 事件),从不弹 prompt。调度外置;SIGINT/内置调度器/多 runner 资源上限仍属延后项。
 
-> **Compaction 已全量实现**(tier-1 + tier-2,见 ADR 0023):tier-1 超阈值时丢 `Reasoning` + 占位化旧 `ToolResult` 正文,保护 anchor 与近端 tail;tier-1 后仍超阈值时,`AgentLoop::context_working_set` 用一次带缓存的 LLM 调用把最旧跨度摘要为合成 `System` 消息,摘要失败/为空则降级回 tier-1。
+> **Compaction 已全量实现**(tier-1 + tier-2,见 ADR 0023):tier-1 超阈值时丢 `Reasoning` + 占位化旧 `ToolResult` 正文,保护 anchor 与近端 tail;tier-1 后仍超阈值时,`AgentLoop::context_working_set` 用一次带缓存的 LLM 调用把最旧跨度摘要为合成 `System` 消息,摘要失败/为空则降级回 tier-1。tier-2 摘要采用结构化模板、迭代式合并(span 增长只摘增量并带入上一版摘要),并累积追踪 read/modified 文件路径附于摘要末尾(见 docs/adr/0023 增强说明)。
 
 改动代码时依据 `CONTEXT.md` 的术语与 `docs/adr/` 的决策契约;新增/修改功能后请同步更新 `ARCHITECTURE.md`、`README.md` 中的相关数字与描述,使文档与代码保持一致。
 

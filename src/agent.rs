@@ -6,6 +6,7 @@ use crate::provider::{CompletionRequest, Provider};
 use crate::registry::Registry;
 use crate::session::{self, Session};
 use crate::tool::{ToolCtx, Toolbox};
+use std::collections::BTreeSet;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::mpsc::{Receiver, Sender, channel};
@@ -94,6 +95,8 @@ impl CancelToken {
 struct Tier2Summary {
     covered_last_id: MessageId,
     text: String,
+    read_files: BTreeSet<String>,
+    modified_files: BTreeSet<String>,
 }
 
 /// The top-level agent: owns the Provider and the Session, runs on its own thread,
@@ -282,19 +285,31 @@ impl AgentLoop {
         }
     }
 
-    /// One-shot LLM summary of a rendered span (ADR 0023 tier-2). Provider-neutral
-    /// request with no tools; returns Err on transport failure or empty output.
-    fn summarize_span(&self, rendered: &str) -> anyhow::Result<String> {
-        let system = "You are compacting an agent's conversation history. Summarize the \
-            following earlier messages into a concise brief that preserves the task/goals, \
-            decisions made, key facts and file paths, tool outcomes, and open threads. Omit \
-            chit-chat. Output plain prose, no preamble.";
+    /// One-shot LLM summary of a rendered span (ADR 0023 tier-2). Structured brief;
+    /// when `previous` is set, the earlier summary is merged with the new span
+    /// (iterative compaction). Returns Err on transport failure or empty output.
+    fn summarize_span(&self, rendered: &str, previous: Option<&str>) -> anyhow::Result<String> {
+        let system = "You are compacting an agent's conversation history into a concise, \
+            structured brief. Use exactly these sections, plain prose under each, and omit a \
+            section when it has no content:\n\
+            ## 目标\n## 约束与偏好\n## 进展（已完成 / 进行中 / 受阻）\n## 关键决策\n## 下一步\n## 关键上下文\n\
+            Preserve goals, decisions, key facts, file paths, tool outcomes, and open threads. \
+            Do NOT list read/modified files — those are tracked separately. Omit chit-chat and \
+            any preamble.";
+        let mut messages = vec![Message::text(0, Role::System, system)];
+        let mut uid = 1u64;
+        if let Some(prev) = previous {
+            messages.push(Message::text(
+                uid,
+                Role::User,
+                format!("先前摘要（请与下列新增消息合并，更新为一份完整摘要）：\n{prev}"),
+            ));
+            uid += 1;
+        }
+        messages.push(Message::text(uid, Role::User, rendered.to_string()));
         let req = CompletionRequest {
             model: self.model.clone(),
-            messages: vec![
-                Message::text(0, Role::System, system),
-                Message::text(1, Role::User, rendered.to_string()),
-            ],
+            messages,
             max_tokens: 1024,
             temperature: 0.0,
             tools: vec![],
@@ -332,29 +347,66 @@ impl AgentLoop {
         let anchor_id = self.session.messages[start - 1].id;
         let covered_last_id = self.session.messages[end - 1].id;
 
-        // Reuse cache if it still covers the same span; else summarize once.
-        let cached = self
-            .tier2
-            .as_ref()
-            .filter(|s| s.covered_last_id == covered_last_id)
-            .map(|s| s.text.clone());
-        let text = match cached {
-            Some(t) => t,
-            None => {
-                let rendered = compaction::render_span(&self.session.messages[start..end]);
-                match self.summarize_span(&rendered) {
+        let mut read = BTreeSet::new();
+        let mut modified = BTreeSet::new();
+        let prose: String;
+
+        match self.tier2.as_ref() {
+            // Span unchanged → full reuse, no LLM call, no Notice.
+            Some(c) if c.covered_last_id == covered_last_id => {
+                read = c.read_files.clone();
+                modified = c.modified_files.clone();
+                prose = c.text.clone();
+            }
+            // Span grew → summarize only the increment, seeded by cached summary + files.
+            Some(c) if c.covered_last_id < covered_last_id => {
+                read = c.read_files.clone();
+                modified = c.modified_files.clone();
+                let inc_start = self.session.messages[start..end]
+                    .iter()
+                    .position(|m| m.id > c.covered_last_id)
+                    .map(|p| start + p)
+                    .unwrap_or(start);
+                let slice = &self.session.messages[inc_start..end];
+                compaction::collect_file_paths(slice, &mut read, &mut modified);
+                let rendered = compaction::render_span(slice);
+                let prev = c.text.clone();
+                match self.summarize_span(&rendered, Some(&prev)) {
                     Ok(t) => {
-                        self.tier2 = Some(Tier2Summary { covered_last_id, text: t.clone() });
                         let _ = event_tx.send(AgentEvent::Notice(
                             "compacting context (summarizing earlier turns)…".into(),
                         ));
-                        t
+                        prose = t;
                     }
-                    Err(_) => return tier1, // graceful degrade
+                    Err(_) => return tier1,
                 }
             }
-        };
-        compaction::apply_tier2(&tier1, anchor_id, covered_last_id, &text)
+            // No cache, or id rewound (e.g. after /resume) → summarize the whole span.
+            _ => {
+                let slice = &self.session.messages[start..end];
+                compaction::collect_file_paths(slice, &mut read, &mut modified);
+                let rendered = compaction::render_span(slice);
+                match self.summarize_span(&rendered, None) {
+                    Ok(t) => {
+                        let _ = event_tx.send(AgentEvent::Notice(
+                            "compacting context (summarizing earlier turns)…".into(),
+                        ));
+                        prose = t;
+                    }
+                    Err(_) => return tier1,
+                }
+            }
+        }
+
+        self.tier2 = Some(Tier2Summary {
+            covered_last_id,
+            text: prose.clone(),
+            read_files: read.clone(),
+            modified_files: modified.clone(),
+        });
+
+        let summary_text = format!("{}{}", prose, compaction::render_file_blocks(&read, &modified));
+        compaction::apply_tier2(&tier1, anchor_id, covered_last_id, &summary_text)
     }
 
     /// One turn: query → if the reply calls tools, execute them (permission-gated),
@@ -1093,6 +1145,72 @@ mod tests {
             "headless must not emit PermissionRequest");
         // The unauthorized write did not happen.
         assert!(!dir.join("hacked.txt").exists(), "unauthorized write_file must be denied");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Returns a fixed summary text for any tier-2 summarization request.
+    struct SummaryProvider;
+    impl Provider for SummaryProvider {
+        fn name(&self) -> &str {
+            "summary"
+        }
+        fn complete(&self, _req: &CompletionRequest) -> anyhow::Result<Message> {
+            Ok(Message::text(0, Role::Assistant, "SUMMARY-PROSE"))
+        }
+    }
+
+    #[test]
+    fn context_working_set_summarizes_and_appends_file_blocks() {
+        let dir = std::env::temp_dir().join(format!("cc_compact_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let provider = Arc::new(SummaryProvider);
+        let mut agent = AgentLoop::new(provider, "m", 256, 0.0, dir.clone());
+        // Force compaction regardless of real token counts.
+        agent.model_window = 10;
+        agent.session.messages = vec![
+            Message::text(0, Role::User, "goal"), // anchor
+            Message {
+                id: 1,
+                role: Role::Assistant,
+                items: vec![MessageItem::ToolCall {
+                    id: "c1".into(),
+                    name: "read_file".into(),
+                    args: serde_json::json!({ "path": "foo.rs" }),
+                }],
+            },
+            Message {
+                id: 2,
+                role: Role::Tool,
+                items: vec![MessageItem::ToolResult {
+                    call_id: "c1".into(),
+                    output: "contents".into(),
+                    is_error: false,
+                }],
+            },
+            Message::text(3, Role::Assistant, "did stuff"),
+            Message::text(4, Role::User, "next"), // last user → span = ids 1..=3
+            Message::text(5, Role::Assistant, "ok"),
+        ];
+        let (tx, _rx) = std::sync::mpsc::channel();
+
+        let out = agent.context_working_set(&tx);
+        let sys = out
+            .iter()
+            .find(|m| m.role == Role::System)
+            .and_then(|m| m.items.iter().find_map(|it| match it {
+                MessageItem::Text { text } => Some(text.clone()),
+                _ => None,
+            }))
+            .expect("a System summary message should be inserted");
+        assert!(sys.contains("SUMMARY-PROSE"), "got: {sys}");
+        assert!(sys.contains("<read-files>"), "got: {sys}");
+        assert!(sys.contains("foo.rs"), "got: {sys}");
+
+        // Second call with an unchanged span reuses the cache (no panic, same blocks).
+        let out2 = agent.context_working_set(&tx);
+        assert!(out2.iter().any(|m| m.role == Role::System
+            && m.items.iter().any(|it| matches!(it, MessageItem::Text { text } if text.contains("foo.rs")))));
+
         std::fs::remove_dir_all(&dir).ok();
     }
 }
