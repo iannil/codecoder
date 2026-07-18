@@ -15,6 +15,7 @@ pub mod provider;
 pub mod registry;
 pub mod session;
 pub mod tokenizer;
+pub mod trust;
 pub mod tool;
 pub mod tui;
 
@@ -22,12 +23,12 @@ use std::sync::Arc;
 use std::sync::mpsc;
 use std::thread;
 
-pub use agent::{AgentCommand, AgentEvent, AgentLoop, PermissionReply};
+pub use agent::{AgentCommand, AgentEvent, AgentLoop, PermissionReply, TrustReply};
 pub use background::BgOutcome;
 pub use config::Config;
 pub use message::{Message, MessageItem, Role};
 pub use permission::PermScope;
-pub use provider::{CompletionRequest, Provider};
+pub use provider::{Completion, CompletionRequest, Provider, StopReason};
 
 /// Provider selection (ADR 0017). An env hook allows a scripted provider to be
 /// injected for the pty smoke layer (L2); real runs use OpenAI or the stub.

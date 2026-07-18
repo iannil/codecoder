@@ -2,7 +2,7 @@
 pub mod render;
 pub mod run;
 
-use crate::agent::{CancelToken, PermissionReply};
+use crate::agent::{CancelToken, PermissionReply, TrustReply};
 use crate::permission::PermScope;
 use ratatui::style::Color;
 use std::path::PathBuf;
@@ -114,12 +114,21 @@ pub struct ConfirmDialog {
     pub reply_tx: Sender<bool>,
 }
 
+/// A project-trust prompt (ADR 0028): trust this project's disk "self"?
+/// `selected`: 0 = always, 1 = once, 2 = never.
+pub struct TrustDialog {
+    pub root: PathBuf,
+    pub selected: usize,
+    pub reply_tx: Sender<TrustReply>,
+}
+
 /// A blocking modal overlay (ADR 0016). While open, the derived Mode is Dialog.
 pub enum Dialog {
     ToolPermission(PermissionDialog),
     PlanApproval(PlanDialog),
     AskQuestion(AskDialog),
     Confirm(ConfirmDialog),
+    Trust(TrustDialog),
 }
 
 /// A non-blocking input-completion popup above the input (ADR 0024 / SLASH mode).

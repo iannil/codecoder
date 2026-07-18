@@ -41,6 +41,7 @@ pub fn draw(f: &mut Frame, app: &TuiApp) {
         Some(Dialog::AskQuestion(_)) => draw_ask(f, app, area),
         Some(Dialog::PlanApproval(_)) => draw_plan(f, app, area),
         Some(Dialog::Confirm(_)) => draw_confirm(f, app, area),
+        Some(Dialog::Trust(_)) => draw_trust(f, app, area),
         None => {}
     }
 
@@ -180,6 +181,44 @@ fn draw_confirm(f: &mut Frame, app: &TuiApp, area: Rect) {
     let block = Block::default()
         .borders(Borders::ALL)
         .title(" Confirm ")
+        .border_style(Style::default().fg(t.accent));
+    f.render_widget(Clear, rect);
+    f.render_widget(Paragraph::new(lines).block(block).wrap(Wrap { trim: false }), rect);
+}
+
+fn draw_trust(f: &mut Frame, app: &TuiApp, area: Rect) {
+    let Some(Dialog::Trust(d)) = &app.dialog else { return };
+    let t = &app.theme;
+    let w = 68u16.min(area.width.saturating_sub(4));
+    let rect = centered(w, 7, area);
+    let opts = [("a", "always"), ("o", "once"), ("n", "never")];
+    let row: Vec<Span> = opts
+        .iter()
+        .enumerate()
+        .flat_map(|(i, (k, label))| {
+            let style = if i == d.selected {
+                Style::default().fg(t.accent).add_modifier(Modifier::BOLD | Modifier::REVERSED)
+            } else {
+                Style::default().fg(t.fg)
+            };
+            vec![Span::styled(format!(" [{k}] {label} "), style), Span::raw("  ")]
+        })
+        .collect();
+    let lines = vec![
+        Line::from(Span::styled(
+            format!("Trust this project's agent config? {}", d.root.display()),
+            Style::default().fg(t.fg),
+        )),
+        Line::from(Span::styled(
+            "Loads AGENTS.md, skills/prompts/capabilities, and codecoder.json.",
+            Style::default().fg(t.fg),
+        )),
+        Line::from(""),
+        Line::from(row),
+    ];
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(" Trust project? ")
         .border_style(Style::default().fg(t.accent));
     f.render_widget(Clear, rect);
     f.render_widget(Paragraph::new(lines).block(block).wrap(Wrap { trim: false }), rect);

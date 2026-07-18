@@ -1,7 +1,7 @@
 // TUI run loop (ADR 0024): fullscreen alternate screen, unified channel with an
 // input thread + AgentEvent forwarder + animation tick, blocking recv (0 idle CPU).
-use super::{Activity, AskDialog, Block, ConfirmDialog, Dialog, PermissionDialog, PlanDialog, ToolResultView, TuiApp};
-use crate::agent::{AgentCommand, AgentEvent, CancelToken};
+use super::{Activity, AskDialog, Block, ConfirmDialog, Dialog, PermissionDialog, PlanDialog, ToolResultView, TrustDialog, TuiApp};
+use crate::agent::{AgentCommand, AgentEvent, CancelToken, TrustReply};
 use std::path::PathBuf;
 use crossterm::event::{
     self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
@@ -159,6 +159,9 @@ fn handle_agent(app: &mut TuiApp, ev: AgentEvent) {
         AgentEvent::Confirm { prompt, reply_tx } => {
             app.dialog = Some(Dialog::Confirm(ConfirmDialog { prompt, selected: 0, reply_tx }));
         }
+        AgentEvent::TrustPrompt { root, reply_tx } => {
+            app.dialog = Some(Dialog::Trust(TrustDialog { root, selected: 0, reply_tx }));
+        }
         AgentEvent::TurnComplete => {
             app.streaming = false;
             app.activity = None;
@@ -183,6 +186,7 @@ fn handle_input(app: &mut TuiApp, ev: Event, cmd_tx: &Sender<AgentCommand>) {
                 Some(Dialog::AskQuestion(_)) => handle_ask_key(app, k),
                 Some(Dialog::PlanApproval(_)) => handle_plan_key(app, k),
                 Some(Dialog::Confirm(_)) => handle_confirm_key(app, k),
+                Some(Dialog::Trust(_)) => handle_trust_key(app, k),
                 None if app.help_open => handle_help_key(app, k),
                 None if app.search_active => handle_search_key(app, k),
                 None if app.browsing => handle_browse_key(app, k),
@@ -269,6 +273,33 @@ fn handle_confirm_key(app: &mut TuiApp, k: KeyEvent) {
         KeyCode::Enter => {
             let yes = d.selected == 0;
             answer(app, yes);
+        }
+        _ => {}
+    }
+}
+
+fn handle_trust_key(app: &mut TuiApp, k: KeyEvent) {
+    let Some(Dialog::Trust(d)) = &mut app.dialog else { return };
+    // 0 = always, 1 = once, 2 = never.
+    let answer = |app: &mut TuiApp, reply: TrustReply| {
+        if let Some(Dialog::Trust(d)) = app.dialog.take() {
+            let _ = d.reply_tx.send(reply);
+        }
+    };
+    match k.code {
+        KeyCode::Left | KeyCode::Up => d.selected = d.selected.saturating_sub(1),
+        KeyCode::Right | KeyCode::Down => d.selected = (d.selected + 1).min(2),
+        KeyCode::Char('a') | KeyCode::Char('A') => answer(app, TrustReply::Always),
+        KeyCode::Char('o') | KeyCode::Char('O') => answer(app, TrustReply::Once),
+        // Esc defaults to the safe choice: don't trust.
+        KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => answer(app, TrustReply::Never),
+        KeyCode::Enter => {
+            let reply = match d.selected {
+                0 => TrustReply::Always,
+                1 => TrustReply::Once,
+                _ => TrustReply::Never,
+            };
+            answer(app, reply);
         }
         _ => {}
     }
