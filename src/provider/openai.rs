@@ -1,5 +1,5 @@
 // OpenAiClient: the canonical chat-completions Provider (ADR 0017).
-use super::{CompletionRequest, Provider};
+use super::{Completion, CompletionRequest, Provider, StopReason};
 use crate::config::Config;
 use crate::message::{Message, MessageItem, Role};
 use serde_json::{Value, json};
@@ -27,7 +27,7 @@ impl Provider for OpenAiClient {
         "openai"
     }
 
-    fn complete(&self, req: &CompletionRequest) -> anyhow::Result<Message> {
+    fn complete(&self, req: &CompletionRequest) -> anyhow::Result<Completion> {
         let mut body = json!({
             "model": req.model,
             "messages": to_wire_messages(&req.messages),
@@ -120,14 +120,23 @@ fn collect_text(msg: &Message) -> String {
         .join("")
 }
 
-/// OpenAI response -> neutral assistant Message. `id` is left 0; the AgentLoop
-/// assigns the session-local MessageId on append.
-fn from_wire_response(json: &Value) -> anyhow::Result<Message> {
-    let message = json
+/// OpenAI response -> neutral assistant Message + StopReason. `id` is left 0; the
+/// AgentLoop assigns the session-local MessageId on append.
+fn from_wire_response(json: &Value) -> anyhow::Result<Completion> {
+    let choice = json
         .get("choices")
         .and_then(|c| c.get(0))
-        .and_then(|c| c.get("message"))
+        .ok_or_else(|| anyhow::anyhow!("malformed response: missing choices[0]"))?;
+    let message = choice
+        .get("message")
         .ok_or_else(|| anyhow::anyhow!("malformed response: missing choices[0].message"))?;
+
+    let stop_reason = match choice.get("finish_reason").and_then(Value::as_str) {
+        Some("length") => StopReason::Length,
+        Some("tool_calls") => StopReason::ToolCalls,
+        Some("stop") => StopReason::Stop,
+        _ => StopReason::Other,
+    };
 
     let mut items = Vec::new();
     if let Some(content) = message.get("content").and_then(Value::as_str) {
@@ -153,7 +162,8 @@ fn from_wire_response(json: &Value) -> anyhow::Result<Message> {
         }
     }
 
-    Ok(Message { id: 0, role: Role::Assistant, items })
+    let message = Message { id: 0, role: Role::Assistant, items };
+    Ok(Completion { message, stop_reason })
 }
 
 #[cfg(test)]
@@ -207,6 +217,35 @@ mod tests {
     }
 
     #[test]
+    fn finish_reason_maps_to_stop_reason() {
+        let length = json!({
+            "choices": [{ "finish_reason": "length", "message": { "content": "partial" } }]
+        });
+        assert_eq!(from_wire_response(&length).unwrap().stop_reason, StopReason::Length);
+
+        let tools = json!({
+            "choices": [{
+                "finish_reason": "tool_calls",
+                "message": { "tool_calls": [{
+                    "id": "c", "type": "function",
+                    "function": { "name": "x", "arguments": "{}" }
+                }] }
+            }]
+        });
+        assert_eq!(from_wire_response(&tools).unwrap().stop_reason, StopReason::ToolCalls);
+
+        let stop = json!({
+            "choices": [{ "finish_reason": "stop", "message": { "content": "done" } }]
+        });
+        assert_eq!(from_wire_response(&stop).unwrap().stop_reason, StopReason::Stop);
+
+        let other = json!({
+            "choices": [{ "finish_reason": "content_filter", "message": { "content": "" } }]
+        });
+        assert_eq!(from_wire_response(&other).unwrap().stop_reason, StopReason::Other);
+    }
+
+    #[test]
     fn response_with_content_and_tool_calls_parses() {
         let resp = json!({
             "choices": [{
@@ -220,7 +259,7 @@ mod tests {
                 }
             }]
         });
-        let msg = from_wire_response(&resp).unwrap();
+        let msg = from_wire_response(&resp).unwrap().message;
         assert!(matches!(&msg.items[0], MessageItem::Text { text } if text == "sure"));
         match &msg.items[1] {
             MessageItem::ToolCall { id, name, args } => {

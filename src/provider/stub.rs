@@ -1,5 +1,5 @@
 // StubClient: deterministic fake used when CODECODER_API_KEY is unset (ADR 0017).
-use super::{CompletionRequest, Provider};
+use super::{Completion, CompletionRequest, Provider};
 use crate::message::{Message, MessageItem, Role};
 use std::sync::Mutex;
 
@@ -10,14 +10,15 @@ impl Provider for StubClient {
         "stub"
     }
 
-    fn complete(&self, _req: &CompletionRequest) -> anyhow::Result<Message> {
+    fn complete(&self, _req: &CompletionRequest) -> anyhow::Result<Completion> {
         Ok(Message {
             id: 0,
             role: Role::Assistant,
             items: vec![MessageItem::Text {
                 text: "[stub] no API key set — StubClient deterministic response".into(),
             }],
-        })
+        }
+        .into())
     }
 }
 
@@ -43,7 +44,7 @@ impl Provider for ScriptFileProvider {
     fn name(&self) -> &str {
         "script-file"
     }
-    fn complete(&self, _req: &CompletionRequest) -> anyhow::Result<Message> {
+    fn complete(&self, _req: &CompletionRequest) -> anyhow::Result<Completion> {
         let mut i = self.idx.lock().unwrap();
         let msg = self.turns.get(*i).cloned().unwrap_or(Message {
             id: 0,
@@ -53,6 +54,6 @@ impl Provider for ScriptFileProvider {
             }],
         });
         *i += 1;
-        Ok(msg)
+        Ok(msg.into())
     }
 }

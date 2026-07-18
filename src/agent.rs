@@ -2,7 +2,7 @@
 use crate::compaction;
 use crate::message::{Message, MessageId, MessageItem, Role};
 use crate::permission::{PermScope, Permission, ProjectAllowlist, SessionAllowlist, scope_ceiling};
-use crate::provider::{CompletionRequest, Provider};
+use crate::provider::{CompletionRequest, Provider, StopReason};
 use crate::registry::Registry;
 use crate::session::{self, Session};
 use crate::tool::{ToolCtx, Toolbox};
@@ -314,7 +314,7 @@ impl AgentLoop {
             temperature: 0.0,
             tools: vec![],
         };
-        let reply = self.provider.complete(&req)?;
+        let reply = self.provider.complete(&req)?.message;
         let text: String = reply
             .items
             .iter()
@@ -443,8 +443,8 @@ impl AgentLoop {
                 tools: self.toolbox.wire_schemas(),
             };
 
-            let reply = match self.provider.complete(&req) {
-                Ok(r) => r,
+            let (reply, stop_reason) = match self.provider.complete(&req) {
+                Ok(c) => (c.message, c.stop_reason),
                 Err(e) => {
                     let _ = event_tx.send(AgentEvent::StreamDelta(format!("error: {e}")));
                     break;
@@ -471,6 +471,34 @@ impl AgentLoop {
 
             if tool_calls.is_empty() {
                 break; // no tools requested → turn is done
+            }
+
+            // Truncation guard (roadmap #1 / ADR 0027): if the response was cut off
+            // at max_tokens, the last tool call's arguments may be half-serialized —
+            // parsing can silently yield wrong/empty args. Fail the WHOLE batch with
+            // an error result (never execute) and loop so the model retries.
+            if stop_reason == StopReason::Length {
+                let results = tool_calls
+                    .iter()
+                    .map(|(call_id, name, _)| {
+                        let output = "tool call truncated: the response hit max_tokens before the \
+                             arguments finished; not executed. Retry with a shorter response or \
+                             split the work."
+                            .to_string();
+                        let _ = event_tx.send(AgentEvent::ToolFinished {
+                            name: name.clone(),
+                            is_error: true,
+                            output: output.clone(),
+                        });
+                        MessageItem::ToolResult {
+                            call_id: call_id.clone(),
+                            output,
+                            is_error: true,
+                        }
+                    })
+                    .collect();
+                self.append(Role::Tool, results);
+                continue; // retry: feed the errors back, don't dispatch
             }
 
             // Execute each tool call, gating on permission, and collect results.
@@ -821,7 +849,7 @@ fn preview_args(args: &serde_json::Value) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::provider::CompletionRequest;
+    use crate::provider::{Completion, CompletionRequest, StopReason};
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
 
@@ -837,7 +865,7 @@ mod tests {
         fn name(&self) -> &str {
             "scripted"
         }
-        fn complete(&self, req: &CompletionRequest) -> anyhow::Result<Message> {
+        fn complete(&self, req: &CompletionRequest) -> anyhow::Result<Completion> {
             let n = self.calls.fetch_add(1, Ordering::SeqCst);
             if n == 0 {
                 Ok(Message {
@@ -848,7 +876,7 @@ mod tests {
                         name: "read_file".into(),
                         args: serde_json::json!({ "path": self.path }),
                     }],
-                })
+                }.into())
             } else {
                 // The tool result must have been fed back into the request.
                 let fed = req.messages.iter().any(|m| {
@@ -857,7 +885,7 @@ mod tests {
                             MessageItem::ToolResult { output, .. } if output.contains("hello world")))
                 });
                 *self.saw_result.lock().unwrap() = fed;
-                Ok(Message::text(0, Role::Assistant, "done"))
+                Ok(Message::text(0, Role::Assistant, "done").into())
             }
         }
     }
@@ -871,7 +899,7 @@ mod tests {
         fn name(&self) -> &str {
             "sub-scripted"
         }
-        fn complete(&self, _req: &CompletionRequest) -> anyhow::Result<Message> {
+        fn complete(&self, _req: &CompletionRequest) -> anyhow::Result<Completion> {
             match self.calls.fetch_add(1, Ordering::SeqCst) {
                 0 => Ok(Message {
                     id: 0,
@@ -881,9 +909,9 @@ mod tests {
                         name: "agent".into(),
                         args: serde_json::json!({ "task": "research the thing" }),
                     }],
-                }),
-                1 => Ok(Message::text(0, Role::Assistant, "sub findings")),
-                _ => Ok(Message::text(0, Role::Assistant, "final answer")),
+                }.into()),
+                1 => Ok(Message::text(0, Role::Assistant, "sub findings").into()),
+                _ => Ok(Message::text(0, Role::Assistant, "final answer").into()),
             }
         }
     }
@@ -922,7 +950,7 @@ mod tests {
         fn name(&self) -> &str {
             "ask-scripted"
         }
-        fn complete(&self, req: &CompletionRequest) -> anyhow::Result<Message> {
+        fn complete(&self, req: &CompletionRequest) -> anyhow::Result<Completion> {
             if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
                 Ok(Message {
                     id: 0,
@@ -932,7 +960,7 @@ mod tests {
                         name: "ask_user".into(),
                         args: serde_json::json!({ "question": "favorite color?" }),
                     }],
-                })
+                }.into())
             } else {
                 // Prove the user's answer was fed back into the request.
                 let answer = req
@@ -944,7 +972,7 @@ mod tests {
                         _ => None,
                     })
                     .unwrap_or_default();
-                Ok(Message::text(0, Role::Assistant, format!("you said {answer}")))
+                Ok(Message::text(0, Role::Assistant, format!("you said {answer}")).into())
             }
         }
     }
@@ -980,7 +1008,7 @@ mod tests {
         fn name(&self) -> &str {
             "plan-scripted"
         }
-        fn complete(&self, _req: &CompletionRequest) -> anyhow::Result<Message> {
+        fn complete(&self, _req: &CompletionRequest) -> anyhow::Result<Completion> {
             if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
                 Ok(Message {
                     id: 0,
@@ -990,9 +1018,9 @@ mod tests {
                         name: "plan".into(),
                         args: serde_json::json!({ "steps": ["do a", "do b"] }),
                     }],
-                })
+                }.into())
             } else {
-                Ok(Message::text(0, Role::Assistant, "proceeding"))
+                Ok(Message::text(0, Role::Assistant, "proceeding").into())
             }
         }
     }
@@ -1004,7 +1032,7 @@ mod tests {
         fn name(&self) -> &str {
             "confirm-scripted"
         }
-        fn complete(&self, req: &CompletionRequest) -> anyhow::Result<Message> {
+        fn complete(&self, req: &CompletionRequest) -> anyhow::Result<Completion> {
             if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
                 Ok(Message {
                     id: 0,
@@ -1014,7 +1042,7 @@ mod tests {
                         name: "confirm".into(),
                         args: serde_json::json!({ "prompt": "proceed?" }),
                     }],
-                })
+                }.into())
             } else {
                 let ans = req
                     .messages
@@ -1025,7 +1053,7 @@ mod tests {
                         _ => None,
                     })
                     .unwrap_or_default();
-                Ok(Message::text(0, Role::Assistant, format!("answer={ans}")))
+                Ok(Message::text(0, Role::Assistant, format!("answer={ans}")).into())
             }
         }
     }
@@ -1119,16 +1147,16 @@ mod tests {
         struct WriteThenStop { n: std::sync::Mutex<u32> }
         impl Provider for WriteThenStop {
             fn name(&self) -> &str { "write-then-stop" }
-            fn complete(&self, _req: &CompletionRequest) -> anyhow::Result<Message> {
+            fn complete(&self, _req: &CompletionRequest) -> anyhow::Result<Completion> {
                 let mut n = self.n.lock().unwrap();
                 *n += 1;
                 if *n == 1 {
                     Ok(Message::new(0, Role::Assistant, vec![MessageItem::ToolCall {
                         id: "c1".into(), name: "write_file".into(),
                         args: serde_json::json!({"path": "hacked.txt", "content": "x"}),
-                    }]))
+                    }]).into())
                 } else {
-                    Ok(Message::text(0, Role::Assistant, "done"))
+                    Ok(Message::text(0, Role::Assistant, "done").into())
                 }
             }
         }
@@ -1148,14 +1176,77 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
+    /// call 0 → a tool call in a response the provider TRUNCATED at max_tokens
+    /// (StopReason::Length); call 1 → recovery text. The truncated tool call must
+    /// NOT be executed (its args may be half-serialized), roadmap #1 / ADR 0027.
+    struct TruncatedToolCall {
+        calls: AtomicUsize,
+    }
+    impl Provider for TruncatedToolCall {
+        fn name(&self) -> &str {
+            "truncated"
+        }
+        fn complete(&self, _req: &CompletionRequest) -> anyhow::Result<Completion> {
+            if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                Ok(Completion {
+                    message: Message::new(
+                        0,
+                        Role::Assistant,
+                        vec![MessageItem::ToolCall {
+                            id: "t1".into(),
+                            name: "read_file".into(),
+                            args: serde_json::json!({ "path": "note.txt" }),
+                        }],
+                    ),
+                    stop_reason: StopReason::Length,
+                })
+            } else {
+                Ok(Message::text(0, Role::Assistant, "recovered").into())
+            }
+        }
+    }
+
+    #[test]
+    fn truncated_tool_call_is_not_executed_and_loop_recovers() {
+        let dir = std::env::temp_dir().join(format!("cc_trunc_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("note.txt"), "hello world").unwrap();
+
+        let provider = Arc::new(TruncatedToolCall { calls: AtomicUsize::new(0) });
+        let mut agent = AgentLoop::new(provider, "m", 256, 0.0, dir.clone());
+
+        let (etx, erx) = channel();
+        agent.process_turn("read note.txt".into(), &etx);
+        drop(etx);
+        let events: Vec<_> = erx.into_iter().collect();
+
+        // The truncated tool call must never have started executing.
+        assert!(
+            !events.iter().any(|e| matches!(e, AgentEvent::ToolStarted { name, .. } if name == "read_file")),
+            "a truncated tool call must not be dispatched"
+        );
+        // Instead, an error ToolResult was fed back so the model can retry.
+        assert!(
+            agent.session.messages.iter().any(|m| m.role == Role::Tool
+                && m.items.iter().any(|it| matches!(it,
+                    MessageItem::ToolResult { output, is_error, .. }
+                        if *is_error && output.contains("truncated")))),
+            "an is_error truncation ToolResult should be appended"
+        );
+        // ...and the loop continued to the recovery turn.
+        assert_eq!(agent.last_assistant_text(), "recovered");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     /// Returns a fixed summary text for any tier-2 summarization request.
     struct SummaryProvider;
     impl Provider for SummaryProvider {
         fn name(&self) -> &str {
             "summary"
         }
-        fn complete(&self, _req: &CompletionRequest) -> anyhow::Result<Message> {
-            Ok(Message::text(0, Role::Assistant, "SUMMARY-PROSE"))
+        fn complete(&self, _req: &CompletionRequest) -> anyhow::Result<Completion> {
+            Ok(Message::text(0, Role::Assistant, "SUMMARY-PROSE").into())
         }
     }
 

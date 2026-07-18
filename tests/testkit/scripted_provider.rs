@@ -1,5 +1,5 @@
 use std::sync::{Arc, Mutex};
-use codecoder::{CompletionRequest, Message, MessageItem, Provider, Role};
+use codecoder::{Completion, CompletionRequest, Message, MessageItem, Provider, Role};
 
 #[derive(Clone)]
 pub struct RecordedRequest {
@@ -32,7 +32,7 @@ impl ScriptedProvider {
 
 impl Provider for ScriptedProvider {
     fn name(&self) -> &str { "scripted" }
-    fn complete(&self, req: &CompletionRequest) -> anyhow::Result<Message> {
+    fn complete(&self, req: &CompletionRequest) -> anyhow::Result<Completion> {
         self.recorder.lock().unwrap().push(RecordedRequest {
             model: req.model.clone(),
             messages: req.messages.clone(),
@@ -46,7 +46,10 @@ impl Provider for ScriptedProvider {
             items: vec![MessageItem::Text { text: "[done]".into() }],
         });
         *i += 1;
-        Ok(msg)
+        // Stop reason is inferred from the message shape (From<Message>): a tool
+        // call implies ToolCalls, else Stop — never Length, so scripted turns are
+        // always safe to execute.
+        Ok(msg.into())
     }
 }
 
