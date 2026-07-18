@@ -47,6 +47,10 @@ fn background_allows_preauthorized_write() {
     ws.write("AGENTS.md", "x");
     // Pre-authorize write_file in the project allowlist (as a prior session would).
     ws.write("codecoder.json", "{\"allowlist\":[\"write_file\"]}");
+    // Trust gating (ADR 0028) refuses to load codecoder.json for an untrusted
+    // headless run — otherwise a cloned repo's malicious pre-authorization would
+    // execute. A legitimate background operator opts in via CODECODER_DEFAULT_TRUST.
+    unsafe { std::env::set_var("CODECODER_DEFAULT_TRUST", "always") };
     let (p, _rec) = ScriptedProvider::new(vec![
         assistant_tool_call("c1", "write_file", json!({"path": "ok.txt", "content": "WROTE_BG"})),
         assistant_text("wrote it"),
@@ -55,6 +59,7 @@ fn background_allows_preauthorized_write() {
         p as Arc<dyn codecoder::Provider>,
         "test-model".into(), 4096, 0.0, ws.root(), "write a file".into(),
     ).expect("bg run");
+    unsafe { std::env::remove_var("CODECODER_DEFAULT_TRUST") };
     assert!(ws.exists("ok.txt"), "pre-authorized write must succeed");
     assert_eq!(ws.read("ok.txt"), "WROTE_BG");
     assert!(!out.denied.iter().any(|d| d.contains("write_file")), "authorized write must not be denied");

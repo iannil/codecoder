@@ -6,7 +6,7 @@ use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use codecoder::{AgentCommand, AgentEvent, AgentLoop, PermScope, PermissionReply, Provider};
+use codecoder::{AgentCommand, AgentEvent, AgentLoop, PermScope, PermissionReply, Provider, TrustReply};
 
 use super::scripted_provider::{RecordedRequest, Recorder};
 
@@ -150,6 +150,10 @@ pub fn run_turn(
                     reply_tx: mpsc::channel().0,
                 });
             }
+            Ok(AgentEvent::TrustPrompt { root, reply_tx }) => {
+                let _ = reply_tx.send(TrustReply::Once);
+                events.push(AgentEvent::TrustPrompt { root, reply_tx: mpsc::channel().0 });
+            }
             Ok(other) => events.push(other),
             Err(_) => break, // timeout — return what we have
         }
@@ -257,6 +261,10 @@ pub fn run_steps(
                         reply_tx: mpsc::channel().0,
                     });
                 }
+                Ok(AgentEvent::TrustPrompt { root, reply_tx }) => {
+                    let _ = reply_tx.send(TrustReply::Once);
+                    events.push(AgentEvent::TrustPrompt { root, reply_tx: mpsc::channel().0 });
+                }
                 Ok(other) => events.push(other),
                 Err(_) => break, // timeout — move on to the next step
             }
@@ -334,6 +342,10 @@ pub fn run_turn_with_cancel(
                     preview,
                     reply_tx: mpsc::channel().0,
                 });
+            }
+            Ok(AgentEvent::TrustPrompt { root, reply_tx }) => {
+                let _ = reply_tx.send(TrustReply::Once);
+                events.push(AgentEvent::TrustPrompt { root, reply_tx: mpsc::channel().0 });
             }
             Ok(other) => events.push(other),
             Err(_) => break, // timeout — return what we have

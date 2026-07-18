@@ -5,6 +5,7 @@ use crate::permission::{PermScope, Permission, ProjectAllowlist, SessionAllowlis
 use crate::provider::{CompletionRequest, Provider, StopReason};
 use crate::registry::Registry;
 use crate::session::{self, Session};
+use crate::trust::{self, TrustDecision};
 use crate::tool::{ToolCtx, Toolbox};
 use std::collections::BTreeSet;
 use std::path::PathBuf;
@@ -35,6 +36,14 @@ pub enum PermissionReply {
     Grant(PermScope),
     Deny,
     Cancelled,
+}
+
+/// The user's answer to a project-trust prompt (ADR 0028). `Always`/`Never`
+/// persist to the global trust store; `Once` trusts for this session only.
+pub enum TrustReply {
+    Always,
+    Once,
+    Never,
 }
 
 /// agent → TUI over `event_rx`. One-way stream/state traffic, plus blocking
@@ -69,6 +78,13 @@ pub enum AgentEvent {
         prompt: String,
         reply_tx: Sender<bool>,
     },
+    /// First-turn prompt to trust an undecided project's disk "self" (ADR 0028).
+    /// The reply decides whether AGENTS.md/skills/capabilities and the
+    /// codecoder.json allowlist load at all.
+    TrustPrompt {
+        root: PathBuf,
+        reply_tx: Sender<TrustReply>,
+    },
     TurnComplete,
 }
 
@@ -99,6 +115,17 @@ struct Tier2Summary {
     modified_files: BTreeSet<String>,
 }
 
+/// Whether the project's disk "self" (AGENTS.md, skills/prompts/capabilities, the
+/// codecoder.json allowlist) has been loaded (ADR 0028). `Pending` means an
+/// interactive top-level agent has not yet asked the user — it prompts on the
+/// first turn and only then loads. Headless and sub-agents never stay Pending.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TrustState {
+    Trusted,
+    Untrusted,
+    Pending,
+}
+
 /// The top-level agent: owns the Provider and the Session, runs on its own thread,
 /// and is driven by AgentCommands (ADR 0016). Sub-agents reuse the turn logic but
 /// with a restricted tool set and no user channel (ADR 0019).
@@ -127,6 +154,9 @@ pub struct AgentLoop {
     /// gate: an Ask-tool not in an allowlist is auto-denied instead of prompting,
     /// and ask_user/confirm/plan short-circuit — there is no one to answer.
     headless: bool,
+    /// Whether the project's disk "self" has loaded (ADR 0028). Gated at build();
+    /// an interactive undecided project resolves via a first-turn TrustPrompt.
+    trust: TrustState,
     /// Derived tier-2 summary overlay (ADR 0023); never persisted.
     tier2: Option<Tier2Summary>,
 }
@@ -190,13 +220,38 @@ impl AgentLoop {
             .map(|d| d.as_millis())
             .unwrap_or(0);
         let session_path = session::sessions_dir(&root).join(format!("session-{stamp}.json"));
-        let system_prompt = build_system_prompt(&root);
+
+        // Resolve trust (ADR 0028). An explicit recorded decision always wins.
+        // When undecided: headless takes the env default (no one to prompt); a
+        // sub-agent (no persistence, no user channel) defaults to Untrusted; an
+        // interactive top-level agent stays Pending and prompts on its first turn.
+        let trust = match trust::decide(&root) {
+            Some(TrustDecision::Trusted) => TrustState::Trusted,
+            Some(TrustDecision::Untrusted) => TrustState::Untrusted,
+            None if headless => match trust::default_trust() {
+                TrustDecision::Trusted => TrustState::Trusted,
+                TrustDecision::Untrusted => TrustState::Untrusted,
+            },
+            // A sub-agent has no user channel to prompt (ADR 0019) → safe default.
+            None if !persist => TrustState::Untrusted,
+            // Nothing on disk to gate → no need to bother the user.
+            None if !trust::has_config_resources(&root) => TrustState::Trusted,
+            // Interactive top-level, undecided, with real config on disk → ask.
+            None => TrustState::Pending,
+        };
+
+        // The disk "self" loads only when trusted; otherwise the agent runs on its
+        // compiled-in base identity + native tools, with an empty allowlist.
+        let trusted = trust == TrustState::Trusted;
+        let system_prompt = if trusted { build_system_prompt(&root) } else { String::new() };
+        let project_allowlist = if trusted { ProjectAllowlist::load(&root) } else { ProjectAllowlist::default() };
+
         Self {
             provider,
             session: Session::new(model.clone()),
             toolbox,
             allowlist: SessionAllowlist::default(),
-            project_allowlist: ProjectAllowlist::load(&root),
+            project_allowlist,
             root,
             session_path,
             system_prompt,
@@ -208,8 +263,16 @@ impl AgentLoop {
             next_id: 0,
             cancel: CancelToken::default(),
             headless,
+            trust,
             tier2: None,
         }
+    }
+
+    /// Load the project's disk "self" now that it is trusted (ADR 0028): AGENTS.md
+    /// identity + skills/capabilities catalog + the codecoder.json allowlist.
+    fn load_self(&mut self) {
+        self.system_prompt = build_system_prompt(&self.root);
+        self.project_allowlist = ProjectAllowlist::load(&self.root);
     }
 
     pub fn cancel_token(&self) -> CancelToken {
@@ -261,10 +324,16 @@ impl AgentLoop {
                 }
                 AgentCommand::Resume => self.resume_latest(&event_tx),
                 AgentCommand::Reload => {
-                    let reg = Registry::scan(&self.root);
-                    let n = reg.catalog.len();
-                    self.system_prompt = build_system_prompt(&self.root);
-                    let _ = event_tx.send(AgentEvent::Notice(format!("reloaded — {n} skills/capabilities in catalog")));
+                    // Only a trusted project re-scans its disk "self" (ADR 0028);
+                    // an untrusted/pending one keeps its empty identity.
+                    if self.trust == TrustState::Trusted {
+                        let reg = Registry::scan(&self.root);
+                        let n = reg.catalog.len();
+                        self.system_prompt = build_system_prompt(&self.root);
+                        let _ = event_tx.send(AgentEvent::Notice(format!("reloaded — {n} skills/capabilities in catalog")));
+                    } else {
+                        let _ = event_tx.send(AgentEvent::Notice("project not trusted; nothing reloaded".into()));
+                    }
                     let _ = event_tx.send(AgentEvent::TurnComplete);
                 }
                 AgentCommand::Clear => {
@@ -412,7 +481,44 @@ impl AgentLoop {
     /// One turn: query → if the reply calls tools, execute them (permission-gated),
     /// feed results back, and re-query — repeating until the model stops calling
     /// tools or the iteration guard trips (ADR 0016/0018).
+    /// If trust is still `Pending` (interactive, undecided, config on disk), ask
+    /// the user once before the first turn runs (ADR 0028). The answer resolves the
+    /// state and — when trusted — loads the project's disk "self" now. A dropped
+    /// reply channel (no responder) defaults to Untrusted, the safe outcome.
+    fn resolve_trust_if_pending(&mut self, event_tx: &Sender<AgentEvent>) {
+        if self.trust != TrustState::Pending {
+            return;
+        }
+        let (reply_tx, reply_rx) = channel();
+        let _ = event_tx.send(AgentEvent::TrustPrompt { root: self.root.clone(), reply_tx });
+        match reply_rx.recv() {
+            Ok(TrustReply::Always) => {
+                trust::record(&self.root, TrustDecision::Trusted);
+                self.trust = TrustState::Trusted;
+                self.load_self();
+                let _ = event_tx.send(AgentEvent::Notice("project trusted; self loaded".into()));
+            }
+            Ok(TrustReply::Once) => {
+                self.trust = TrustState::Trusted;
+                self.load_self();
+                let _ = event_tx.send(AgentEvent::Notice("project trusted for this session".into()));
+            }
+            Ok(TrustReply::Never) => {
+                trust::record(&self.root, TrustDecision::Untrusted);
+                self.trust = TrustState::Untrusted;
+                let _ = event_tx.send(AgentEvent::Notice(
+                    "project not trusted; AGENTS.md/skills/capabilities and codecoder.json skipped".into(),
+                ));
+            }
+            Err(_) => {
+                // No one answered → don't load the disk self, and don't ask again.
+                self.trust = TrustState::Untrusted;
+            }
+        }
+    }
+
     fn process_turn(&mut self, text: String, event_tx: &Sender<AgentEvent>) {
+        self.resolve_trust_if_pending(event_tx);
         self.append(Role::User, vec![MessageItem::Text { text }]);
 
         for _ in 0..MAX_TOOL_ITERATIONS {
@@ -1303,5 +1409,128 @@ mod tests {
             && m.items.iter().any(|it| matches!(it, MessageItem::Text { text } if text.contains("foo.rs")))));
 
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    // ── Trust gating (ADR 0028) ────────────────────────────────────────────────
+    // These tests mutate the global CODECODER_TRUST_FILE env var; serialize them.
+    static TRUST_ENV: Mutex<()> = Mutex::new(());
+
+    fn stub_provider() -> Arc<dyn Provider> {
+        Arc::new(crate::provider::stub::StubClient)
+    }
+
+    #[test]
+    fn untrusted_project_skips_agents_md_and_allowlist() {
+        let _g = TRUST_ENV.lock().unwrap_or_else(|e| e.into_inner());
+        let base = std::env::temp_dir().join(format!("cc_untrust_{}", std::process::id()));
+        let proj = base.join("proj");
+        std::fs::create_dir_all(&proj).unwrap();
+        std::fs::write(proj.join("AGENTS.md"), "EVIL injected identity").unwrap();
+        std::fs::write(proj.join("codecoder.json"), r#"{"allowlist":["run_command:rm"]}"#).unwrap();
+
+        let store = base.join("trust.json");
+        unsafe { std::env::set_var("CODECODER_TRUST_FILE", &store) };
+        crate::trust::record(&proj, crate::trust::TrustDecision::Untrusted);
+
+        let agent = AgentLoop::new(stub_provider(), "m", 256, 0.0, proj.clone());
+        assert_eq!(agent.trust, TrustState::Untrusted);
+        assert!(agent.system_prompt.is_empty(), "untrusted AGENTS.md must not enter the system prompt");
+        assert!(
+            !agent.project_allowlist.allows("run_command:rm"),
+            "untrusted codecoder.json allowlist must not load"
+        );
+
+        unsafe { std::env::remove_var("CODECODER_TRUST_FILE") };
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    #[test]
+    fn pending_project_prompts_and_loads_self_on_always() {
+        let _g = TRUST_ENV.lock().unwrap_or_else(|e| e.into_inner());
+        let base = std::env::temp_dir().join(format!("cc_pend_always_{}", std::process::id()));
+        let proj = base.join("proj");
+        std::fs::create_dir_all(&proj).unwrap();
+        std::fs::write(proj.join("AGENTS.md"), "PENDING-IDENTITY").unwrap();
+
+        let store = base.join("trust.json");
+        unsafe { std::env::set_var("CODECODER_TRUST_FILE", &store) };
+        // No recorded decision + config on disk + interactive → Pending.
+        let mut agent = AgentLoop::new(stub_provider(), "m", 256, 0.0, proj.clone());
+        assert_eq!(agent.trust, TrustState::Pending);
+        assert!(agent.system_prompt.is_empty(), "pending must not load self yet");
+
+        let (etx, erx) = channel();
+        let responder = thread::spawn(move || {
+            for ev in erx {
+                if let AgentEvent::TrustPrompt { reply_tx, .. } = ev {
+                    let _ = reply_tx.send(TrustReply::Always);
+                }
+            }
+        });
+        agent.process_turn("hi".into(), &etx);
+        drop(etx);
+        responder.join().unwrap();
+
+        assert!(agent.system_prompt.contains("PENDING-IDENTITY"), "self loads after Always");
+        // Always persists, so a fresh agent in the same project is now Trusted.
+        assert_eq!(crate::trust::decide(&proj), Some(crate::trust::TrustDecision::Trusted));
+
+        unsafe { std::env::remove_var("CODECODER_TRUST_FILE") };
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    #[test]
+    fn pending_project_skips_self_on_never() {
+        let _g = TRUST_ENV.lock().unwrap_or_else(|e| e.into_inner());
+        let base = std::env::temp_dir().join(format!("cc_pend_never_{}", std::process::id()));
+        let proj = base.join("proj");
+        std::fs::create_dir_all(&proj).unwrap();
+        std::fs::write(proj.join("AGENTS.md"), "PENDING-IDENTITY").unwrap();
+
+        let store = base.join("trust.json");
+        unsafe { std::env::set_var("CODECODER_TRUST_FILE", &store) };
+        let mut agent = AgentLoop::new(stub_provider(), "m", 256, 0.0, proj.clone());
+        assert_eq!(agent.trust, TrustState::Pending);
+
+        let (etx, erx) = channel();
+        let responder = thread::spawn(move || {
+            for ev in erx {
+                if let AgentEvent::TrustPrompt { reply_tx, .. } = ev {
+                    let _ = reply_tx.send(TrustReply::Never);
+                }
+            }
+        });
+        agent.process_turn("hi".into(), &etx);
+        drop(etx);
+        responder.join().unwrap();
+
+        assert_eq!(agent.trust, TrustState::Untrusted);
+        assert!(agent.system_prompt.is_empty(), "self must stay unloaded after Never");
+        assert_eq!(crate::trust::decide(&proj), Some(crate::trust::TrustDecision::Untrusted));
+
+        unsafe { std::env::remove_var("CODECODER_TRUST_FILE") };
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    #[test]
+    fn trusted_project_loads_agents_md_and_allowlist() {
+        let _g = TRUST_ENV.lock().unwrap_or_else(|e| e.into_inner());
+        let base = std::env::temp_dir().join(format!("cc_trustload_{}", std::process::id()));
+        let proj = base.join("proj");
+        std::fs::create_dir_all(&proj).unwrap();
+        std::fs::write(proj.join("AGENTS.md"), "IDENTITY-MARKER").unwrap();
+        std::fs::write(proj.join("codecoder.json"), r#"{"allowlist":["run_command:git"]}"#).unwrap();
+
+        let store = base.join("trust.json");
+        unsafe { std::env::set_var("CODECODER_TRUST_FILE", &store) };
+        crate::trust::record(&proj, crate::trust::TrustDecision::Trusted);
+
+        let agent = AgentLoop::new(stub_provider(), "m", 256, 0.0, proj.clone());
+        assert_eq!(agent.trust, TrustState::Trusted);
+        assert!(agent.system_prompt.contains("IDENTITY-MARKER"), "trusted AGENTS.md loads");
+        assert!(agent.project_allowlist.allows("run_command:git"), "trusted allowlist loads");
+
+        unsafe { std::env::remove_var("CODECODER_TRUST_FILE") };
+        std::fs::remove_dir_all(&base).ok();
     }
 }
