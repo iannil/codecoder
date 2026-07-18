@@ -75,3 +75,11 @@
 ## 明确范围外:多实例编排
 
 pi 的 orchestrator 守护进程(N 个常驻 headless 实例、socket JSONL RPC、重启恢复,+ `extension_ui_request` 反向 UI 桥)是 [[0026-background-agent-headless-runner]] 之后的自然一步,但**不在本路线图范围内**:它与 CLAUDE.md / [[0026-background-agent-headless-runner]] 已列为延后项的「内置调度器 / 多 runner 资源上限」同类,应留待其成为实际需求时另开单独 ADR。此处仅记录 pi 的实现只需 ~1,987 LOC,设计小巧,届时可直接参照。
+
+## Wave 0 实现记录
+
+- **#1 已落地**:`length` 截断守卫(见 `docs/design/2026-07-18-length-truncation-tool-guard.md`)。`Provider::complete` 改返回 `Completion { message, stop_reason }`;截断且带 tool_call 时整批失败并重试。
+- **#5 已落地**:trust 加载期门禁([[0028-project-trust-load-gate]])。
+- **#3 已落地**:`src/retry.rs::is_retryable`(移植 pi `retry.ts` 语料,改用无依赖小写子串匹配)+ `AgentLoop::complete_retrying` 有界退避重试(分类器与策略分离)。
+- **#2 部分落地**:`src/retry.rs::is_context_overflow`(移植 pi `overflow.ts` 语料)。overflow 被排除出可重试集,并在错误路径给出可操作提示(`/clear`)。**延后**:「强制压缩后重试一次」的反应式补偿——codecoder 每轮已按阈值主动压缩([[0023-context-compaction]]),反应式仅作安全网,留待需要时补。
+- **#4 重新定性,不按 pi 原样移植**:pi 的「provider 永不抛、失败编码为 `stopReason: error/aborted` 流事件」是为 JS 流式生成器无法干净传播错误而设。codecoder 是**非流式 + 单 provider**,`anyhow::Result<Completion>` + `crate::retry` 分类器已是同一目标的**惯用等价物**(`?` 传播干净、错误已分类)。把 `complete` 改成永不 `Err`(返回带 `StopReason::Error` 的 `Completion`)会再次冲击所有 provider/测试且无功能收益,故**不移植该签名改动**。

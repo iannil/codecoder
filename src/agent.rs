@@ -2,7 +2,7 @@
 use crate::compaction;
 use crate::message::{Message, MessageId, MessageItem, Role};
 use crate::permission::{PermScope, Permission, ProjectAllowlist, SessionAllowlist, scope_ceiling};
-use crate::provider::{CompletionRequest, Provider, StopReason};
+use crate::provider::{Completion, CompletionRequest, Provider, StopReason};
 use crate::registry::Registry;
 use crate::session::{self, Session};
 use crate::trust::{self, TrustDecision};
@@ -481,6 +481,39 @@ impl AgentLoop {
     /// One turn: query → if the reply calls tools, execute them (permission-gated),
     /// feed results back, and re-query — repeating until the model stops calling
     /// tools or the iteration guard trips (ADR 0016/0018).
+    /// Call the provider, retrying transient throttle/transport failures with a
+    /// short backoff (ADR 0027 Wave 0 #3). The classifier lives in `crate::retry`;
+    /// policy (budget, backoff, reporting) lives here. Account limits and context
+    /// overflows are not retried. Aborts early if the turn was cancelled.
+    fn complete_retrying(
+        &self,
+        req: &CompletionRequest,
+        event_tx: &Sender<AgentEvent>,
+    ) -> anyhow::Result<Completion> {
+        const MAX_RETRIES: u32 = 2;
+        let mut attempt = 0u32;
+        loop {
+            match self.provider.complete(req) {
+                Ok(c) => return Ok(c),
+                Err(e) => {
+                    let msg = e.to_string();
+                    if attempt < MAX_RETRIES
+                        && crate::retry::is_retryable(&msg)
+                        && !self.cancel.is_cancelled()
+                    {
+                        attempt += 1;
+                        let _ = event_tx.send(AgentEvent::Notice(format!(
+                            "transient error, retrying ({attempt}/{MAX_RETRIES}): {msg}"
+                        )));
+                        std::thread::sleep(std::time::Duration::from_millis(200 * attempt as u64));
+                        continue;
+                    }
+                    return Err(e);
+                }
+            }
+        }
+    }
+
     /// If trust is still `Pending` (interactive, undecided, config on disk), ask
     /// the user once before the first turn runs (ADR 0028). The answer resolves the
     /// state and — when trusted — loads the project's disk "self" now. A dropped
@@ -549,9 +582,17 @@ impl AgentLoop {
                 tools: self.toolbox.wire_schemas(),
             };
 
-            let (reply, stop_reason) = match self.provider.complete(&req) {
+            let (reply, stop_reason) = match self.complete_retrying(&req, event_tx) {
                 Ok(c) => (c.message, c.stop_reason),
                 Err(e) => {
+                    // A context overflow (ADR 0027 #2) won't recover on retry; give
+                    // the user an actionable hint instead of a bare error.
+                    let msg = e.to_string();
+                    if crate::retry::is_context_overflow(&msg) {
+                        let _ = event_tx.send(AgentEvent::Notice(
+                            "context window exceeded — /clear or start a new session to continue".into(),
+                        ));
+                    }
                     let _ = event_tx.send(AgentEvent::StreamDelta(format!("error: {e}")));
                     break;
                 }
@@ -1342,6 +1383,78 @@ mod tests {
         // ...and the loop continued to the recovery turn.
         assert_eq!(agent.last_assistant_text(), "recovered");
 
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Errors with a transient 503 on the first call, then succeeds — exercises
+    /// the retry loop (ADR 0027 #3).
+    struct FlakyProvider {
+        calls: AtomicUsize,
+    }
+    impl Provider for FlakyProvider {
+        fn name(&self) -> &str {
+            "flaky"
+        }
+        fn complete(&self, _req: &CompletionRequest) -> anyhow::Result<Completion> {
+            if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                anyhow::bail!("OpenAI API returned 503: service unavailable");
+            }
+            Ok(Message::text(0, Role::Assistant, "recovered after retry").into())
+        }
+    }
+
+    #[test]
+    fn transient_error_is_retried_then_succeeds() {
+        let dir = std::env::temp_dir().join(format!("cc_flaky_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let provider = Arc::new(FlakyProvider { calls: AtomicUsize::new(0) });
+        let mut agent = AgentLoop::new(provider.clone() as Arc<dyn Provider>, "m", 256, 0.0, dir.clone());
+
+        let (etx, erx) = channel();
+        agent.process_turn("go".into(), &etx);
+        drop(etx);
+        let events: Vec<_> = erx.into_iter().collect();
+
+        assert_eq!(provider.calls.load(Ordering::SeqCst), 2, "should retry once then succeed");
+        assert_eq!(agent.last_assistant_text(), "recovered after retry");
+        assert!(
+            events.iter().any(|e| matches!(e, AgentEvent::Notice(m) if m.contains("retrying"))),
+            "a retry Notice should be emitted"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Always errors with a permanent 401 — must NOT be retried.
+    struct AuthFailProvider {
+        calls: AtomicUsize,
+    }
+    impl Provider for AuthFailProvider {
+        fn name(&self) -> &str {
+            "auth-fail"
+        }
+        fn complete(&self, _req: &CompletionRequest) -> anyhow::Result<Completion> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            anyhow::bail!("OpenAI API returned 401: invalid api key");
+        }
+    }
+
+    #[test]
+    fn permanent_error_is_not_retried() {
+        let dir = std::env::temp_dir().join(format!("cc_authfail_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let provider = Arc::new(AuthFailProvider { calls: AtomicUsize::new(0) });
+        let mut agent = AgentLoop::new(provider.clone() as Arc<dyn Provider>, "m", 256, 0.0, dir.clone());
+
+        let (etx, erx) = channel();
+        agent.process_turn("go".into(), &etx);
+        drop(etx);
+        let events: Vec<_> = erx.into_iter().collect();
+
+        assert_eq!(provider.calls.load(Ordering::SeqCst), 1, "permanent error must not be retried");
+        assert!(
+            events.iter().any(|e| matches!(e, AgentEvent::StreamDelta(m) if m.contains("error"))),
+            "the error should be surfaced"
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 
