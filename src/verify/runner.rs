@@ -125,9 +125,11 @@ impl VerifyRunner {
                 let mut passed = 0usize;
                 let mut failed = 0usize;
                 let mut skipped = 0usize;
+                let mut has_running = false;
 
                 // Regex for parsing cargo test text output.
                 // `test <name> ... ok`  or  `test <name> ... FAILED`  or  `test <name> ... ignored`
+                // Also handle `Running unittests` and `Running tests/` lines.
                 let ok_re = regex::Regex::new(
                     r"^test\s+(.+?)\s+\.\.\.\s+ok\s*$"
                 ).expect("ok regex");
@@ -141,6 +143,10 @@ impl VerifyRunner {
                 let summary_re = regex::Regex::new(
                     r"^test result: (\w+)\.\s+(\d+) passed;\s+(\d+) failed;\s+(\d+) ignored;"
                 ).expect("summary regex");
+                // `Running unittests src/lib.rs (...)` or `Running tests/l1_kernel.rs (...)`
+                let running_re = regex::Regex::new(
+                    r"^\s*Running\s"
+                ).expect("running regex");
 
                 for line in reader.lines() {
                     if cancel_clone.load(std::sync::atomic::Ordering::Relaxed) {
@@ -195,6 +201,8 @@ impl VerifyRunner {
                         let s_ignored: usize = caps.get(4).unwrap().as_str().parse().unwrap_or(0);
                         // Suite-level summary — used to update counts; no per-case emit needed.
                         let _ = (s_passed, s_failed, s_ignored);
+                    } else if running_re.is_match(&line) {
+                        has_running = true;
                     }
                 }
 
@@ -202,12 +210,25 @@ impl VerifyRunner {
                 let cancelled = cancel_clone.load(std::sync::atomic::Ordering::Relaxed);
 
                 if !cancelled && passed + failed + skipped == 0 {
-                    emit_complete(&event_tx, TestSuiteComplete {
-                        passed: 0, failed: 0, skipped: 0, total: 0,
-                        elapsed_ms: elapsed.as_millis() as u64,
-                        cancelled: false,
-                        error: Some("no test output received — cargo test may have failed to build".into()),
-                    });
+                    // Check if we got any "Running" lines — if so, tests ran but just
+                    // didn't have any test lines to parse (e.g. unit tests, which
+                    // show as "Running unittests src/lib.rs" but have no "test ... ok" lines).
+                    // Don't emit an error in that case.
+                    if has_running {
+                        emit_complete(&event_tx, TestSuiteComplete {
+                            passed: 0, failed: 0, skipped: 0, total: 0,
+                            elapsed_ms: elapsed.as_millis() as u64,
+                            cancelled: false,
+                            error: None,
+                        });
+                    } else {
+                        emit_complete(&event_tx, TestSuiteComplete {
+                            passed: 0, failed: 0, skipped: 0, total: 0,
+                            elapsed_ms: elapsed.as_millis() as u64,
+                            cancelled: false,
+                            error: Some("no test output received — cargo test may have failed to build".into()),
+                        });
+                    }
                 } else {
                     emit_complete(&event_tx, TestSuiteComplete {
                         passed, failed, skipped,
