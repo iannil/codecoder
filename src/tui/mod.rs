@@ -2,7 +2,7 @@
 pub mod render;
 pub mod run;
 
-use crate::agent::{CancelToken, PermissionReply, TrustReply};
+use crate::agent::{CancelToken, PermissionReply, SteerQueue, TrustReply};
 use crate::permission::PermScope;
 use ratatui::style::Color;
 use std::path::PathBuf;
@@ -273,6 +273,11 @@ pub struct TuiApp {
     /// the turn ends. Set by `run()`; default token in tests.
     pub cancel: CancelToken,
 
+    /// Clone of the agent's steering queue (ADR 0029). Submitting non-slash text
+    /// while a turn is in flight pushes here instead of sending a ProcessMessage,
+    /// so the running turn picks it up. Set by `run()`; default in tests.
+    pub steer: SteerQueue,
+
     pub should_quit: bool,
 }
 
@@ -302,6 +307,7 @@ impl TuiApp {
             search_query: String::new(),
             help_open: false,
             cancel: CancelToken::default(),
+            steer: SteerQueue::default(),
             should_quit: false,
         }
     }
