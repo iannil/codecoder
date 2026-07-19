@@ -34,6 +34,11 @@ pub struct SessionEntry {
     pub message: Message,
     /// Parent entry id in the tree. `None` for the root.
     pub parent: Option<MessageId>,
+    /// Phase E inference-tree metadata: e.g. `{"status":"hypothesis"}`.
+    /// The kernel just stores and retrieves it; the agent interprets it via
+    /// the `skills/debug-causal.md` skill.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub meta: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -80,13 +85,174 @@ impl Session {
     pub fn append(&mut self, message: Message) {
         let parent = self.leaf;
         let id = message.id;
-        self.entries.push(SessionEntry { message, parent });
+        self.entries.push(SessionEntry { message, parent, meta: None });
         self.leaf = Some(id);
     }
 
     pub fn clear(&mut self) {
         self.entries.clear();
         self.leaf = None;
+    }
+
+    /// Navigate to a specific entry, making it the new leaf. Next `append` will
+    /// fork from this point (in-place time travel). Returns false if the id is
+    /// unknown.
+    pub fn navigate_to(&mut self, id: MessageId) -> bool {
+        if self.entries.iter().any(|e| e.message.id == id) {
+            self.leaf = Some(id);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Returns the set of entry ids that would be abandoned if we navigated to
+    /// `target_id`. These are entries on the current active thread beyond the
+    /// target's depth — branches that diverge from the path to the target.
+    pub fn abandoned_branch(&self, target_id: MessageId) -> Vec<MessageId> {
+        let by_id: std::collections::HashMap<MessageId, &SessionEntry> =
+            self.entries.iter().map(|e| (e.message.id, e)).collect();
+        // Build the path from root to target.
+        let mut target_path = Vec::new();
+        let mut cur = Some(target_id);
+        while let Some(id) = cur {
+            target_path.push(id);
+            if let Some(e) = by_id.get(&id) {
+                cur = e.parent;
+            } else {
+                cur = None;
+            }
+        }
+        target_path.reverse();
+        let target_set: std::collections::HashSet<MessageId> = target_path.iter().copied().collect();
+
+        // Entries on the current leaf path that are NOT on the target path.
+        let mut abandoned = Vec::new();
+        let mut cur = self.leaf;
+        while let Some(id) = cur {
+            if !target_set.contains(&id) {
+                abandoned.push(id);
+            }
+            if let Some(e) = by_id.get(&id) {
+                cur = e.parent;
+            } else {
+                cur = None;
+            }
+        }
+        abandoned
+    }
+
+    /// Fetch entries by their ids, in insertion order.
+    pub fn nodes_by_id(&self, ids: &[MessageId]) -> Vec<Message> {
+        let by_id: std::collections::HashMap<MessageId, &SessionEntry> =
+            self.entries.iter().map(|e| (e.message.id, e)).collect();
+        let mut out = Vec::new();
+        for id in ids {
+            if let Some(e) = by_id.get(id) {
+                out.push(e.message.clone());
+            }
+        }
+        out
+    }
+
+    /// Clone the entire session into a new file under `sessions/`. Returns the
+    /// clone's path. The original session is unchanged.
+    pub fn clone_to(&self, root: &Path) -> anyhow::Result<PathBuf> {
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let path = sessions_dir(root).join(format!("session-{stamp}.json"));
+        self.save(&path)?;
+        Ok(path)
+    }
+
+    /// Render the tree for display: each entry indented by depth, with branch
+    /// markers. The active thread path is marked with `>`.
+    pub fn render_tree(&self) -> String {
+        let empty: std::collections::HashMap<Option<MessageId>, Vec<MessageId>> =
+            std::collections::HashMap::new();
+        self.render_tree_with_children(&empty)
+    }
+
+    /// Render the tree with the given children map pre-computed. `abandoned`
+    /// contains the IDs of nodes that are being left behind (used by Phase C
+    /// to mark "this branch will be summarized").
+    pub fn render_tree_with_children(
+        &self,
+        _abandoned: &std::collections::HashMap<Option<MessageId>, Vec<MessageId>>,
+    ) -> String {
+        if self.entries.is_empty() {
+            return "(empty session)".into();
+        }
+        let by_id: std::collections::HashMap<MessageId, &SessionEntry> =
+            self.entries.iter().map(|e| (e.message.id, e)).collect();
+        let mut children: std::collections::HashMap<Option<MessageId>, Vec<MessageId>> =
+            std::collections::HashMap::new();
+        for e in &self.entries {
+            children.entry(e.parent).or_default().push(e.message.id);
+        }
+        for v in children.values_mut() {
+            v.sort();
+        }
+
+        let active_set: std::collections::HashSet<MessageId> = {
+            let mut s = std::collections::HashSet::new();
+            let mut cur = self.leaf;
+            while let Some(id) = cur {
+                s.insert(id);
+                if let Some(e) = by_id.get(&id) {
+                    cur = e.parent;
+                } else {
+                    cur = None;
+                }
+            }
+            s
+        };
+
+        let mut out = Vec::new();
+        fn walk(
+            id: Option<MessageId>,
+            depth: usize,
+            active_set: &std::collections::HashSet<MessageId>,
+            children: &std::collections::HashMap<Option<MessageId>, Vec<MessageId>>,
+            by_id: &std::collections::HashMap<MessageId, &SessionEntry>,
+            out: &mut Vec<String>,
+        ) {
+            if let Some(id) = id {
+                let indent = "  ".repeat(depth);
+                let marker = if active_set.contains(&id) { ">" } else { " " };
+                let e = by_id.get(&id).unwrap();
+                let role = format!("{:?}", e.message.role);
+                let preview = e
+                    .message
+                    .items
+                    .first()
+                    .map(|it| match it {
+                        crate::message::MessageItem::Text { text } => text.clone(),
+                        crate::message::MessageItem::Reasoning { text } => format!("reasoning…{text}"),
+                        crate::message::MessageItem::ToolCall { name, .. } => format!("tool:{name}"),
+                        crate::message::MessageItem::ToolResult { call_id: _, is_error, output } => {
+                            format!("{}{}", if *is_error { "err:" } else { "ok:" }, &output[..output.len().min(40)])
+                        }
+                    })
+                    .unwrap_or_default();
+                out.push(format!("{indent}{marker} #{id} {role} {preview}"));
+                if let Some(siblings) = children.get(&Some(id)) {
+                    for child in siblings {
+                        walk(Some(*child), depth + 1, active_set, children, by_id, out);
+                    }
+                }
+            } else {
+                if let Some(roots) = children.get(&None) {
+                    for root in roots {
+                        walk(Some(*root), 0, active_set, children, by_id, out);
+                    }
+                }
+            }
+        }
+        walk(None, 0, &active_set, &children, &by_id, &mut out);
+        out.join("\n")
     }
 
     /// Highest existing MessageId across ALL entries + 1 (0 when empty).
@@ -240,6 +406,55 @@ mod tests {
         assert_eq!(thread[2].id, 3);
         // Entry for id=2 still in entries, just not on the active thread.
         assert_eq!(s.entries.len(), 4);
+    }
+
+    #[test]
+    fn navigate_to_and_fork() {
+        let mut s = Session::new("m");
+        s.append(Message::text(0, Role::User, "root"));
+        s.append(Message::text(1, Role::Assistant, "a"));
+        // Navigate back to id=0 and fork.
+        assert!(s.navigate_to(0));
+        assert_eq!(s.leaf, Some(0));
+        s.append(Message::text(2, Role::User, "fork"));
+        let thread = s.active_thread();
+        assert_eq!(thread.len(), 2);
+        assert_eq!(thread[0].id, 0);
+        assert_eq!(thread[1].id, 2);
+        // Unknown id returns false.
+        assert!(!s.navigate_to(99));
+    }
+
+    #[test]
+    fn render_tree_forked() {
+        let mut s = Session::new("m");
+        s.append(Message::text(0, Role::User, "root"));
+        s.append(Message::text(1, Role::Assistant, "branch-a"));
+        s.navigate_to(0);
+        s.append(Message::text(2, Role::User, "branch-b"));
+        let tree = s.render_tree();
+        // root (id=0) visible, branch-a (id=1) and branch-b (id=2) both visible.
+        assert!(tree.contains("#0"), "tree: {tree}");
+        assert!(tree.contains("#1"), "tree: {tree}");
+        assert!(tree.contains("#2"), "tree: {tree}");
+        // Only the active thread (root→branch-b) is marked with `>`.
+        assert!(tree.contains("> #0"), "tree: {tree}");
+        assert!(tree.contains("> #2"), "tree: {tree}");
+    }
+
+    #[test]
+    fn clone_to_creates_new_file() {
+        let dir = std::env::temp_dir().join(format!("cc_clone_{}", std::process::id()));
+        let path = sessions_dir(&dir).join("s.json");
+        let mut s = Session::new("m");
+        s.append(Message::text(0, Role::User, "hi"));
+        s.save(&path).unwrap();
+        let cloned = s.clone_to(&dir).unwrap();
+        assert!(cloned.exists());
+        let raw = std::fs::read_to_string(&cloned).unwrap();
+        let loaded = Session::load(&raw).unwrap();
+        assert_eq!(loaded.entries.len(), 1);
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

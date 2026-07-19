@@ -27,6 +27,8 @@ pub enum AgentCommand {
     Reload,
     /// Clear the conversation (messages + id counter), keeping the session file.
     Clear,
+    /// Navigate to a session entry (time-travel within the tree).
+    Navigate(u64),
     Cancel,
     Shutdown,
 }
@@ -378,6 +380,37 @@ impl AgentLoop {
                     }
                     let _ = event_tx.send(AgentEvent::Context { pct: 0 });
                     let _ = event_tx.send(AgentEvent::Notice("conversation cleared".into()));
+                    let _ = event_tx.send(AgentEvent::TurnComplete);
+                }
+                AgentCommand::Navigate(id) => {
+                    // Phase C: when navigating leaves a branch behind, summarize it
+                    // before the jump (ADR 0023 tier-2 is reused for the summary).
+                    if self.session.leaf.is_some_and(|l| l != 0) && self.session.entries.len() > 1 {
+                        let abandoned = self.session.abandoned_branch(id);
+                        if !abandoned.is_empty() {
+                            let thread = self.session.nodes_by_id(&abandoned);
+                            let rendered = crate::compaction::render_span(&thread);
+                            if !rendered.trim().is_empty() {
+                                match self.summarize_span(&rendered, None) {
+                                    Ok(summary) => {
+                                        let _ = event_tx.send(AgentEvent::Notice(
+                                            format!("abandoned branch summarized: {summary}"),
+                                        ));
+                                    }
+                                    Err(_) => {
+                                        let _ = event_tx.send(AgentEvent::Notice(
+                                            "failed to summarize abandoned branch".into(),
+                                        ));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    if self.session.navigate_to(id) {
+                        let _ = event_tx.send(AgentEvent::Notice(format!("navigated to entry #{id}")));
+                    } else {
+                        let _ = event_tx.send(AgentEvent::Notice(format!("no entry #{id}")));
+                    }
                     let _ = event_tx.send(AgentEvent::TurnComplete);
                 }
                 AgentCommand::Cancel => self.cancel.cancel(),
@@ -1677,7 +1710,7 @@ mod tests {
         ];
         let mut prev: Option<u64> = None;
         for m in &msgs {
-            entries.push(session::SessionEntry { message: m.clone(), parent: prev });
+            entries.push(session::SessionEntry { message: m.clone(), parent: prev, meta: None });
             prev = Some(m.id);
         }
         agent.session.entries = entries;

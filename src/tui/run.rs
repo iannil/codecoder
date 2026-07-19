@@ -465,6 +465,16 @@ fn submit(app: &mut TuiApp, cmd_tx: &Sender<AgentCommand>) {
                 app.blocks.push(Block::System(format!("memory: {body}")));
             }
             "help" => app.help_open = true,
+            "tree" => {
+                // Render the session tree if we have access to it.
+                // The TUI doesn't hold the full Session, so this is a stub
+                // placeholder. The actual `/tree` command will be a
+                // Navigate-based dialog in a later iteration.
+                app.blocks.push(Block::System("/tree: use the agent to inspect session branches".into()));
+            }
+            "fork" => {
+                let _ = cmd_tx.send(AgentCommand::Navigate(0));
+            }
             other => app.blocks.push(Block::System(format!("unknown command /{other}"))),
         }
         return;
