@@ -173,6 +173,12 @@ fn handle_agent(app: &mut TuiApp, ev: AgentEvent) {
         AgentEvent::TestSuiteComplete(complete) => {
             app.verify_state.apply_complete(&complete);
         }
+        AgentEvent::L4ScenarioProgress(progress) => {
+            app.verify_state.apply_l4_scenario(&progress);
+        }
+        AgentEvent::L4ExploreProgress(progress) => {
+            app.verify_state.apply_l4_explore(&progress);
+        }
         AgentEvent::TurnComplete => {
             app.streaming = false;
             app.activity = None;

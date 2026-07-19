@@ -96,3 +96,54 @@ pub fn emit_progress(event_tx: &Sender<AgentEvent>, progress: TestProgress) {
 pub fn emit_complete(event_tx: &Sender<AgentEvent>, complete: TestSuiteComplete) {
     let _ = event_tx.send(AgentEvent::TestSuiteComplete(complete));
 }
+
+/// L4 验证阶段
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum L4Phase {
+    Idle,
+    Scenarios,
+    Exploration,
+    Complete,
+    Failed,
+}
+
+impl L4Phase {
+    pub fn name(&self) -> &'static str {
+        match self {
+            L4Phase::Idle => "空闲",
+            L4Phase::Scenarios => "骨架场景",
+            L4Phase::Exploration => "自驱动探索",
+            L4Phase::Complete => "完成",
+            L4Phase::Failed => "失败",
+        }
+    }
+}
+
+/// L4 场景进度事件
+#[derive(Debug, Clone)]
+pub struct L4ScenarioProgress {
+    pub name: String,
+    pub category: &'static str,
+    pub critical: bool,
+    pub status: super::scenario::ScenarioStatus,
+    pub output: Option<String>,
+    pub duration_ms: u64,
+}
+
+/// L4 探索进度事件
+#[derive(Debug, Clone)]
+pub struct L4ExploreProgress {
+    pub target: String,
+    pub status: &'static str,
+    pub detail: Option<String>,
+}
+
+/// Emit a L4 scenario progress event.
+pub fn emit_l4_scenario(event_tx: &std::sync::mpsc::Sender<crate::agent::AgentEvent>, progress: L4ScenarioProgress) {
+    let _ = event_tx.send(crate::agent::AgentEvent::L4ScenarioProgress(progress));
+}
+
+/// Emit a L4 explore progress event.
+pub fn emit_l4_explore(event_tx: &std::sync::mpsc::Sender<crate::agent::AgentEvent>, progress: L4ExploreProgress) {
+    let _ = event_tx.send(crate::agent::AgentEvent::L4ExploreProgress(progress));
+}

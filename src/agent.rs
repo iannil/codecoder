@@ -93,6 +93,10 @@ pub enum AgentEvent {
     TestProgress(crate::verify::TestProgress),
     /// All tests completed.
     TestSuiteComplete(crate::verify::TestSuiteComplete),
+    /// L4 场景进度
+    L4ScenarioProgress(crate::verify::event::L4ScenarioProgress),
+    /// L4 探索进度
+    L4ExploreProgress(crate::verify::event::L4ExploreProgress),
     TurnComplete,
 }
 
@@ -777,7 +781,11 @@ impl AgentLoop {
     fn run_verify(&mut self, event_tx: &Sender<AgentEvent>) {
         use crate::verify::VerifyRunner;
 
-        // Reset verify state by emitting a loaded event.
+        // First, emit a notice to let the TUI know verify mode should activate.
+        // This triggers before the runner starts, so the TUI switches to
+        // Mode::Verify immediately.
+        let _ = event_tx.send(AgentEvent::Notice("verify mode starting".into()));
+
         let mut runner = VerifyRunner::start_l1(&self.root, event_tx.clone());
 
         // Poll in a tight loop until the verify finishes.
