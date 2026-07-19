@@ -173,7 +173,7 @@ fn render_layers(f: &mut Frame, state: &VerifyState, t: &Theme, area: Rect, fram
     let l4_completed = l4.completed_scenarios();
     let l4_pct = if l4_total > 0 { (l4_completed * 100) / l4_total } else { 0 };
 
-    let l4_focused = matches!(state.focus, VerifyFocus::Layer(i) if i == 3);
+    let l4_focused = matches!(state.focus, VerifyFocus::L4);
     let l4_header_style = if l4_focused {
         Style::default().fg(t.accent).add_modifier(Modifier::REVERSED)
     } else {
@@ -335,6 +335,24 @@ pub fn handle_verify_key(state: &mut VerifyState, key: &crossterm::event::KeyEve
                 VerifyFocus::Layer(l) => {
                     if l > 0 {
                         state.focus = VerifyFocus::Layer(l - 1);
+                    } else {
+                        // Move to L4 from top.
+                        state.focus = VerifyFocus::L4;
+                    }
+                }
+                VerifyFocus::L4 => {
+                    // Move up from L4 to last L3 module if available, or L3 layer.
+                    let last_layer = 2;
+                    if !state.layers[last_layer].modules.is_empty() {
+                        let last_mod = state.layers[last_layer].modules.len() - 1;
+                        if !state.layers[last_layer].modules[last_mod].cases.is_empty() {
+                            let last_case = state.layers[last_layer].modules[last_mod].cases.len() - 1;
+                            state.focus = VerifyFocus::Case { layer: last_layer, module: last_mod, case: last_case };
+                        } else {
+                            state.focus = VerifyFocus::Module { layer: last_layer, module: last_mod };
+                        }
+                    } else {
+                        state.focus = VerifyFocus::Layer(last_layer);
                     }
                 }
                 VerifyFocus::Module { layer, module } => {
@@ -372,7 +390,12 @@ pub fn handle_verify_key(state: &mut VerifyState, key: &crossterm::event::KeyEve
                         } else if l < 3 {
                             state.focus = VerifyFocus::Layer(l + 1);
                         }
+                    } else {
+                        // L4 is the last layer.
                     }
+                }
+                VerifyFocus::L4 => {
+                    // L4 is the last layer, stay.
                 }
                 VerifyFocus::Module { layer, module } => {
                     let next_module = module + 1;
@@ -380,6 +403,8 @@ pub fn handle_verify_key(state: &mut VerifyState, key: &crossterm::event::KeyEve
                         state.focus = VerifyFocus::Module { layer, module: next_module };
                     } else if layer < 3 {
                         state.focus = VerifyFocus::Layer(layer + 1);
+                    } else {
+                        state.focus = VerifyFocus::L4;
                     }
                 }
                 VerifyFocus::Case { layer, module, case } => {
@@ -393,6 +418,8 @@ pub fn handle_verify_key(state: &mut VerifyState, key: &crossterm::event::KeyEve
                             state.focus = VerifyFocus::Module { layer, module: next_module };
                         } else if layer < 3 {
                             state.focus = VerifyFocus::Layer(layer + 1);
+                        } else {
+                            state.focus = VerifyFocus::L4;
                         }
                     }
                 }
@@ -404,6 +431,9 @@ pub fn handle_verify_key(state: &mut VerifyState, key: &crossterm::event::KeyEve
             match state.focus {
                 VerifyFocus::Layer(l) => {
                     state.layers[l].folded = !state.layers[l].folded;
+                }
+                VerifyFocus::L4 => {
+                    state.l4.folded = !state.l4.folded;
                 }
                 VerifyFocus::Module { layer, module } => {
                     if module < state.layers[layer].modules.len() {

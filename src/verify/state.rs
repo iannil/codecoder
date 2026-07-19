@@ -163,6 +163,7 @@ pub enum VerifyFocus {
     Layer(usize),
     Module { layer: usize, module: usize },
     Case { layer: usize, module: usize, case: usize },
+    L4,
 }
 
 impl VerifyState {
