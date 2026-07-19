@@ -285,9 +285,11 @@ impl L4Runner {
         cancel: &crate::agent::CancelToken,
         root: &Path,
     ) -> bool {
+        // First emit a phase marker (not a scenario — empty category means TUI skips it)
+        // This is just a progress indicator, not tracked in the scenario list.
         emit_l4_scenario(event_tx, L4ScenarioProgress {
             name: "__phase__".into(),
-            category: "",
+            category: "",  // empty = not a real scenario, TUI apply_l4_scenario won't create it
             critical: false,
             status: ScenarioStatus::Running,
             output: Some("L4 阶段 1: 骨架场景".into()),

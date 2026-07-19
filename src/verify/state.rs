@@ -32,6 +32,10 @@ impl L4State {
 
     /// 更新一个场景的进度
     pub fn apply_l4_scenario(&mut self, progress: &L4ScenarioProgress) {
+        // Skip phase markers (empty category = not a real scenario)
+        if progress.category.is_empty() {
+            return;
+        }
         // Auto-create scenario state if not yet tracked (for scenarios emitted by agent thread)
         if !self.scenarios.iter().any(|s| s.name == progress.name) {
             self.scenarios.push(super::scenario::ScenarioState {
