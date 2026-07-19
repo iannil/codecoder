@@ -8,4 +8,4 @@ pub use event::*;
 pub use explore::*;
 pub use runner::VerifyRunner;
 pub use scenario::*;
-pub use state::{CaseStatus, LayerState, ModuleState, VerifyFocus, VerifyState};
+pub use state::{CaseStatus, LayerState, ModuleState, VerifyFocus, VerifyState, L4State};

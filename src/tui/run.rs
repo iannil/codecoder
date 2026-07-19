@@ -174,10 +174,10 @@ fn handle_agent(app: &mut TuiApp, ev: AgentEvent) {
             app.verify_state.apply_complete(&complete);
         }
         AgentEvent::L4ScenarioProgress(progress) => {
-            app.verify_state.apply_l4_scenario(&progress);
+            app.verify_state.l4.apply_l4_scenario(&progress);
         }
         AgentEvent::L4ExploreProgress(progress) => {
-            app.verify_state.apply_l4_explore(&progress);
+            app.verify_state.l4.apply_l4_explore(&progress);
         }
         AgentEvent::TurnComplete => {
             app.streaming = false;

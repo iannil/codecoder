@@ -1,6 +1,102 @@
 use std::time::Instant;
 
 use crate::verify::event::*;
+use crate::verify::explore::ExploreState;
+use crate::verify::scenario::{ScenarioState, ScenarioStatus};
+
+/// L4 验证层状态
+#[derive(Debug, Clone)]
+pub struct L4State {
+    pub phase: L4Phase,
+    pub scenarios: Vec<ScenarioState>,
+    pub explore: ExploreState,
+    pub folded: bool,
+}
+
+impl L4State {
+    pub fn new() -> Self {
+        Self {
+            phase: L4Phase::Idle,
+            scenarios: Vec::new(),
+            explore: ExploreState::new(),
+            folded: true,
+        }
+    }
+
+    /// 加载场景列表
+    pub fn load_scenarios(&mut self) {
+        let all = crate::verify::scenario::all_scenarios();
+        self.scenarios = all.iter().map(ScenarioState::new).collect();
+        self.phase = L4Phase::Scenarios;
+    }
+
+    /// 更新一个场景的进度
+    pub fn apply_l4_scenario(&mut self, progress: &L4ScenarioProgress) {
+        if let Some(s) = self.scenarios.iter_mut().find(|s| s.name == progress.name) {
+            s.status = progress.status.clone();
+            if let ScenarioStatus::Failed(reason) = &progress.status {
+                s.error = Some(reason.clone());
+            }
+            s.duration_ms = progress.duration_ms;
+        }
+    }
+
+    /// 更新探索进度
+    pub fn apply_l4_explore(&mut self, progress: &L4ExploreProgress) {
+        match progress.status {
+            "checking" => {
+                self.explore.current_target = Some(progress.target.clone());
+            }
+            "ok" => {
+                if progress.target.ends_with(".md") || progress.target.contains("skill") {
+                    self.explore.checked_skills.push(progress.target.clone());
+                } else {
+                    self.explore.checked_capabilities.push(progress.target.clone());
+                }
+                self.explore.current_target = None;
+            }
+            "fixed" => {
+                self.explore.healed.push(crate::verify::explore::HealRecord {
+                    target: progress.target.clone(),
+                    diagnosis: progress.detail.clone().unwrap_or_default(),
+                    applied: true,
+                    diff: String::new(),
+                });
+                self.explore.current_target = None;
+            }
+            "failed" => {
+                self.explore.failed.push(progress.target.clone());
+                self.explore.current_target = None;
+            }
+            _ => {}
+        }
+    }
+
+    /// 场景总数
+    pub fn total_scenarios(&self) -> usize {
+        self.scenarios.len()
+    }
+
+    /// 已完成场景数
+    pub fn completed_scenarios(&self) -> usize {
+        self.scenarios.iter().filter(|s| {
+            matches!(s.status, ScenarioStatus::Passed | ScenarioStatus::Failed(_) | ScenarioStatus::Skipped)
+        }).count()
+    }
+
+    /// 通过场景数
+    pub fn passed_scenarios(&self) -> usize {
+        self.scenarios.iter().filter(|s| s.status == ScenarioStatus::Passed).count()
+    }
+
+    /// 失败场景数
+    pub fn failed_scenarios(&self) -> usize {
+        self.scenarios.iter().filter_map(|s| match &s.status {
+            ScenarioStatus::Failed(_) => Some(()),
+            _ => None,
+        }).count()
+    }
+}
 
 /// TUI-side state tree for the verify dashboard.
 #[derive(Debug, Clone)]
@@ -17,6 +113,8 @@ pub struct VerifyState {
     pub elapsed_ms: u64,
     pub error: Option<String>,
     pub cancelled: bool,
+    /// L4 验证层
+    pub l4: L4State,
 }
 
 #[derive(Debug, Clone)]
@@ -86,6 +184,7 @@ impl VerifyState {
             elapsed_ms: 0,
             error: None,
             cancelled: false,
+            l4: L4State::new(),
         }
     }
 
