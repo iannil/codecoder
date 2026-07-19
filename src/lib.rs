@@ -14,6 +14,7 @@ pub mod permission;
 pub mod provider;
 pub mod registry;
 pub mod retry;
+pub mod review;
 pub mod session;
 pub mod tokenizer;
 pub mod trust;

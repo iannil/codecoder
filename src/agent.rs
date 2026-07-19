@@ -777,12 +777,15 @@ impl AgentLoop {
         }
         if name == "review" {
             let target = args.get("target").and_then(|v| v.as_str()).unwrap_or("the current changes");
-            let task = format!(
-                "Review {target}. Read the relevant files and run `diff` to inspect changes, \
-                 then report concrete bugs, risks, and improvements. Be specific."
-            );
-            let sub_args = serde_json::json!({ "task": task });
-            return self.spawn_sub_agent(call_id, &sub_args, event_tx);
+            // Hand the sub-agent the drift rubric + output contract, then parse
+            // its prose into a structured verdict (docs/design/2026-07-19-review-verdict-rubric.md).
+            let raw = self.spawn_sub_agent_text(crate::review::review_task(target), event_tx);
+            let outcome = crate::review::parse_review(&raw);
+            return ToolOutcome::Result(MessageItem::ToolResult {
+                call_id: call_id.to_string(),
+                output: crate::review::format_result(&outcome, &raw),
+                is_error: false,
+            });
         }
 
         let Some(tool) = self.toolbox.get(name) else {
@@ -898,7 +901,19 @@ impl AgentLoop {
                 is_error: true,
             });
         }
+        let output = self.spawn_sub_agent_text(task, event_tx);
+        ToolOutcome::Result(MessageItem::ToolResult {
+            call_id: call_id.to_string(),
+            output,
+            is_error: false,
+        })
+    }
 
+    /// Run a read-only sub-agent to completion and return its final assistant
+    /// text. Shared by `agent` (wraps it verbatim) and `review` (parses it into
+    /// a structured verdict). Emits coarse `SubAgentMilestone` events; the
+    /// child's own token stream is not forwarded.
+    fn spawn_sub_agent_text(&mut self, task: String, event_tx: &Sender<AgentEvent>) -> String {
         let _ = event_tx.send(AgentEvent::SubAgentMilestone("started".into()));
         let (child_tx, child_rx) = channel::<AgentEvent>();
         let provider = Arc::clone(&self.provider);
@@ -911,7 +926,6 @@ impl AgentLoop {
             child.last_assistant_text()
         });
 
-        // Bridge coarse milestones live; the child's own token stream is not forwarded.
         for ev in child_rx {
             if let AgentEvent::ToolStarted { name, .. } = ev {
                 let _ = event_tx.send(AgentEvent::SubAgentMilestone(name));
@@ -919,12 +933,7 @@ impl AgentLoop {
         }
         let output = handle.join().unwrap_or_else(|_| "sub-agent panicked".into());
         let _ = event_tx.send(AgentEvent::SubAgentMilestone("done".into()));
-
-        ToolOutcome::Result(MessageItem::ToolResult {
-            call_id: call_id.to_string(),
-            output,
-            is_error: false,
-        })
+        output
     }
 
     /// Ask the user a question and block until they answer (ADR 0016 oneshot).

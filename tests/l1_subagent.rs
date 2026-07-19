@@ -134,6 +134,54 @@ fn subagent_cannot_write_files() {
     );
 }
 
+/// `review` (a first-class citizen #4 quick-win) reuses the sub-agent machinery
+/// but parses the child's prose into a structured verdict via `crate::review`.
+/// This exercises the KERNEL GUARD end-to-end: the scripted reviewer self-reports
+/// a lenient `VERDICT: pass`, but its own `SIGNALS` line flags a foundation-tamper
+/// fail. The AgentLoop must upgrade the returned verdict to `rebuild` (a lenient
+/// reviewer can never downgrade below what the signals imply).
+#[test]
+fn review_returns_structured_verdict_with_kernel_guard() {
+    let ws = Workspace::new();
+    ws.write("AGENTS.md", "x");
+
+    // turns[0] parent: delegate via `review` (intercepted → spawns sub-agent).
+    // turns[1] child : the review report, ending with the two-line contract.
+    // turns[2] parent: continuation.
+    let (p, rec) = ScriptedProvider::new(vec![
+        assistant_tool_call("c1", "review", json!({"target": "the current changes"})),
+        assistant_text(
+            "Reviewed the diff. It changes a public trait signature.\n\
+             VERDICT: pass\n\
+             SIGNALS: foundation=fail over_engineering=ok volume=ok terminology=ok",
+        ),
+        assistant_text("parent done"),
+    ]);
+    let out = run_turn(ws.root(), p, rec, "review it", PermPolicy::GrantOnce, vec![]);
+
+    // The review ToolResult for call_id "c1" is carried into the parent's
+    // continuation request. Its output must begin with the deterministic header,
+    // and the verdict must be the guard-upgraded `rebuild` — NOT the reviewer's
+    // self-reported `pass`.
+    let verdict_ok = out.requests.iter().any(|r| {
+        r.messages.iter().any(|m| {
+            m.items.iter().any(|it| {
+                matches!(it, MessageItem::ToolResult { call_id, output, is_error }
+                    if call_id == "c1"
+                        && !*is_error
+                        && output.starts_with("REVIEW VERDICT: rebuild")
+                        && output.contains("foundation=fail"))
+            })
+        })
+    });
+    assert!(
+        verdict_ok,
+        "review must return a structured `REVIEW VERDICT: rebuild` (kernel guard \
+         upgrading the reviewer's lenient `pass` on a foundation fail); recorded \
+         tool results did not contain it"
+    );
+}
+
 #[test]
 fn subagent_toolset_excludes_agent_tool() {
     let ws = Workspace::new();

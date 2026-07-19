@@ -760,7 +760,8 @@ impl Tool for Review {
         "review"
     }
     fn description(&self) -> &str {
-        "Delegate a read-only code review of a target (path, or the current changes) to a sub-agent."
+        "Delegate a read-only architecture review of a target (path, or the current changes) to a \
+         sub-agent. Returns a structured verdict (pass / needs_fix / rebuild) plus drift signals."
     }
     fn schema(&self) -> Value {
         json!({
