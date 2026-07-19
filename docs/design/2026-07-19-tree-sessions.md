@@ -4,8 +4,9 @@
 (`id`/`parentId` + leaf 指针 + fork/clone + `/tree` + 分支摘要)。**改动持久化格式**,
 故与 [[0004-session-persistence-and-migration]] 直接相关,落地时另开 ADR 0030。
 
-本 spec 覆盖**完整树模型**,并按 Phase A→D 分期;Phase A 是唯一改动格式与核心的一期,
-B/C/D 在其之上增量叠加,各自可单独成 spec + 实现。
+本 spec 覆盖**完整树模型**,并按 Phase A→E 分期;Phase A 是唯一改动格式与核心的一期,
+B/C/D/E 在其之上增量叠加,各自可单独成 spec + 实现。E 为「因果链 × 会话树 = 推理树」的
+语义层(结合 `archived/skills/rc-causal-chain`)。
 
 ## 现状(必须兼容)
 
@@ -145,6 +146,39 @@ pi 把 model/thinking/active-tools 变更做成 transcript 条目、按重放派
 从"总是 Message"升级为**带类型**的枚举(`Message(Message) | ModelChange(String) | …`),需
 v2→v3 迁移。**Phase A 先不引入枚举**(YAGNI);Phase D 真要时再迁移,避免 A 期复杂化。
 
+## Phase E —— 推理树语义层(因果链 × 会话树)
+
+结合 `archived/skills/rc-causal-chain`(因果链 / 观察收敛方法论):把会话树从"泛泛的对话
+分支"升级为**一等公民的推理/根因树**,专治 coding agent 的系统化调试与根因分析("为什么
+老是失败")。**机制来自 pi(树 + 离开分支摘要),语义来自因果链。**
+
+映射:
+
+| 因果链概念 | 落到本 spec 的树上 |
+|---|---|
+| 一个候选原因 = 一个节点,一次只深挖一条(反过早共识) | 一个分支 = 探索一个假设;`navigate_to` 就地开分支(Phase B) |
+| 每节点 `观察锁定` / `[假设]` | 条目带 `status: locked \| hypothesis`(见下,依赖 Phase D 的带类型条目) |
+| 判定末端 / 排除某原因 | 离开分支 → Phase C 的 branch-summary 记"此因已排除,因为…" |
+| 关键节点 = 可用余量最大 × 杠杆最高 | 树视图高亮"最该修的那一环" |
+
+落地形态(不改 Phase A 地基):
+
+- **元数据而非新格式**:节点的 `status`/`margin`/`leverage` 走 Phase D 的带类型条目
+  (或先塞进一个 `SessionEntry.meta: Option<serde_json::Value>` 旁路字段),**不冲击 Phase A**。
+- **方法论进 `skills/`**:把因果链纪律写成一个 codecoder Skill(`skills/debug-causal.md`),
+  用 `use_skill` 激活时注入——agent 用会话树当基底、按因果链纪律逐节点展开。这是"文件系统即
+  自我"的正道:**机制在内核(树),方法在磁盘(skill)**。
+- 与 Phase C 天然配对:排除一个原因 = 离开该分支 = 自动摘要"为何排除",避免重复挖同一条死路。
+
+> **该用例反向锁定了"完整树 vs 文件级 fork"的选择**:推理树需要*就地分支 + 离开即摘要*,
+> 文件级 fork(换文件、丢上下文)给不了。故 Wave 2 应走本 spec 的完整树。
+
+## 相关但独立(不属本 spec):inspector rubric 快胜
+
+`archived/skills/engineer-inspector` 的三个"架构偏移"信号(篡改地基 / 过度设计 / 体积失控)
+可直接做成 codecoder `review` 工具的结构化 rubric(对 `git diff` × `CONTEXT.md`/ADR 比对)。
+零架构改动、独立于会话树,可作为并行快胜——**另开 skill/prompt,不阻塞本 spec**。
+
 ## 风险
 
 - compaction 位置切片假设线性连续线程 —— `active_thread()` 恰好返回这样一条,无影响。
@@ -155,4 +189,11 @@ v2→v3 迁移。**Phase A 先不引入枚举**(YAGNI);Phase D 真要时再迁�
 ## 分期建议
 
 Phase A 是地基(改格式 + 核心),自身**无用户可见功能**但风险集中在此一期;B 才带来
-`/tree`/fork 的可见价值;C/D 为增值。建议:A 单独一批(spec+ADR 0030+TDD),过了再排 B。
+`/tree`/fork 的可见价值;C 摘要、D 配置即条目、**E 推理树语义层**为增值。
+
+顺序建议:
+1. **A**(完整树地基)单独一批:spec + ADR 0030 + TDD。①推理树用例已背书走完整树。
+2. **B**(`/tree` 最小跳转 + `/fork`/`/clone`)。
+3. **C**(离开分支摘要)、**D**(带类型条目,为 E 的 `status` 铺路)。
+4. **E**(推理树):元数据 + `skills/debug-causal.md` 方法论,机制在内核、方法在磁盘。
+5. **并行快胜(独立)**:engineer-inspector 三信号 → `review` rubric,不阻塞以上任何一期。
