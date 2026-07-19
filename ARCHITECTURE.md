@@ -117,11 +117,11 @@ agent 深思 → generate_skill / generate_prompt / generate_capability
 
 ## ADR 索引
 
-`0001` TUI 键位与 Mode 语义 · `0002` slash 本地派发 · `0003` 中心 Theme · `0004` Session 持久化与迁移 · `0005` 权限 scope 与 allowlist · `0007` prompt 注入 slash · `0015` 统一消息模型 · `0016` channel 拓扑与事件模型 · `0017` provider 中立消息模型 · `0018` Tool trait 与 PermissionKey · `0019` 子 agent 能力边界 · `0020` Skills/Capabilities Registry · `0021` Capability 环境与生命周期 · `0022` 自撰安全回路 · `0023` 上下文压缩 · `0024` TUI 视口与渲染循环 · `0025` Prompt 作为 Skill 草稿层。
+`0001` TUI 键位与 Mode 语义 · `0002` slash 本地派发 · `0003` 中心 Theme · `0004` Session 持久化与迁移 · `0005` 权限 scope 与 allowlist · `0007` prompt 注入 slash · `0015` 统一消息模型 · `0016` channel 拓扑与事件模型 · `0017` provider 中立消息模型 · `0018` Tool trait 与 PermissionKey · `0019` 子 agent 能力边界 · `0020` Skills/Capabilities Registry · `0021` Capability 环境与生命周期 · `0022` 自撰安全回路 · `0023` 上下文压缩 · `0024` TUI 视口与渲染循环 · `0025` Prompt 作为 Skill 草稿层 · `0026` Background Agent · `0027` pi 对照分析 · `0028` 项目信任加载门禁 · `0029` turn steering 与 follow-up · `0031` 拦截中间件边界论证(不做)。
 
 ## 测试与验证边界
 
-- **150 个离线单元/集成测试**(默认套件,hermetic)+ **4 个 `#[ignore]`**(2 Docker e2e + L2 pty 冒烟 + L3 真实 LLM 冒烟;`cargo test -- --ignored`,部分另需门控 env)。Wasm e2e 在默认套件内(纯进程内)。
+- **156 个离线单元/集成测试**(默认套件,hermetic)+ **4 个 `#[ignore]`**(2 Docker e2e + L2 pty 冒烟 + L3 真实 LLM 冒烟;`cargo test -- --ignored`,部分另需门控 env)。Wasm e2e 在默认套件内(纯进程内)。
 - `tests/` 下为**黑盒行为验证分层**:只编译于 `src/lib.rs` 公共 API,驱动真实 `AgentLoop`+真实工具,断言只落三面(`AgentEvent` 流 / 文件系统+git / `ScriptedProvider` 记录的 `CompletionRequest`)。分层与门控开关见 `docs/testing/behavioral-validation.md`。
 - **无法在无 TTY 环境验证 TUI 交互**——需真终端。TUI 观感由人工真机验收。
 - token 计数用 tiktoken(准确);`run_command`/`commit` 走真实 `git`/shell(运行期生效)。
