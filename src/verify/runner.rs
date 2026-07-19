@@ -294,6 +294,19 @@ impl L4Runner {
             duration_ms: 0,
         });
 
+        // 加载场景列表到 TUI 状态树 (通过事件把场景名称发过去)
+        // 先发一个 loaded 风格的事件让 TUI 知道总数
+        for (i, s) in scenarios.iter().enumerate() {
+            emit_l4_scenario(event_tx, L4ScenarioProgress {
+                name: s.name.to_string(),
+                category: s.category.name(),
+                critical: s.critical,
+                status: if i == 0 { ScenarioStatus::Running } else { ScenarioStatus::Queued },
+                output: None,
+                duration_ms: 0,
+            });
+        }
+
         let mut all_critical_passed = true;
 
         for scenario in scenarios {
