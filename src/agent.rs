@@ -806,6 +806,23 @@ impl AgentLoop {
         // === 阶段 1: L4 骨架场景 ===
         let _ = event_tx.send(AgentEvent::Notice("L4 验证开始".into()));
         let scenarios = all_scenarios();
+
+        // Emit L4ScenarioProgress for each scenario so the TUI can build the tree.
+        // Use a fake suite to trigger the TUI verify mode.
+        // (The TUI checks total_tests > 0 to enter verify mode;
+        //  we set total_tests via the L4ScenarioProgress events.)
+        for s in &scenarios {
+            use crate::verify::event::emit_l4_scenario;
+            use crate::verify::scenario::ScenarioStatus;
+            emit_l4_scenario(event_tx, crate::verify::event::L4ScenarioProgress {
+                name: s.name.to_string(),
+                category: s.category.name(),
+                critical: s.critical,
+                status: ScenarioStatus::Queued,
+                output: None,
+                duration_ms: 0,
+            });
+        }
         let all_critical_passed = L4Runner::run_scenarios(
             &scenarios,
             event_tx,

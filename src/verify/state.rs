@@ -2,7 +2,7 @@ use std::time::Instant;
 
 use crate::verify::event::*;
 use crate::verify::explore::ExploreState;
-use crate::verify::scenario::{ScenarioState, ScenarioStatus};
+use crate::verify::scenario::{ScenarioCategory, ScenarioState, ScenarioStatus};
 
 /// L4 验证层状态
 #[derive(Debug, Clone)]
@@ -19,7 +19,7 @@ impl L4State {
             phase: L4Phase::Idle,
             scenarios: Vec::new(),
             explore: ExploreState::new(),
-            folded: true,
+            folded: false,
         }
     }
 
@@ -32,6 +32,26 @@ impl L4State {
 
     /// 更新一个场景的进度
     pub fn apply_l4_scenario(&mut self, progress: &L4ScenarioProgress) {
+        // Auto-create scenario state if not yet tracked (for scenarios emitted by agent thread)
+        if !self.scenarios.iter().any(|s| s.name == progress.name) {
+            self.scenarios.push(super::scenario::ScenarioState {
+                name: progress.name.clone(),
+                category: match progress.category {
+                    "工具" => ScenarioCategory::Tool,
+                    "权限" => ScenarioCategory::Permission,
+                    "对话流程" => ScenarioCategory::AgentFlow,
+                    "Session" => ScenarioCategory::Session,
+                    "能力" => ScenarioCategory::Capability,
+                    "Skill" => ScenarioCategory::Skill,
+                    "自检" => ScenarioCategory::Meta,
+                    _ => ScenarioCategory::Meta,
+                },
+                critical: progress.critical,
+                status: super::scenario::ScenarioStatus::Queued,
+                error: None,
+                duration_ms: 0,
+            });
+        }
         if let Some(s) = self.scenarios.iter_mut().find(|s| s.name == progress.name) {
             s.status = progress.status.clone();
             if let ScenarioStatus::Failed(reason) = &progress.status {
@@ -187,6 +207,13 @@ impl VerifyState {
             cancelled: false,
             l4: L4State::new(),
         }
+    }
+
+    /// 加载 L4 场景并保持 verify mode 激活
+    pub fn load_l4_scenarios(&mut self) {
+        self.l4.load_scenarios();
+        self.running = true;
+        self.total_tests = self.l4.total_scenarios();
     }
 
     /// Handle `TestSuiteLoaded` event — build module/case state tree.

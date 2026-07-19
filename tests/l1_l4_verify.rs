@@ -143,7 +143,7 @@ fn l4_explore_healed_count_filters_applied() {
 fn l4_state_initializes() {
     let l4 = L4State::new();
     assert_eq!(l4.phase, L4Phase::Idle);
-    assert!(l4.folded);
+    assert!(!l4.folded);  // 默认展开
     assert!(l4.scenarios.is_empty());
     assert_eq!(l4.total_scenarios(), 0);
     assert_eq!(l4.completed_scenarios(), 0);
@@ -156,7 +156,7 @@ fn l4_verify_state_integration() {
     let mut vstate = VerifyState::new();
     // L4 初始状态
     assert_eq!(vstate.l4.phase, L4Phase::Idle);
-    assert!(vstate.l4.folded);
+    assert!(!vstate.l4.folded);  // 默认展开
 
     // 加载场景
     vstate.l4.load_scenarios();
