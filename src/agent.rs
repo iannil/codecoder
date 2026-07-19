@@ -314,7 +314,7 @@ impl AgentLoop {
     fn append(&mut self, role: Role, items: Vec<MessageItem>) -> MessageId {
         let id = self.next_id;
         self.next_id += 1;
-        self.session.messages.push(Message { id, role, items });
+        self.session.append(Message { id, role, items });
         // Autosave on every append (ADR 0004), best-effort. Sub-agents don't persist.
         if self.persist {
             let _ = self.session.save(&self.session_path);
@@ -332,7 +332,7 @@ impl AgentLoop {
         match std::fs::read_to_string(&path).map_err(anyhow::Error::from).and_then(|raw| Session::load(&raw)) {
             Ok(session) => {
                 self.next_id = session.next_message_id();
-                let count = session.messages.len();
+                let count = session.entries.len();
                 self.session = session;
                 self.session_path = path;
                 self.tier2 = None;
@@ -369,7 +369,7 @@ impl AgentLoop {
                     let _ = event_tx.send(AgentEvent::TurnComplete);
                 }
                 AgentCommand::Clear => {
-                    self.session.messages.clear();
+                    self.session.clear();
                     self.next_id = 0;
                     self.session.token_count = 0;
                     self.tier2 = None;
@@ -435,18 +435,19 @@ impl AgentLoop {
     /// span) only when tier-1 is still over the window threshold. Degrades to tier-1
     /// if the summary call fails. Caches the summary in-memory (one call per turn).
     fn context_working_set(&mut self, event_tx: &Sender<AgentEvent>) -> Vec<Message> {
-        let tier1 = compaction::working_set(&self.model, &self.session.messages, self.model_window);
+        let thread = self.session.active_thread();
+        let tier1 = compaction::working_set(&self.model, &thread, self.model_window);
         if !compaction::should_compact(
             crate::tokenizer::count_tokens(&self.model, &tier1),
             self.model_window,
         ) {
             return tier1;
         }
-        let Some((start, end)) = compaction::summary_span(&self.session.messages) else {
+        let Some((start, end)) = compaction::summary_span(&thread) else {
             return tier1;
         };
-        let anchor_id = self.session.messages[start - 1].id;
-        let covered_last_id = self.session.messages[end - 1].id;
+        let anchor_id = thread[start - 1].id;
+        let covered_last_id = thread[end - 1].id;
 
         let mut read = BTreeSet::new();
         let mut modified = BTreeSet::new();
@@ -463,12 +464,12 @@ impl AgentLoop {
             Some(c) if c.covered_last_id < covered_last_id => {
                 read = c.read_files.clone();
                 modified = c.modified_files.clone();
-                let inc_start = self.session.messages[start..end]
+                let inc_start = thread[start..end]
                     .iter()
                     .position(|m| m.id > c.covered_last_id)
                     .map(|p| start + p)
                     .unwrap_or(start);
-                let slice = &self.session.messages[inc_start..end];
+                let slice = &thread[inc_start..end];
                 compaction::collect_file_paths(slice, &mut read, &mut modified);
                 let rendered = compaction::render_span(slice);
                 let prev = c.text.clone();
@@ -484,7 +485,7 @@ impl AgentLoop {
             }
             // No cache, or id rewound (e.g. after /resume) → summarize the whole span.
             _ => {
-                let slice = &self.session.messages[start..end];
+                let slice = &thread[start..end];
                 compaction::collect_file_paths(slice, &mut read, &mut modified);
                 let rendered = compaction::render_span(slice);
                 match self.summarize_span(&rendered, None) {
@@ -1007,8 +1008,8 @@ impl AgentLoop {
 
     /// The concatenated text of the most recent Assistant message (sub-agent result).
     fn last_assistant_text(&self) -> String {
-        self.session
-            .messages
+        let thread = self.session.active_thread();
+        thread
             .iter()
             .rev()
             .find(|m| m.role == Role::Assistant && m.items.iter().any(|it| matches!(it, MessageItem::Text { .. })))
@@ -1145,7 +1146,7 @@ mod tests {
         assert!(events.iter().any(|e| matches!(e, AgentEvent::SubAgentMilestone(m) if m == "done")));
 
         // The sub-agent's findings were fed back as a tool result...
-        assert!(agent.session.messages.iter().any(|m| m.role == Role::Tool
+        assert!(agent.session.active_thread().iter().any(|m| m.role == Role::Tool
             && m.items.iter().any(|it| matches!(it,
                 MessageItem::ToolResult { output, .. } if output == "sub findings"))));
         // ...and the parent produced its final answer.
@@ -1345,8 +1346,8 @@ mod tests {
         assert!(*saw.lock().unwrap(), "tool result should be fed back to the provider");
 
         // Final assistant turn is the plain "done" text.
-        let last = agent.session.messages.last().unwrap();
-        assert!(matches!(&last.items[0], MessageItem::Text { text } if text == "done"));
+        let last = agent.session.entries.last().unwrap();
+        assert!(matches!(&last.message.items[0], MessageItem::Text { text } if text == "done"));
 
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -1439,7 +1440,7 @@ mod tests {
         );
         // Instead, an error ToolResult was fed back so the model can retry.
         assert!(
-            agent.session.messages.iter().any(|m| m.role == Role::Tool
+            agent.session.active_thread().iter().any(|m| m.role == Role::Tool
                 && m.items.iter().any(|it| matches!(it,
                     MessageItem::ToolResult { output, is_error, .. }
                         if *is_error && output.contains("truncated")))),
@@ -1567,7 +1568,7 @@ mod tests {
         assert_eq!(provider.calls.load(Ordering::SeqCst), 2, "steering should restart the turn");
         assert_eq!(agent.last_assistant_text(), "steered", "the steering message must be in context");
         // The steering message is an ordinary User turn in the session.
-        assert!(agent.session.messages.iter().any(|m| m.role == Role::User
+        assert!(agent.session.active_thread().iter().any(|m| m.role == Role::User
             && m.items.iter().any(|it| matches!(it,
                 MessageItem::Text { text } if text.contains("focus on X")))));
 
@@ -1647,7 +1648,10 @@ mod tests {
         let mut agent = AgentLoop::new(provider, "m", 256, 0.0, dir.clone());
         // Force compaction regardless of real token counts.
         agent.model_window = 10;
-        agent.session.messages = vec![
+        // Build entries manually for the compaction test. The linear vec maps to
+        // a chain (parent = previous id, leaf = last id).
+        let mut entries: Vec<session::SessionEntry> = Vec::new();
+        let msgs = vec![
             Message::text(0, Role::User, "goal"), // anchor
             Message {
                 id: 1,
@@ -1671,6 +1675,13 @@ mod tests {
             Message::text(4, Role::User, "next"), // last user → span = ids 1..=3
             Message::text(5, Role::Assistant, "ok"),
         ];
+        let mut prev: Option<u64> = None;
+        for m in &msgs {
+            entries.push(session::SessionEntry { message: m.clone(), parent: prev });
+            prev = Some(m.id);
+        }
+        agent.session.entries = entries;
+        agent.session.leaf = Some(5);
         let (tx, _rx) = std::sync::mpsc::channel();
 
         let out = agent.context_working_set(&tx);
