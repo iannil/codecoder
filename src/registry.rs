@@ -1,6 +1,6 @@
 // Registry (ADR 0020): scans skills/ and capabilities/ into a resident catalog
 // (name + one-line description). Full text / execution happen only on activation.
-use crate::capability::CapabilityManifest;
+use crate::trust::{SourceInfo, SourceOrigin, SourceScope};
 use std::path::Path;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -17,6 +17,9 @@ pub struct CatalogEntry {
     pub name: String,
     pub description: String,
     pub kind: EntryKind,
+    /// Provenance of this entry (first-class citizen #5). `None` for legacy or
+    /// synthetic entries that have not been migrated.
+    pub source: Option<SourceInfo>,
 }
 
 /// The scanner/index (distinct from the lightweight `catalog` it produces).
@@ -30,9 +33,9 @@ impl Registry {
     /// through this reload — no hot registration (ADR 0022).
     pub fn scan(root: &Path) -> Self {
         let mut catalog = Vec::new();
-        scan_skills(&root.join("skills"), &mut catalog);
-        scan_prompts(&root.join("prompts"), &mut catalog);
-        scan_capabilities(&root.join("capabilities"), &mut catalog);
+        scan_skills(&root.join("skills"), SourceScope::Project, &mut catalog);
+        scan_prompts(&root.join("prompts"), SourceScope::Project, &mut catalog);
+        scan_capabilities(&root.join("capabilities"), SourceScope::Project, &mut catalog);
         catalog.sort_by(|a, b| a.name.cmp(&b.name));
         Registry { catalog }
     }
@@ -73,7 +76,7 @@ impl Registry {
     }
 }
 
-fn scan_skills(dir: &Path, out: &mut Vec<CatalogEntry>) {
+fn scan_skills(dir: &Path, scope: SourceScope, out: &mut Vec<CatalogEntry>) {
     let Ok(entries) = std::fs::read_dir(dir) else { return };
     for e in entries.flatten() {
         let path = e.path();
@@ -83,13 +86,18 @@ fn scan_skills(dir: &Path, out: &mut Vec<CatalogEntry>) {
         let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("").to_string();
         let text = std::fs::read_to_string(&path).unwrap_or_default();
         let (name, description) = parse_skill_meta(&text, &stem);
-        out.push(CatalogEntry { name, description, kind: EntryKind::Skill });
+        let source = Some(SourceInfo {
+            path: crate::trust::canon_path(&path),
+            scope,
+            origin: SourceOrigin::TopLevel,
+        });
+        out.push(CatalogEntry { name, description, kind: EntryKind::Skill, source });
     }
 }
 
 /// Scan `prompts/` (ADR 0025): draft-tier Skills. Same `.md` shape as a Skill, but
 /// the description is prefixed `[draft]` so the agent prefers matured Skills.
-fn scan_prompts(dir: &Path, out: &mut Vec<CatalogEntry>) {
+fn scan_prompts(dir: &Path, scope: SourceScope, out: &mut Vec<CatalogEntry>) {
     let Ok(entries) = std::fs::read_dir(dir) else { return };
     for e in entries.flatten() {
         let path = e.path();
@@ -99,24 +107,36 @@ fn scan_prompts(dir: &Path, out: &mut Vec<CatalogEntry>) {
         let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("").to_string();
         let text = std::fs::read_to_string(&path).unwrap_or_default();
         let (name, description) = parse_skill_meta(&text, &stem);
+        let source = Some(SourceInfo {
+            path: crate::trust::canon_path(&path),
+            scope,
+            origin: SourceOrigin::TopLevel,
+        });
         out.push(CatalogEntry {
             name,
             description: format!("[draft] {description}"),
             kind: EntryKind::Prompt,
+            source,
         });
     }
 }
 
-fn scan_capabilities(dir: &Path, out: &mut Vec<CatalogEntry>) {
+fn scan_capabilities(dir: &Path, scope: SourceScope, out: &mut Vec<CatalogEntry>) {
     let Ok(entries) = std::fs::read_dir(dir) else { return };
     for e in entries.flatten() {
         let manifest = e.path().join("manifest.json");
         let Ok(raw) = std::fs::read_to_string(&manifest) else { continue };
-        let Ok(m) = serde_json::from_str::<CapabilityManifest>(&raw) else { continue };
+        let Ok(m) = serde_json::from_str::<crate::capability::CapabilityManifest>(&raw) else { continue };
+        let source = Some(SourceInfo {
+            path: crate::trust::canon_path(&manifest),
+            scope,
+            origin: SourceOrigin::TopLevel,
+        });
         out.push(CatalogEntry {
             name: m.name,
             description: m.description,
             kind: EntryKind::Capability,
+            source,
         });
     }
 }
@@ -181,6 +201,14 @@ mod tests {
         let cat = reg.render_catalog();
         assert!(cat.contains("reviewing — how to review a PR"));
         assert!(cat.contains("fetcher — fetch a url"));
+
+        // Each entry carries SourceInfo (first-class citizen #5).
+        for e in &reg.catalog {
+            let src = e.source.as_ref().expect("each scanned entry must have SourceInfo");
+            assert!(src.path.contains("capabilities/fetcher/manifest.json") || src.path.contains("skills/reviewing.md"));
+            assert_eq!(src.scope, crate::trust::SourceScope::Project);
+            assert_eq!(src.origin, crate::trust::SourceOrigin::TopLevel);
+        }
 
         std::fs::remove_dir_all(&dir).ok();
     }

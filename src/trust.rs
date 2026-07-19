@@ -1,14 +1,63 @@
 // Project trust (ADR 0028): a load-time gate, orthogonal to the runtime
-// permission gate (ADR 0005/0018). "Filesystem as self" means a cloned repo's
-// AGENTS.md/skills/prompts/capabilities — and its codecoder.json execution
-// allowlist — would silently become part of the agent's identity. Trust decides
-// whether that disk "self" may load at all.
-//
-// Decisions are stored GLOBALLY (never in the project — a repo must not vouch
-// for itself), keyed by canonical directory, resolved nearest-ancestor.
+// permission gate (ADR 0005/0018). Also SourceInfo (first-class citizen #5):
+// provenance metadata — where a resource came from (scope, origin) — attached
+// to every Registry entry so the agent can reason about its own sources.
+// "Filesystem as self" means a cloned repo's AGENTS.md/skills/prompts/
+// capabilities — and its codecoder.json execution allowlist — would silently
+// become part of the agent's identity. Trust decides whether that disk "self"
+// may load at all.
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+
+// ---------------------------------------------------------------------------
+// SourceInfo — provenance metadata (first-class citizen #5)
+// ---------------------------------------------------------------------------
+
+/// Canonicalize a path for a stable string key; fall back to the raw path when
+/// the dir doesn't exist yet.
+pub fn canon_path(p: &Path) -> String {
+    p.canonicalize()
+        .unwrap_or_else(|_| p.to_path_buf())
+        .to_string_lossy()
+        .into_owned()
+}
+
+/// Where a resource lives relative to the filesystem.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SourceScope {
+    Global,
+    Project,
+    Temporary,
+}
+
+/// How the resource was loaded.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SourceOrigin {
+    TopLevel,
+    Package,
+}
+
+/// Provenance metadata attached to a loaded resource: where it came from and
+/// how it was loaded.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SourceInfo {
+    pub path: String,
+    pub scope: SourceScope,
+    pub origin: SourceOrigin,
+}
+
+impl SourceInfo {
+    pub fn project(path: &Path) -> Self {
+        SourceInfo { path: canon_path(path), scope: SourceScope::Project, origin: SourceOrigin::TopLevel }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Trust
+// ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TrustDecision {
