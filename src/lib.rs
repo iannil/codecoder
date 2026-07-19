@@ -18,6 +18,7 @@ pub mod review;
 pub mod session;
 pub mod tokenizer;
 pub mod trust;
+pub mod workgraph;
 pub mod tool;
 pub mod tui;
 

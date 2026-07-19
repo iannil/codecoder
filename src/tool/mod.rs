@@ -93,7 +93,7 @@ impl Toolbox {
                 Box::new(dev::Commit),
                 Box::new(dev::Diff),
                 Box::new(dev::Plan),
-                Box::new(dev::Todo),
+                Box::new(dev::Milestone),
                 Box::new(dev::Memory),
                 Box::new(search::Glob),
                 Box::new(search::Grep),

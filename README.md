@@ -55,7 +55,7 @@ cargo run
 | `commit` | Git 提交 |
 | `review` | 架构审查(只读子 agent → 结构化 Verdict + 漂移 rubric) |
 | `plan` | 任务计划 |
-| `todo` | Todo 管理（list/create/update/complete/delete） |
+| `milestone` | 工作图管理（list/add/start/done/needs_fix/next/remove，持久依赖有序） |
 | `memory` | 持久化 key-value 记忆读写 |
 | `ask_user` | 用户交互 |
 | `confirm` | yes/no 确认对话 |
@@ -133,7 +133,7 @@ project/
 
 ```bash
 cargo build      # 编译
-cargo test       # 运行 145 个测试（141 通过 + 4 个 #[ignore]：2 Docker e2e + L2 pty + L3 LLM 冒烟）
+cargo test       # 运行 154 个测试（150 通过 + 4 个 #[ignore]：2 Docker e2e + L2 pty + L3 LLM 冒烟）
                  # tests/ 下为黑盒行为验证分层（L1 默认；L2/L3 门控，见 docs/testing/behavioral-validation.md）
 cargo run        # 启动 TUI / REPL
 ```

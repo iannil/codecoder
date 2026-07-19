@@ -96,6 +96,45 @@ fn list_directory_lists_entries() {
     );
 }
 
+/// The `milestone` tool (Work Graph, first-class citizen #2) drives a durable,
+/// dependency-ordered graph through the real AgentLoop and lands on disk. This
+/// exercises the scheduling invariant end-to-end: #2 stays behind #1 until #1 is
+/// done, then `next` yields #2 — and the state is persisted to `workgraph.json`.
+#[test]
+fn milestone_work_graph_schedules_and_persists() {
+    let ws = Workspace::new();
+    seed(&ws);
+    let (p, rec) = ScriptedProvider::new(vec![
+        assistant_tool_call("c1", "milestone", json!({"action": "add", "title": "data model"})),
+        assistant_tool_call("c2", "milestone", json!({"action": "add", "title": "logic", "deps": [1]})),
+        assistant_tool_call("c3", "milestone", json!({"action": "next"})),
+        assistant_tool_call("c4", "milestone", json!({"action": "done", "id": 1, "verdict": "pass"})),
+        assistant_tool_call("c5", "milestone", json!({"action": "next"})),
+        assistant_text("done"),
+    ]);
+    let out = run_turn(ws.root(), p, rec, "plan it", PermPolicy::GrantOnce, vec![]);
+
+    // The two `next` calls bracket the `done`: first ready is #1, then #2.
+    let nexts = out.tool_outputs("milestone");
+    assert!(
+        nexts.iter().any(|(err, o)| !err && o.contains("#1 data model")),
+        "first `next` should surface #1; outputs: {nexts:?}"
+    );
+    assert!(
+        nexts.iter().any(|(err, o)| !err && o.contains("#2 logic")),
+        "after #1 done, `next` should surface #2; outputs: {nexts:?}"
+    );
+
+    // State persisted to disk: #1 done (records the verdict), #2 pending.
+    let raw = ws.read("workgraph.json");
+    let wg: serde_json::Value = serde_json::from_str(&raw).unwrap();
+    let nodes = wg["nodes"].as_array().unwrap();
+    assert_eq!(nodes[0]["status"], "done");
+    assert_eq!(nodes[0]["verdict"], "pass");
+    assert_eq!(nodes[1]["status"], "pending");
+    assert_eq!(nodes[1]["deps"], json!([1]));
+}
+
 #[test]
 fn write_file_asks_permission_then_lands_on_disk() {
     let ws = Workspace::new();

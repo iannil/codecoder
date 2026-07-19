@@ -233,6 +233,13 @@ fn subagent_toolset_excludes_agent_tool() {
             "sub-agent must not be offered the `write_file` tool (read-only); got {:?}",
             names
         );
+        // Nor the `milestone` Work Graph tool — it is a side-effecting planning
+        // write, deliberately absent from `read_only_child()`.
+        assert!(
+            !names.iter().any(|n| n == "milestone"),
+            "sub-agent must not be offered the `milestone` tool (write-side scratch); got {:?}",
+            names
+        );
     }
 
     // Sanity: the parent DID have the `agent` tool available (else the discrimination

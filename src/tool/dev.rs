@@ -1,7 +1,6 @@
-// Development tools: commit (Ask), diff / plan / todo (None). Local dev scaffolding.
+// Development tools: commit (Ask), diff / plan / milestone (None). Local dev scaffolding.
 use super::{Tool, ToolCtx, ToolOutput};
 use crate::permission::Permission;
-use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::path::Path;
 use std::process::Command;
@@ -133,53 +132,32 @@ impl Tool for Plan {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct TodoItem {
-    id: u64,
-    text: String,
-    done: bool,
-}
+/// The `milestone` tool manages the durable **Work Graph** (first-class citizen
+/// #2; src/workgraph.rs) — dependency-ordered work that survives context resets
+/// and carries per-node acceptance + Review Verdicts. Supersedes the old flat
+/// `todo` (legacy `todos.json` is migrated forward on first read).
+pub struct Milestone;
 
-fn todos_path(root: &Path) -> std::path::PathBuf {
-    root.join("todos.json")
-}
-fn load_todos(root: &Path) -> Vec<TodoItem> {
-    std::fs::read_to_string(todos_path(root))
-        .ok()
-        .and_then(|s| serde_json::from_str(&s).ok())
-        .unwrap_or_default()
-}
-fn save_todos(root: &Path, todos: &[TodoItem]) -> anyhow::Result<()> {
-    std::fs::write(todos_path(root), serde_json::to_string_pretty(todos)?)?;
-    Ok(())
-}
-fn render_todos(todos: &[TodoItem]) -> String {
-    if todos.is_empty() {
-        return "(no todos)".into();
-    }
-    todos
-        .iter()
-        .map(|t| format!("[{}] #{} {}", if t.done { "x" } else { " " }, t.id, t.text))
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
-pub struct Todo;
-
-impl Tool for Todo {
+impl Tool for Milestone {
     fn name(&self) -> &str {
-        "todo"
+        "milestone"
     }
     fn description(&self) -> &str {
-        "Manage the todo list: action = list | create | update | complete | delete."
+        "Manage the durable Work Graph of milestones (dependency-ordered work that \
+         survives context resets): action = list | add | start | done | needs_fix | \
+         next | remove. `add` takes title (+ optional acceptance, deps); `done` may \
+         carry a review verdict. `next` returns the next ready milestone to work on."
     }
     fn schema(&self) -> Value {
         json!({
             "type": "object",
             "properties": {
-                "action": { "type": "string", "enum": ["list", "create", "update", "complete", "delete"] },
+                "action": { "type": "string", "enum": ["list", "add", "start", "done", "needs_fix", "next", "remove"] },
                 "id": { "type": "integer" },
-                "text": { "type": "string" }
+                "title": { "type": "string" },
+                "acceptance": { "type": "string", "description": "Acceptance criteria — the contract, written before coding." },
+                "deps": { "type": "array", "items": { "type": "integer" }, "description": "Milestone ids that must be done first." },
+                "verdict": { "type": "string", "enum": ["pass", "needs_fix", "rebuild"], "description": "Review Verdict to attach on `done`." }
             },
             "required": ["action"]
         })
@@ -188,36 +166,83 @@ impl Tool for Todo {
         Permission::None
     }
     fn run(&self, args: Value, ctx: &mut ToolCtx) -> anyhow::Result<ToolOutput> {
+        use crate::workgraph::{NodeStatus, WorkGraph};
         let action = args.get("action").and_then(Value::as_str).unwrap_or("list");
         let id = args.get("id").and_then(Value::as_u64);
-        let text = args.get("text").and_then(Value::as_str).unwrap_or_default().to_string();
-        let mut todos = load_todos(ctx.root);
+        let mut g = WorkGraph::read(ctx.root);
 
         match action {
             "list" => {}
-            "create" => {
-                if text.is_empty() {
-                    return Ok(ToolOutput::err("create needs `text`"));
-                }
-                let next = todos.iter().map(|t| t.id).max().unwrap_or(0) + 1;
-                todos.push(TodoItem { id: next, text, done: false });
+            "next" => {
+                return Ok(ToolOutput::ok(match g.next_ready() {
+                    Some(n) => {
+                        let acc = if n.acceptance.is_empty() {
+                            String::new()
+                        } else {
+                            format!("\n  accept: {}", n.acceptance)
+                        };
+                        format!("▶ #{} {}{}", n.id, n.title, acc)
+                    }
+                    None => "(nothing ready — all milestones done, blocked, or in progress)".into(),
+                }));
             }
-            "update" => match id.and_then(|i| todos.iter_mut().find(|t| t.id == i)) {
-                Some(t) => t.text = text,
-                None => return Ok(ToolOutput::err("update needs a valid `id`")),
-            },
-            "complete" => match id.and_then(|i| todos.iter_mut().find(|t| t.id == i)) {
-                Some(t) => t.done = true,
-                None => return Ok(ToolOutput::err("complete needs a valid `id`")),
-            },
-            "delete" => match id {
-                Some(i) => todos.retain(|t| t.id != i),
-                None => return Ok(ToolOutput::err("delete needs `id`")),
-            },
+            "add" => {
+                let title = args.get("title").and_then(Value::as_str).unwrap_or_default();
+                let acceptance = args.get("acceptance").and_then(Value::as_str).unwrap_or_default();
+                let deps: Vec<u64> = args
+                    .get("deps")
+                    .and_then(Value::as_array)
+                    .map(|a| a.iter().filter_map(Value::as_u64).collect())
+                    .unwrap_or_default();
+                match g.add(title, acceptance, deps) {
+                    Ok(new) => {
+                        g.save(ctx.root)?;
+                        return Ok(ToolOutput::ok(format!("added #{new}\n{}", g.render())));
+                    }
+                    Err(e) => return Ok(ToolOutput::err(e.to_string())),
+                }
+            }
+            "start" => {
+                let ok = id.map(|i| g.set_status(i, NodeStatus::InProgress)).unwrap_or(false);
+                if !ok {
+                    return Ok(ToolOutput::err("start needs a valid `id`"));
+                }
+            }
+            "needs_fix" => {
+                let ok = id.map(|i| g.set_status(i, NodeStatus::NeedsFix)).unwrap_or(false);
+                if !ok {
+                    return Ok(ToolOutput::err("needs_fix needs a valid `id`"));
+                }
+            }
+            "done" => {
+                let Some(i) = id else {
+                    return Ok(ToolOutput::err("done needs `id`"));
+                };
+                let verdict = args.get("verdict").and_then(Value::as_str);
+                // Acceptance gate: a non-pass verdict lands NeedsFix, not Done.
+                let status = match verdict {
+                    Some(v) if v != "pass" => NodeStatus::NeedsFix,
+                    _ => NodeStatus::Done,
+                };
+                if !g.set_status(i, status) {
+                    return Ok(ToolOutput::err("done needs a valid `id`"));
+                }
+                if let (Some(v), Some(n)) = (verdict, g.nodes.iter_mut().find(|n| n.id == i)) {
+                    n.verdict = Some(v.to_string());
+                }
+            }
+            "remove" => {
+                let Some(i) = id else {
+                    return Ok(ToolOutput::err("remove needs `id`"));
+                };
+                if let Err(e) = g.remove(i) {
+                    return Ok(ToolOutput::err(e.to_string()));
+                }
+            }
             other => return Ok(ToolOutput::err(format!("unknown action: {other}"))),
         }
-        save_todos(ctx.root, &todos)?;
-        Ok(ToolOutput::ok(render_todos(&todos)))
+        g.save(ctx.root)?;
+        Ok(ToolOutput::ok(g.render()))
     }
 }
 
@@ -293,15 +318,37 @@ mod tests {
     }
 
     #[test]
-    fn todo_crud_roundtrip() {
+    fn milestone_add_deps_and_done_gates_next() {
         let dir = ctx_dir();
         let mut ctx = ToolCtx::new(&dir);
-        Todo.run(json!({ "action": "create", "text": "write tests" }), &mut ctx).unwrap();
-        Todo.run(json!({ "action": "create", "text": "ship it" }), &mut ctx).unwrap();
-        Todo.run(json!({ "action": "complete", "id": 1 }), &mut ctx).unwrap();
-        let out = Todo.run(json!({ "action": "delete", "id": 2 }), &mut ctx).unwrap();
-        assert!(out.content.contains("[x] #1 write tests"));
-        assert!(!out.content.contains("#2"));
+        Milestone.run(json!({ "action": "add", "title": "data model" }), &mut ctx).unwrap();
+        Milestone
+            .run(json!({ "action": "add", "title": "logic", "deps": [1] }), &mut ctx)
+            .unwrap();
+        // #2 is blocked behind #1: `next` yields #1.
+        let n = Milestone.run(json!({ "action": "next" }), &mut ctx).unwrap();
+        assert!(n.content.contains("#1 data model"), "got: {}", n.content);
+        // Complete #1 with a passing verdict → #2 unblocks.
+        Milestone.run(json!({ "action": "done", "id": 1, "verdict": "pass" }), &mut ctx).unwrap();
+        let n2 = Milestone.run(json!({ "action": "next" }), &mut ctx).unwrap();
+        assert!(n2.content.contains("#2 logic"), "got: {}", n2.content);
+        // The verdict is recorded and #1 renders as done.
+        let list = Milestone.run(json!({ "action": "list" }), &mut ctx).unwrap();
+        assert!(list.content.contains("[x] #1 data model"));
+        assert!(list.content.contains("✓pass"));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn milestone_non_pass_verdict_lands_needs_fix() {
+        let dir = ctx_dir();
+        let mut ctx = ToolCtx::new(&dir);
+        Milestone.run(json!({ "action": "add", "title": "risky" }), &mut ctx).unwrap();
+        Milestone.run(json!({ "action": "done", "id": 1, "verdict": "rebuild" }), &mut ctx).unwrap();
+        let list = Milestone.run(json!({ "action": "list" }), &mut ctx).unwrap();
+        // Acceptance gate: a non-pass verdict does NOT mark done.
+        assert!(list.content.contains("[!] #1 risky"), "got: {}", list.content);
+        assert!(list.content.contains("✓rebuild"));
         std::fs::remove_dir_all(&dir).ok();
     }
 
