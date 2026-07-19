@@ -6,7 +6,9 @@ use ratatui::widgets::{Paragraph, Wrap};
 use ratatui::Frame;
 
 use crate::tui::Theme;
-use crate::verify::{CaseStatus, VerifyFocus, VerifyState};
+use crate::verify::{
+    CaseStatus, L4Phase, ScenarioStatus, VerifyFocus, VerifyState,
+};
 
 const SPINNER: [char; 10] = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
 
@@ -163,6 +165,105 @@ fn render_layers(f: &mut Frame, state: &VerifyState, t: &Theme, area: Rect, fram
         }
     }
 
+    // --- L4 能力验证层 ---
+    let l4 = &state.l4;
+    let l4_total = l4.total_scenarios();
+    let l4_passed = l4.passed_scenarios();
+    let l4_failed = l4.failed_scenarios();
+    let l4_completed = l4.completed_scenarios();
+    let l4_pct = if l4_total > 0 { (l4_completed * 100) / l4_total } else { 0 };
+
+    let l4_focused = matches!(state.focus, VerifyFocus::Layer(i) if i == 3);
+    let l4_header_style = if l4_focused {
+        Style::default().fg(t.accent).add_modifier(Modifier::REVERSED)
+    } else {
+        Style::default().fg(t.fg)
+    };
+
+    let l4_icon = if l4.folded { "▸" } else { "▾" };
+    let l4_status_icon = if l4_failed > 0 { "✗" } else if l4_passed > 0 { "✔" } else { "⏸" };
+    let l4_title = format!(
+        "  {l4_icon}  [{l4_status_icon}] L4 能力验证  {l4_passed}/{l4_total}  {l4_pct}%  [{phase}]",
+        phase = l4.phase.name(),
+    );
+    lines.push(Line::from(Span::styled(l4_title, l4_header_style)));
+
+    if !l4.folded {
+        // 阶段 1: 骨架场景进度
+        let phase1_icon = match l4.phase {
+            L4Phase::Scenarios => "⏳",
+            L4Phase::Exploration => "✔",
+            L4Phase::Complete => "✔",
+            L4Phase::Failed => "✗",
+            L4Phase::Idle => "⏸",
+        };
+        lines.push(Line::from(Span::styled(
+            format!("    {phase1_icon} 骨架场景  ({l4_passed}/{l4_total})"),
+            Style::default().fg(t.fg),
+        )));
+
+        // 显示每个场景
+        for scenario in &l4.scenarios {
+            let (icon, color) = match &scenario.status {
+                ScenarioStatus::Passed => ("✔", t.accent),
+                ScenarioStatus::Failed(_) => ("✗", t.error),
+                ScenarioStatus::Running => ("⏳", t.warn),
+                ScenarioStatus::Skipped => ("⏸", t.dim),
+                ScenarioStatus::Queued => ("·", t.dim),
+            };
+            let cat = scenario.category.name();
+            let critical_mark = if scenario.critical { " [核心]" } else { "" };
+            lines.push(Line::from(Span::styled(
+                format!("      [{icon}] {cat}/{name}{critical_mark}  {dur}ms",
+                    name = scenario.name,
+                    critical_mark = critical_mark,
+                    dur = scenario.duration_ms,
+                ),
+                color,
+            )));
+            if let ScenarioStatus::Failed(reason) = &scenario.status {
+                for line_text in reason.lines().take(5) {
+                    lines.push(Line::from(Span::styled(
+                        format!("        {line_text}"),
+                        Style::default().fg(t.error).add_modifier(Modifier::DIM),
+                    )));
+                }
+            }
+        }
+
+        // 阶段 2: 自驱动探索进度
+        let explore = &l4.explore;
+        let phase2_icon = if explore.running { "⏳" } else if explore.checked_count() > 0 { "✔" } else { "⏸" };
+        lines.push(Line::from(Span::styled(
+            format!("    {phase2_icon} 自驱动探索  (已检:{} 已愈:{} 失败:{})",
+                explore.checked_count(),
+                explore.healed_count(),
+                explore.failed_count(),
+            ),
+            Style::default().fg(t.fg),
+        )));
+
+        // 显示当前检查目标
+        if let Some(ref target) = explore.current_target {
+            lines.push(Line::from(Span::styled(
+                format!("      ⏳ {target}"),
+                Style::default().fg(t.warn),
+            )));
+        }
+
+        // 显示最近的自愈记录
+        for heal in explore.healed.iter().rev().take(3) {
+            let status = if heal.applied { "✔ 已修复" } else { "✗ 修复失败" };
+            lines.push(Line::from(Span::styled(
+                format!("      [{status}] {target}  ({diag})",
+                    target = heal.target,
+                    diag = heal.diagnosis,
+                ),
+                if heal.applied { Style::default().fg(t.accent) } else { Style::default().fg(t.error) },
+            )));
+        }
+    }
+
     // Window the list to fit the area.
     let h = area.height as usize;
     let total = lines.len();
@@ -208,6 +309,7 @@ fn render_shortcuts(f: &mut Frame, t: &Theme, area: Rect) {
         Span::styled("Enter 展开详情  ", Style::default().fg(t.dim)),
         Span::styled("Esc 退出  ", Style::default().fg(t.dim)),
         Span::styled("F5 重新运行  ", Style::default().fg(t.dim)),
+        Span::styled("F6 仅 L4  ", Style::default().fg(t.dim)),
     ]);
     f.render_widget(Paragraph::new(line), area);
 }
@@ -263,11 +365,11 @@ pub fn handle_verify_key(state: &mut VerifyState, key: &crossterm::event::KeyEve
                     }
                 }
                 VerifyFocus::Layer(l) => {
-                    if l < 2 {
+                    if l < 3 {
                         // Move to first module if available.
                         if !state.layers[l].modules.is_empty() {
                             state.focus = VerifyFocus::Module { layer: l, module: 0 };
-                        } else if l < 2 {
+                        } else if l < 3 {
                             state.focus = VerifyFocus::Layer(l + 1);
                         }
                     }
@@ -276,7 +378,7 @@ pub fn handle_verify_key(state: &mut VerifyState, key: &crossterm::event::KeyEve
                     let next_module = module + 1;
                     if next_module < state.layers[layer].modules.len() {
                         state.focus = VerifyFocus::Module { layer, module: next_module };
-                    } else if layer < 2 {
+                    } else if layer < 3 {
                         state.focus = VerifyFocus::Layer(layer + 1);
                     }
                 }
@@ -289,7 +391,7 @@ pub fn handle_verify_key(state: &mut VerifyState, key: &crossterm::event::KeyEve
                         let next_module = module + 1;
                         if next_module < state.layers[layer].modules.len() {
                             state.focus = VerifyFocus::Module { layer, module: next_module };
-                        } else if layer < 2 {
+                        } else if layer < 3 {
                             state.focus = VerifyFocus::Layer(layer + 1);
                         }
                     }
