@@ -63,3 +63,43 @@ CodeCoder 的测试套件是一个**黑盒行为验证**分层：集成测试只
   （`tests/l1_kernel.rs`）已转为常规回归测试。TUI 侧也已接线：有 turn 在跑时按 `Esc` 直接翻转
   共享 `CancelToken`（不走 `cmd_tx`，因 agent 线程 turn 内阻塞在 `process_turn`），
   由 `esc_during_activity_flips_the_cancel_token`（`src/tui/run.rs`）守卫。端到端取消现已可用。
+
+## L4 全能力验证层
+
+| 层 | 触发 | 依赖 | 命令 |
+|----|------|------|------|
+| **L4 能力验证** | `/verify` 命令（L1-L3 之后自动执行） | 无（hermetic，使用 stub provider） | `cargo test` 触发或 `/verify` |
+
+**L4 分两个阶段：**
+
+### 阶段 1: 骨架场景
+
+脚本化验证场景，覆盖：
+- 25 个工具逐一验证（read_file、write_file、edit_file、run_command、glob、grep、diff、commit、memory、agent、use_skill 等）
+- 权限矩阵（grant_once、session、project、deny、shell cap 降级）
+- Agent 对话流程（cancel、steer、resume、navigate）
+- Session 持久化（session_persists、branching、resume）
+- Capability 冒烟（generate、run、persistent）
+- Skill 生命周期（generate、promote、use）
+- 元验证（README 可读、ADR 一致性）
+
+**失败策略**：critical=true（工具/binary 问题）→ 立即停止；critical=false（skill/提示词问题）→ 记录并继续
+
+### 阶段 2: 自驱动探索
+
+注入 `self-verify` skill，由 agent 自行驱动：
+- 读取 `skills/` 下每个 `.md`，验证格式完整性
+- 读取 `capabilities/` 下 manifest，验证声明完整性
+- 尝试 `run_capability` 做冒烟测试
+- 组合工具链做探索性测试
+
+**自愈机制**：提示词级别问题通过 `self_heal` 工具自动修复；binary 级别错误记录并停止。
+
+### L4 代码结构
+
+- `src/verify/scenario.rs` — 场景定义框架 + 场景清单
+- `src/verify/explore.rs` — 自驱动探索状态
+- `src/verify/runner.rs` — L4Runner（场景执行 + 探索执行）
+- `src/verify/state.rs` — L4State 扩展
+- `src/tool/builtin.rs` — SelfHeal 工具
+- `skills/self-verify.md` — 自驱动探索 skill
