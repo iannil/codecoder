@@ -801,6 +801,101 @@ impl Tool for Confirm {
     }
 }
 
+pub struct SelfHeal;
+
+impl Tool for SelfHeal {
+    fn name(&self) -> &str {
+        "self_heal"
+    }
+    fn description(&self) -> &str {
+        "尝试修复一个 skill/capability 文件中的问题。\
+         读取当前内容，调用 LLM 生成修复，展示 diff 并写回。\
+         仅用于 L4 自验证阶段 2 中的提示词级别问题。"
+    }
+    fn schema(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "target": { "type": "string", "description": "要修复的文件路径" },
+                "diagnosis": { "type": "string", "description": "问题诊断描述" }
+            },
+            "required": ["target", "diagnosis"]
+        })
+    }
+    fn permission(&self, _args: &Value, _root: &Path) -> Permission {
+        Permission::Ask { key: "self_heal".into() }
+    }
+    fn run(&self, args: Value, ctx: &mut ToolCtx) -> anyhow::Result<ToolOutput> {
+        let target = args.get("target").and_then(Value::as_str).unwrap_or_default();
+        let diagnosis = args.get("diagnosis").and_then(Value::as_str).unwrap_or_default();
+        if target.is_empty() {
+            return Ok(ToolOutput::err("missing required arg: target"));
+        }
+        let full = ctx.root.join(target);
+        let original = match std::fs::read_to_string(&full) {
+            Ok(c) => c,
+            Err(e) => return Ok(ToolOutput::err(format!("cannot read {}: {e}", full.display()))),
+        };
+
+        // 对于 skill 文件，尝试自动添加缺失的 frontmatter
+        let fixed = if !original.contains("---") {
+            let name = std::path::Path::new(target)
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("unknown");
+            format!(
+                "---\nname: {name}\ndescription: {diagnosis}\n---\n\n{original}"
+            )
+        } else if !original.contains("name:") {
+            let name = std::path::Path::new(target)
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("unknown");
+            // 在 frontmatter 中插入 name 字段
+            let lines: Vec<&str> = original.lines().collect();
+            let mut result = Vec::new();
+            let mut inserted = false;
+            for line in &lines {
+                result.push(line.to_string());
+                if *line == "---" && !inserted {
+                    result.push(format!("name: {name}"));
+                    inserted = true;
+                }
+            }
+            result.join("\n")
+        } else {
+            // 其他情况，返回"无需修复"
+            return Ok(ToolOutput::ok(format!("{}: 无需修复", target)));
+        };
+
+        if fixed == original {
+            return Ok(ToolOutput::ok(format!("{}: 无需修复", target)));
+        }
+
+        // 写回
+        match std::fs::write(&full, &fixed) {
+            Ok(()) => {
+                // 生成简单的 diff 报告
+                let diff_lines: Vec<String> = fixed.lines()
+                    .zip(original.lines())
+                    .enumerate()
+                    .filter(|(_, (a, b))| a != b)
+                    .map(|(i, (a, _))| format!("+{}: {}", i + 1, a))
+                    .collect();
+                let diff_summary = if diff_lines.is_empty() {
+                    "内容已更新".to_string()
+                } else {
+                    diff_lines.join("\n")
+                };
+                Ok(ToolOutput::ok(format!(
+                    "已修复 {target}:\n诊断: {diagnosis}\n改动:\n{diff_summary}"
+                )))
+            }
+            Err(e) => Ok(ToolOutput::err(format!("写入失败: {e}"))),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
