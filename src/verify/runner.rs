@@ -63,7 +63,9 @@ impl VerifyRunner {
                 })
             })
             .collect();
-        emit_loaded(&event_tx, TestSuiteLoaded { suites });
+        if !suites.is_empty() {
+            emit_loaded(&event_tx, TestSuiteLoaded { suites });
+        }
 
         let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let cancel_clone = Arc::clone(&cancel);
