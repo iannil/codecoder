@@ -82,7 +82,8 @@ impl VerifyRunner {
             cmd.arg(file);
         }
         cmd.arg("--");
-        cmd.arg("--quiet");
+        // Don't use --quiet here — it changes output to compact format (dots)
+        // which our regex can't parse. Use --format pretty (default) instead.
         cmd.arg("--nocapture");
 
         // Run from the project root.
