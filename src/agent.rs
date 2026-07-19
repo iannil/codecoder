@@ -105,6 +105,29 @@ impl CancelToken {
     }
 }
 
+/// A shared queue of user messages submitted while a turn is running (ADR 0029).
+/// Like `CancelToken`, the TUI writes to it directly — the agent thread is blocked
+/// in `process_turn` and cannot service `cmd_rx` mid-turn. `process_turn` drains
+/// it to inject steering, and to restart instead of stopping (follow-up).
+#[derive(Clone, Default)]
+pub struct SteerQueue(std::sync::Arc<std::sync::Mutex<Vec<String>>>);
+
+impl SteerQueue {
+    /// Enqueue a user message to be picked up mid-turn.
+    pub fn push(&self, msg: String) {
+        if let Ok(mut q) = self.0.lock() {
+            q.push(msg);
+        }
+    }
+    /// Take everything queued so far (FIFO), leaving the queue empty.
+    pub fn drain(&self) -> Vec<String> {
+        match self.0.lock() {
+            Ok(mut q) => std::mem::take(&mut *q),
+            Err(_) => Vec::new(),
+        }
+    }
+}
+
 /// In-memory tier-2 summary cache (ADR 0023). Keyed by the covered span's last
 /// message id: stable within a turn (tools append non-User messages), so at most
 /// one summary LLM call fires per turn. Not persisted — recomputed after /resume.
@@ -157,6 +180,8 @@ pub struct AgentLoop {
     /// Whether the project's disk "self" has loaded (ADR 0028). Gated at build();
     /// an interactive undecided project resolves via a first-turn TrustPrompt.
     trust: TrustState,
+    /// User messages submitted mid-turn (ADR 0029), drained inside `process_turn`.
+    steer: SteerQueue,
     /// Derived tier-2 summary overlay (ADR 0023); never persisted.
     tier2: Option<Tier2Summary>,
 }
@@ -264,6 +289,7 @@ impl AgentLoop {
             cancel: CancelToken::default(),
             headless,
             trust,
+            steer: SteerQueue::default(),
             tier2: None,
         }
     }
@@ -277,6 +303,12 @@ impl AgentLoop {
 
     pub fn cancel_token(&self) -> CancelToken {
         self.cancel.clone()
+    }
+
+    /// A shared handle to the steering queue (ADR 0029). The TUI pushes mid-turn
+    /// user input here; `process_turn` drains it.
+    pub fn steer_handle(&self) -> SteerQueue {
+        self.steer.clone()
     }
 
     fn append(&mut self, role: Role, items: Vec<MessageItem>) -> MessageId {
@@ -514,6 +546,21 @@ impl AgentLoop {
         }
     }
 
+    /// Drain the steering queue (ADR 0029), appending each queued user message as a
+    /// `Role::User` turn so the next provider call sees it. Returns whether anything
+    /// was drained (the natural-stop point uses this to restart rather than stop).
+    fn drain_steer(&mut self, event_tx: &Sender<AgentEvent>) -> bool {
+        let queued = self.steer.drain();
+        if queued.is_empty() {
+            return false;
+        }
+        for text in queued {
+            let _ = event_tx.send(AgentEvent::Notice(format!("steering: {text}")));
+            self.append(Role::User, vec![MessageItem::Text { text }]);
+        }
+        true
+    }
+
     /// If trust is still `Pending` (interactive, undecided, config on disk), ask
     /// the user once before the first turn runs (ADR 0028). The answer resolves the
     /// state and — when trusted — loads the project's disk "self" now. A dropped
@@ -558,6 +605,10 @@ impl AgentLoop {
             if self.cancel.is_cancelled() {
                 break;
             }
+
+            // Inject any mid-turn user input (ADR 0029) as User messages before the
+            // next provider call — this is steering (redirect the running turn).
+            self.drain_steer(event_tx);
 
             // Only the derived working set is sent to the provider (ADR 0023),
             // prefixed by the System prompt (AGENTS.md + catalog, ADR 0020).
@@ -617,7 +668,12 @@ impl AgentLoop {
             self.append(Role::Assistant, reply.items);
 
             if tool_calls.is_empty() {
-                break; // no tools requested → turn is done
+                // The turn would end here. If the user steered in the meantime
+                // (ADR 0029), restart the loop with that input instead of stopping.
+                if self.drain_steer(event_tx) {
+                    continue;
+                }
+                break; // no tools requested and nothing steered → turn is done
             }
 
             // Truncation guard (roadmap #1 / ADR 0027): if the response was cut off
@@ -1455,6 +1511,111 @@ mod tests {
             events.iter().any(|e| matches!(e, AgentEvent::StreamDelta(m) if m.contains("error"))),
             "the error should be surfaced"
         );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// call 0 → plain text (no tool calls) but pushes a steering message mid-call,
+    /// simulating the user typing while the turn runs; call 1 → reports whether the
+    /// steering `User` message was in context (ADR 0029).
+    struct SteeringProvider {
+        calls: AtomicUsize,
+        steer: SteerQueue,
+    }
+    impl Provider for SteeringProvider {
+        fn name(&self) -> &str {
+            "steering"
+        }
+        fn complete(&self, req: &CompletionRequest) -> anyhow::Result<Completion> {
+            if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                self.steer.push("actually, focus on X".into());
+                Ok(Message::text(0, Role::Assistant, "working").into())
+            } else {
+                let saw = req.messages.iter().any(|m| {
+                    m.role == Role::User
+                        && m.items.iter().any(|it| matches!(it,
+                            MessageItem::Text { text } if text.contains("focus on X")))
+                });
+                Ok(Message::text(0, Role::Assistant, if saw { "steered" } else { "missed" }).into())
+            }
+        }
+    }
+
+    #[test]
+    fn follow_up_steering_restarts_turn_instead_of_stopping() {
+        let dir = std::env::temp_dir().join(format!("cc_steer_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let steer = SteerQueue::default();
+        let provider = Arc::new(SteeringProvider { calls: AtomicUsize::new(0), steer: steer.clone() });
+        let mut agent = AgentLoop::new(provider.clone() as Arc<dyn Provider>, "m", 256, 0.0, dir.clone());
+        agent.steer = steer.clone(); // agent drains the same handle the provider pushes to
+
+        let (etx, erx) = channel();
+        agent.process_turn("start".into(), &etx);
+        drop(etx);
+        let _events: Vec<_> = erx.into_iter().collect();
+
+        // The turn did not stop after the tool-less first reply — steering restarted it.
+        assert_eq!(provider.calls.load(Ordering::SeqCst), 2, "steering should restart the turn");
+        assert_eq!(agent.last_assistant_text(), "steered", "the steering message must be in context");
+        // The steering message is an ordinary User turn in the session.
+        assert!(agent.session.messages.iter().any(|m| m.role == Role::User
+            && m.items.iter().any(|it| matches!(it,
+                MessageItem::Text { text } if text.contains("focus on X")))));
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// call 0 → a tool call, and pushes steering mid-call; call 1 (after the tool
+    /// result, once the iteration-top drain has injected the steering) → reports
+    /// whether the steering was in context (ADR 0029, mid-tool-loop steering).
+    struct SteeringToolProvider {
+        calls: AtomicUsize,
+        steer: SteerQueue,
+    }
+    impl Provider for SteeringToolProvider {
+        fn name(&self) -> &str {
+            "steering-tool"
+        }
+        fn complete(&self, req: &CompletionRequest) -> anyhow::Result<Completion> {
+            if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                self.steer.push("switch to Y".into());
+                Ok(Message::new(
+                    0,
+                    Role::Assistant,
+                    vec![MessageItem::ToolCall {
+                        id: "c1".into(),
+                        name: "read_file".into(),
+                        args: serde_json::json!({ "path": "note.txt" }),
+                    }],
+                )
+                .into())
+            } else {
+                let saw = req.messages.iter().any(|m| {
+                    m.role == Role::User
+                        && m.items.iter().any(|it| matches!(it,
+                            MessageItem::Text { text } if text.contains("switch to Y")))
+                });
+                Ok(Message::text(0, Role::Assistant, if saw { "steered" } else { "missed" }).into())
+            }
+        }
+    }
+
+    #[test]
+    fn steering_injects_mid_tool_loop() {
+        let dir = std::env::temp_dir().join(format!("cc_steertool_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("note.txt"), "hello").unwrap();
+        let steer = SteerQueue::default();
+        let provider = Arc::new(SteeringToolProvider { calls: AtomicUsize::new(0), steer: steer.clone() });
+        let mut agent = AgentLoop::new(provider as Arc<dyn Provider>, "m", 256, 0.0, dir.clone());
+        agent.steer = steer.clone();
+
+        let (etx, erx) = channel();
+        agent.process_turn("start".into(), &etx);
+        drop(etx);
+        let _events: Vec<_> = erx.into_iter().collect();
+
+        assert_eq!(agent.last_assistant_text(), "steered", "steering must be injected before the next call");
         std::fs::remove_dir_all(&dir).ok();
     }
 

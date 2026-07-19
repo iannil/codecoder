@@ -24,7 +24,7 @@ use std::sync::Arc;
 use std::sync::mpsc;
 use std::thread;
 
-pub use agent::{AgentCommand, AgentEvent, AgentLoop, PermissionReply, TrustReply};
+pub use agent::{AgentCommand, AgentEvent, AgentLoop, PermissionReply, SteerQueue, TrustReply};
 pub use background::BgOutcome;
 pub use config::Config;
 pub use message::{Message, MessageItem, Role};
@@ -85,9 +85,10 @@ pub fn run(cfg: Config) -> anyhow::Result<()> {
     // Clone the cancel token before moving the agent into its thread so the TUI
     // can interrupt an in-flight turn directly (ADR 0016).
     let cancel = agent.cancel_token();
+    let steer = agent.steer_handle();
     let agent_thread = thread::spawn(move || agent.run(cmd_rx, event_tx));
 
-    let result = tui::run::run(cfg.model.clone(), cfg.root.clone(), cmd_tx.clone(), event_rx, cancel);
+    let result = tui::run::run(cfg.model.clone(), cfg.root.clone(), cmd_tx.clone(), event_rx, cancel, steer);
 
     let _ = cmd_tx.send(AgentCommand::Shutdown);
     let _ = agent_thread.join();

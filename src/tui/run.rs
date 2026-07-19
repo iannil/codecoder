@@ -1,7 +1,7 @@
 // TUI run loop (ADR 0024): fullscreen alternate screen, unified channel with an
 // input thread + AgentEvent forwarder + animation tick, blocking recv (0 idle CPU).
 use super::{Activity, AskDialog, Block, ConfirmDialog, Dialog, PermissionDialog, PlanDialog, ToolResultView, TrustDialog, TuiApp};
-use crate::agent::{AgentCommand, AgentEvent, CancelToken, TrustReply};
+use crate::agent::{AgentCommand, AgentEvent, CancelToken, SteerQueue, TrustReply};
 use std::path::PathBuf;
 use crossterm::event::{
     self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
@@ -32,6 +32,7 @@ pub fn run(
     cmd_tx: Sender<AgentCommand>,
     event_rx: Receiver<AgentEvent>,
     cancel: CancelToken,
+    steer: SteerQueue,
 ) -> anyhow::Result<()> {
     // --- terminal setup ---
     enable_raw_mode()?;
@@ -84,6 +85,7 @@ pub fn run(
     // --- main loop: draw, then block on the next message ---
     let mut app = TuiApp::new(model, root);
     app.cancel = cancel;
+    app.steer = steer;
     let result = (|| -> anyhow::Result<()> {
         loop {
             terminal.draw(|f| super::render::draw(f, &app))?;
@@ -469,6 +471,15 @@ fn submit(app: &mut TuiApp, cmd_tx: &Sender<AgentCommand>) {
     }
 
     app.blocks.push(Block::User(text.clone()));
+
+    // A turn is already in flight → steer it (ADR 0029) instead of queuing a new
+    // ProcessMessage: push to the shared queue the running turn drains. The
+    // command channel can't deliver mid-turn (the agent blocks in process_turn).
+    if app.activity.is_some() {
+        app.steer.push(text);
+        return;
+    }
+
     app.activity = Some(Activity {
         label: "thinking…".into(),
         started: std::time::Instant::now(),
@@ -535,5 +546,36 @@ mod tests {
             !token.is_cancelled(),
             "Esc with no turn in progress must be a no-op"
         );
+    }
+
+    #[test]
+    fn submit_while_turn_in_flight_steers_instead_of_queuing() {
+        let (mut app, _token) = app_with_token();
+        let steer = SteerQueue::default();
+        app.steer = steer.clone();
+        app.activity = Some(Activity { label: "working".into(), started: std::time::Instant::now() });
+        app.input = "focus on the parser".into();
+        let (tx, rx) = channel::<AgentCommand>();
+
+        submit(&mut app, &tx);
+
+        // Steered, not queued as a new ProcessMessage.
+        assert_eq!(steer.drain(), vec!["focus on the parser".to_string()]);
+        assert!(rx.try_recv().is_err(), "no ProcessMessage should be sent while a turn is in flight");
+    }
+
+    #[test]
+    fn submit_with_no_turn_sends_process_message() {
+        let (mut app, _token) = app_with_token();
+        let steer = SteerQueue::default();
+        app.steer = steer.clone();
+        app.activity = None;
+        app.input = "hello".into();
+        let (tx, rx) = channel::<AgentCommand>();
+
+        submit(&mut app, &tx);
+
+        assert!(steer.drain().is_empty(), "nothing should be steered when idle");
+        assert!(matches!(rx.try_recv(), Ok(AgentCommand::ProcessMessage(m)) if m == "hello"));
     }
 }
