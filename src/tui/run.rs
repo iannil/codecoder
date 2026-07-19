@@ -164,6 +164,15 @@ fn handle_agent(app: &mut TuiApp, ev: AgentEvent) {
         AgentEvent::TrustPrompt { root, reply_tx } => {
             app.dialog = Some(Dialog::Trust(TrustDialog { root, selected: 0, reply_tx }));
         }
+        AgentEvent::TestSuiteLoaded(loaded) => {
+            app.verify_state.apply_loaded(&loaded);
+        }
+        AgentEvent::TestProgress(progress) => {
+            app.verify_state.apply_progress(&progress);
+        }
+        AgentEvent::TestSuiteComplete(complete) => {
+            app.verify_state.apply_complete(&complete);
+        }
         AgentEvent::TurnComplete => {
             app.streaming = false;
             app.activity = None;
@@ -192,6 +201,20 @@ fn handle_input(app: &mut TuiApp, ev: Event, cmd_tx: &Sender<AgentCommand>) {
                 None if app.help_open => handle_help_key(app, k),
                 None if app.search_active => handle_search_key(app, k),
                 None if app.browsing => handle_browse_key(app, k),
+                None if app.verify_state.running || app.verify_state.total_tests > 0 => {
+                    // Verify mode: if the key wasn't consumed, fall through to normal.
+                    if !crate::tui::verify::handle_verify_key(&mut app.verify_state, &k) {
+                        handle_insert_key(app, k, cmd_tx);
+                    } else {
+                        // Esc exits verify mode.
+                        if k.code == KeyCode::Esc {
+                            if app.verify_state.running {
+                                app.cancel.cancel();
+                            }
+                            app.verify_state.reset();
+                        }
+                    }
+                }
                 None => handle_insert_key(app, k, cmd_tx),
             }
         }
@@ -458,6 +481,11 @@ fn submit(app: &mut TuiApp, cmd_tx: &Sender<AgentCommand>) {
                 app.blocks.clear();
                 app.browsing = false;
                 let _ = cmd_tx.send(AgentCommand::Clear);
+            }
+            "verify" => {
+                // Start verify mode. The TUI will switch to Mode::VERIFY on the
+                // next frame. The agent thread will handle the actual test run.
+                let _ = cmd_tx.send(AgentCommand::ProcessMessage("__verify__".into()));
             }
             "memory" => {
                 let keys = crate::memory::list(&app.root);

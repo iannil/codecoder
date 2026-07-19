@@ -48,6 +48,12 @@ pub fn draw(f: &mut Frame, app: &TuiApp) {
     if app.help_open {
         draw_help(f, app, area);
     }
+
+    // Verify mode replaces the normal 3-zone layout entirely.
+    if app.active_mode() == super::Mode::Verify {
+        crate::tui::verify::render_verify_dashboard(f, app, area);
+        return;
+    }
 }
 
 fn draw_help(f: &mut Frame, app: &TuiApp, area: Rect) {
@@ -406,6 +412,7 @@ fn draw_status(f: &mut Frame, app: &TuiApp, area: Rect) {
     let hints = match mode {
         super::Mode::Browse => "↑/↓ select · tab fold · esc exit",
         super::Mode::Dialog => "↑/↓ select · enter confirm · esc deny",
+        super::Mode::Verify => "Tab expand · ↑↓ select · F5 rerun · Esc exit",
         _ => "^J newline · ↑ browse · / cmd · ^C quit",
     };
     let line = Line::from(vec![

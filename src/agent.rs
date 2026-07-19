@@ -87,6 +87,12 @@ pub enum AgentEvent {
         root: PathBuf,
         reply_tx: Sender<TrustReply>,
     },
+    /// Verify test suite loaded — pre-scan of all test cases.
+    TestSuiteLoaded(crate::verify::TestSuiteLoaded),
+    /// Progress update for one test case.
+    TestProgress(crate::verify::TestProgress),
+    /// All tests completed.
+    TestSuiteComplete(crate::verify::TestSuiteComplete),
     TurnComplete,
 }
 
@@ -632,6 +638,11 @@ impl AgentLoop {
     }
 
     fn process_turn(&mut self, text: String, event_tx: &Sender<AgentEvent>) {
+        // Special message: `/verify` command — run the test suite.
+        if text == "__verify__" {
+            self.run_verify(event_tx);
+            return;
+        }
         self.resolve_trust_if_pending(event_tx);
         self.append(Role::User, vec![MessageItem::Text { text }]);
 
@@ -757,6 +768,28 @@ impl AgentLoop {
             if cancelled {
                 break;
             }
+        }
+
+        let _ = event_tx.send(AgentEvent::TurnComplete);
+    }
+
+    /// Run the verify test suite and stream progress events.
+    fn run_verify(&mut self, event_tx: &Sender<AgentEvent>) {
+        use crate::verify::VerifyRunner;
+
+        // Reset verify state by emitting a loaded event.
+        let mut runner = VerifyRunner::start_l1(&self.root, event_tx.clone());
+
+        // Poll in a tight loop until the verify finishes.
+        loop {
+            if self.cancel.is_cancelled() {
+                runner.cancel();
+                break;
+            }
+            if runner.poll().is_some() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
         }
 
         let _ = event_tx.send(AgentEvent::TurnComplete);

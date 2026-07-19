@@ -1,6 +1,7 @@
 // TUI state (ADR 0001, 0003, 0024). Mode is DERIVED each frame, never stored.
 pub mod render;
 pub mod run;
+pub mod verify;
 
 use crate::agent::{CancelToken, PermissionReply, SteerQueue, TrustReply};
 use crate::permission::PermScope;
@@ -9,7 +10,7 @@ use std::path::PathBuf;
 use std::sync::mpsc::Sender;
 
 pub const FOLD_THRESHOLD: usize = 6;
-const SLASH_COMMANDS: [&str; 7] = ["/help", "/resume", "/reload", "/memory", "/clear", "/exit", "/quit"];
+const SLASH_COMMANDS: [&str; 8] = ["/help", "/resume", "/reload", "/memory", "/clear", "/verify", "/exit", "/quit"];
 const MAX_COMPLETIONS: usize = 8;
 
 /// The interaction context, computed from sub-state — see `TuiApp::active_mode`.
@@ -23,6 +24,7 @@ pub enum Mode {
     Model,
     Slash,
     Browse,
+    Verify,
 }
 
 impl Mode {
@@ -36,6 +38,7 @@ impl Mode {
             Mode::Model => "MODEL",
             Mode::Slash => "SLASH",
             Mode::Browse => "BROWSE",
+            Mode::Verify => "VERIFY",
         }
     }
 }
@@ -278,6 +281,9 @@ pub struct TuiApp {
     /// so the running turn picks it up. Set by `run()`; default in tests.
     pub steer: SteerQueue,
 
+    /// State for the verify dashboard (Mode::VERIFY).
+    pub verify_state: crate::verify::VerifyState,
+
     pub should_quit: bool,
 }
 
@@ -308,6 +314,7 @@ impl TuiApp {
             help_open: false,
             cancel: CancelToken::default(),
             steer: SteerQueue::default(),
+            verify_state: crate::verify::VerifyState::new(),
             should_quit: false,
         }
     }
@@ -349,7 +356,7 @@ impl TuiApp {
         }
     }
 
-    /// Derived-mode precedence chain (ADR 0001): dialog → help → popup → search → browse → insert.
+    /// Derived-mode precedence chain (ADR 0001): dialog → help → popup → search → browse → verify → insert.
     pub fn active_mode(&self) -> Mode {
         if self.dialog.is_some() {
             Mode::Dialog
@@ -361,6 +368,8 @@ impl TuiApp {
             if self.reverse_search { Mode::RSearch } else { Mode::Search }
         } else if self.browsing {
             Mode::Browse
+        } else if self.verify_state.running || self.verify_state.total_tests > 0 {
+            Mode::Verify
         } else {
             Mode::Insert
         }

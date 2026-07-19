@@ -21,6 +21,7 @@ pub mod trust;
 pub mod workgraph;
 pub mod tool;
 pub mod tui;
+pub mod verify;
 
 use std::sync::Arc;
 use std::sync::mpsc;
