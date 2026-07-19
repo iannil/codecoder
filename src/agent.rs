@@ -780,15 +780,13 @@ impl AgentLoop {
     /// Run the verify test suite and stream progress events.
     fn run_verify(&mut self, event_tx: &Sender<AgentEvent>) {
         use crate::verify::VerifyRunner;
+        use crate::verify::scenario::all_scenarios;
+        use crate::verify::runner::L4Runner;
 
-        // First, emit a notice to let the TUI know verify mode should activate.
-        // This triggers before the runner starts, so the TUI switches to
-        // Mode::Verify immediately.
         let _ = event_tx.send(AgentEvent::Notice("verify mode starting".into()));
 
+        // === 阶段 0: L1-L3 现有测试 ===
         let mut runner = VerifyRunner::start_l1(&self.root, event_tx.clone());
-
-        // Poll in a tight loop until the verify finishes.
         loop {
             if self.cancel.is_cancelled() {
                 runner.cancel();
@@ -800,6 +798,36 @@ impl AgentLoop {
             std::thread::sleep(std::time::Duration::from_millis(50));
         }
 
+        if self.cancel.is_cancelled() {
+            let _ = event_tx.send(AgentEvent::TurnComplete);
+            return;
+        }
+
+        // === 阶段 1: L4 骨架场景 ===
+        let _ = event_tx.send(AgentEvent::Notice("L4 验证开始".into()));
+        let scenarios = all_scenarios();
+        let all_critical_passed = L4Runner::run_scenarios(
+            &scenarios,
+            event_tx,
+            &self.cancel,
+            &self.root,
+        );
+
+        if self.cancel.is_cancelled() || !all_critical_passed {
+            if !all_critical_passed {
+                let _ = event_tx.send(AgentEvent::Notice(
+                    "L4 验证失败：核心工具场景未通过，停止验证".into()
+                ));
+            }
+            let _ = event_tx.send(AgentEvent::TurnComplete);
+            return;
+        }
+
+        // === 阶段 2: L4 自驱动探索 ===
+        let _ = event_tx.send(AgentEvent::Notice("L4 自驱动探索开始".into()));
+        L4Runner::run_exploration(event_tx, &self.cancel, &self.root);
+
+        let _ = event_tx.send(AgentEvent::Notice("L4 验证完成".into()));
         let _ = event_tx.send(AgentEvent::TurnComplete);
     }
 
