@@ -22,6 +22,7 @@ impl Daemon {
         let server = socket::SocketServer::bind(&sock_path)?;
         let provider = crate::select_provider(&self.cfg);
         let registry = Arc::new(std::sync::RwLock::new(crate::registry::Registry::scan(&self.cfg.root)));
+        let registry_for_reload = Arc::clone(&registry);
         let mgr = Arc::new(Mutex::new(session_manager::DaemonSessionManager::new(
             provider,
             self.cfg.model.clone(),
@@ -82,6 +83,18 @@ impl Daemon {
             }
         });
 
+        // Registry 热重载线程：周期性扫描 skills/capabilities/prompts 的 mtime，变化时重新加载。
+        // 使用 3s 轮询间隔；检测到变化后调用 tick_reload 更新共享 Registry。
+        let root_for_reload = self.cfg.root.clone();
+        let shutdown_for_reload = Arc::clone(&shutdown);
+        let reload_handle = std::thread::spawn(move || {
+            let mut last = crate::registry::DirMtimes::default();
+            while !shutdown_for_reload.load(Ordering::SeqCst) {
+                std::thread::sleep(std::time::Duration::from_secs(3));
+                crate::registry::tick_reload(&registry_for_reload, &root_for_reload, &mut last);
+            }
+        });
+
         // 优雅退出：SIGINT/daemon 被 shutdown 请求后，退出时杀常驻 Capability（ADR 0021）。
         while !shutdown.load(Ordering::SeqCst) {
             let stream = match server.accept_one() {
@@ -103,6 +116,7 @@ impl Daemon {
         }
         let _ = sup_handle.join();
         let _ = wg_handle.join();
+        let _ = reload_handle.join();
         crate::capability::shutdown_all();
         Ok(())
     }
@@ -111,6 +125,9 @@ impl Daemon {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::registry::{tick_reload, DirMtimes, Registry};
+    use std::sync::{Arc, RwLock};
+    use std::sync::atomic::{AtomicBool, Ordering};
 
     // Task 1 的 stub 测试仍保留语义：daemon 可构造。
     #[test]
@@ -122,6 +139,40 @@ mod tests {
             max_tokens: 4096, temperature: 0.7, root: dir.clone(), github_token: None,
         };
         let _d = Daemon::new(cfg); // 仅构造，不 run（run 会阻塞 accept）
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn reload_loop_picks_up_written_skill() {
+        let dir = std::env::temp_dir().join(format!("cc_reload_thread_{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("skills")).unwrap();
+        let reg = Arc::new(RwLock::new(Registry::scan(&dir)));
+        let reg_for_thread = Arc::clone(&reg);
+        let root_for_thread = dir.clone();
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let shutdown_for_thread = shutdown.clone();
+        let handle = std::thread::spawn(move || {
+            let mut last = DirMtimes::default();
+            // First tick to record mtimes
+            tick_reload(&reg_for_thread, &root_for_thread, &mut last);
+            while !shutdown_for_thread.load(Ordering::SeqCst) {
+                std::thread::sleep(std::time::Duration::from_millis(50)); // fast tick for the test
+                tick_reload(&reg_for_thread, &root_for_thread, &mut last);
+            }
+        });
+        // Give the thread time to start and record initial mtimes
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        // write a new skill AFTER the loop started
+        std::fs::write(
+            dir.join("skills/x.md"),
+            "---\nname: x\ndescription: d\n---\nbody",
+        ).unwrap();
+        // allow at least one tick after the write
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        shutdown.store(true, Ordering::SeqCst);
+        handle.join().unwrap();
+        let has_x = reg.read().unwrap().catalog.iter().any(|e| e.name == "x");
+        assert!(has_x, "reload loop must pick up the written skill");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
