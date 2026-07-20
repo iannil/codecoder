@@ -97,7 +97,7 @@ pub fn prompt_user(_id: u64, body: &crate::daemon::proto::PromptBody) -> crate::
                 "s" | "session" => PermissionGrant::AlwaysThisSession,
                 "p" | "project" => PermissionGrant::AlwaysThisProject,
                 "n" | "no" => PermissionGrant::Deny,
-                "N" | "NEVER" => PermissionGrant::Cancelled,
+                "never" | "cancel" | "c" => PermissionGrant::Cancelled,
                 _ => PermissionGrant::Deny, // default to deny on invalid input
             };
             PromptAnswer::Permission { grant }

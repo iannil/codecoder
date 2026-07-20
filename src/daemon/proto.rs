@@ -276,7 +276,7 @@ mod tests {
             let back: PermissionGrant = serde_json::from_str(&json).unwrap();
             assert_eq!(grant, back);
             // 确保用的是 snake_case（serde(rename_all)）
-            assert!(json.contains("\""));
+            assert!(json.contains("once") || json.contains("always_this_session") || json.contains("always_this_project") || json.contains("deny") || json.contains("cancelled"));
         }
     }
 

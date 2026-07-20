@@ -72,8 +72,9 @@ pub fn handle_connection(
             write_event(&mut writer, &ServerEvent::Sessions { ids: g.disk_sessions() })?;
         }
         ClientRequest::Resume { id } => {
-            drain_agent_events(g.resume(&id)?, &mut reader, &mut writer)?;
-            drop(g);
+            let rx = g.resume(&id)?;
+            drop(g); // release the manager lock BEFORE draining so other clients can proceed
+            drain_agent_events(rx, &mut reader, &mut writer)?;
         }
         ClientRequest::SendMessage { content } => {
             // 没指定 session → 自动取第一个（或新建）。
@@ -81,8 +82,9 @@ pub fn handle_connection(
                 Some(id) => id,
                 None => g.create(),
             };
-            drain_agent_events(g.send_message(&id, content)?, &mut reader, &mut writer)?;
-            drop(g); // 释放 mgr 锁，让 agent 线程推进
+            let rx = g.send_message(&id, content)?;
+            drop(g); // release the manager lock BEFORE draining so other clients can proceed
+            drain_agent_events(rx, &mut reader, &mut writer)?;
         }
         ClientRequest::Shutdown => {
             shutdown.store(true, std::sync::atomic::Ordering::SeqCst);
