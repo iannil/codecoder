@@ -35,7 +35,7 @@ impl Daemon {
         let mut supervisor = crate::capability::Supervisor::start_all(&self.cfg.root)
             .unwrap_or_else(|e| {
                 eprintln!("ccd: supervisor init failed: {e}");
-                crate::capability::Supervisor { max_restarts: 3, window_secs: 60, states: Default::default() }
+                crate::capability::Supervisor { max_restarts: 3, window_secs: 60, root: self.cfg.root.clone(), states: Default::default() }
             });
 
         // 监督线程：周期 supervise（独立线程，避免阻塞 accept）。

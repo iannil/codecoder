@@ -126,12 +126,13 @@ pub struct SupervisedService {
 pub struct Supervisor {
     pub max_restarts: u32,
     pub window_secs: u64,
+    pub root: std::path::PathBuf,
     pub states: std::collections::HashMap<String, SupervisedService>,
 }
 
 impl Supervisor {
     pub fn start_all(root: &std::path::Path) -> anyhow::Result<Self> {
-        let mut sup = Self { max_restarts: 3, window_secs: 60, states: Default::default() };
+        let mut sup = Self { max_restarts: 3, window_secs: 60, root: root.to_path_buf(), states: Default::default() };
         let caps = root.join("capabilities");
         let Ok(entries) = std::fs::read_dir(&caps) else { return Ok(sup); };
         for e in entries.flatten() {
@@ -180,7 +181,7 @@ impl Supervisor {
             s.restart_count += 1;
             if s.first_restart.is_none() { s.first_restart = Some(now_inst); }
             // 重启
-            if let Ok(c) = spawn_shell_capability(&std::path::PathBuf::from("."), &s.manifest) {
+            if let Ok(c) = spawn_shell_capability(&self.root, &s.manifest) {
                 s.child = Some(c);
             } else {
                 s.child = None;
@@ -221,8 +222,18 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("cc_supervisor_{}", std::process::id()));
         let capdir = dir.join("capabilities/flaky");
         std::fs::create_dir_all(&capdir).unwrap();
-        // 一个会立即退出的脚本（模拟崩溃）。Shell 环境。
-        let script = if cfg!(windows) { "exit 1" } else { "#!/bin/sh\nexit 1\n" };
+
+        // Create a marker file path at an absolute location we control
+        let marker_path = dir.join("respawn_cwd.txt");
+
+        // 一个会立即退出的脚本（模拟崩溃），并在退出前写入当前工作目录到标记文件
+        // 使用追加模式，这样每次运行（包括重启）都会添加一行
+        let script = if cfg!(windows) {
+            format!("cd >> \"{}\" & exit 1", marker_path.display())
+        } else {
+            format!("#!/bin/sh\npwd >> \"{}\"\nexit 1\n", marker_path.display())
+        };
+
         std::fs::write(dir.join("capabilities/flaky/entry.sh"), script).unwrap();
         std::fs::write(
             dir.join("capabilities/flaky/manifest.json"),
@@ -245,6 +256,39 @@ mod tests {
         let s = sup.states.get("flaky").expect("flaky supervised");
         assert!(s.restart_count >= 1, "should have restarted at least once");
         assert!(s.gave_up, "should give up after max_restarts");
+
+        // The marker file must exist for at least one respawn to have run
+        // With the wrong root, spawn will fail (no such directory) and marker won't be created
+        let marker_content = loop {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            match std::fs::read_to_string(&marker_path) {
+                Ok(content) if !content.trim().is_empty() => break content,
+                Ok(_) => continue, // File exists but empty, wait longer
+                Err(_) => {
+                    // If the respawn is using wrong root, spawn_shell_capability will fail
+                    // because the directory won't exist relative to daemon cwd
+                    if start.elapsed().as_secs() > 1 {
+                        panic!("Marker file not created within timeout. This indicates that the respawn failed to run, likely because spawn_shell_capability used the wrong root ('.' instead of project root), causing the directory lookup to fail.");
+                    }
+                }
+            }
+        };
+
+        // The marker file should have multiple lines (initial spawn + at least one respawn)
+        let lines: Vec<&str> = marker_content.lines().collect();
+        assert!(lines.len() >= 2, "Marker file should have at least 2 lines (initial spawn + respawn), got {} lines: {:?}", lines.len(), lines);
+
+        // All lines should contain the same correct working directory
+        let expected_cwd = dir.join("capabilities/flaky").canonicalize().expect("canonicalize expected path");
+        for line in lines {
+            let actual_cwd = std::path::PathBuf::from(line.trim());
+            let actual_cwd = actual_cwd.canonicalize().unwrap_or(actual_cwd);
+            assert_eq!(actual_cwd, expected_cwd,
+                       "Respawned capability should run in correct capability directory, not daemon cwd. \
+                        Got: {:?}, Expected: {:?}",
+                        actual_cwd, expected_cwd);
+        }
+
         sup.shutdown_all();
         let _ = std::fs::remove_dir_all(&dir);
     }
