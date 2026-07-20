@@ -1,0 +1,28 @@
+---
+source: src/tui/render.rs
+expression: snap
+---
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"             ┌ Permission ────────────────────────────────────────┐             "
+"             │write to /tmp/x.txt                                 │             "
+"             │key: write_file                                     │             "
+"             │                                                    │             "
+"             │▸ [o] once    this call only                        │             "
+"             │  [s] session don't ask again this run              │             "
+"             │  [p] project persist to codecoder.json             │             "
+"             │  [n] deny                                          │             "
+"             │                                                    │             "
+"             └────────────────────────────────────────────────────┘             "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"› type a message, or / for commands                                             "
+" DIALOG  m  ctx 0%  · ↑/↓ select · enter confirm · esc deny                     "

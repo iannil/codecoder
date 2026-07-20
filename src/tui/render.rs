@@ -605,4 +605,85 @@ mod snapshot_tests {
         let snap = render_snapshot(&app);
         insta::assert_snapshot!("transcript_mixed_blocks", snap);
     }
+
+    // ------------------------------------------------------------------
+    // Dialog render snapshot tests (Task 5)
+
+    #[test]
+    fn dialog_permission_full() {
+        let mut app = TuiApp::new("m".into(), std::env::temp_dir());
+        let (tx, _rx) = std::sync::mpsc::channel();
+        app.dialog = Some(Dialog::ToolPermission(PermissionDialog::new(
+            "write_file".into(),
+            "write to /tmp/x.txt".into(),
+            tx,
+        )));
+        let snap = render_snapshot(&app);
+        insta::assert_snapshot!("dialog_permission_full", snap);
+    }
+
+    #[test]
+    fn dialog_permission_no_project() {
+        let mut app = TuiApp::new("m".into(), std::env::temp_dir());
+        let (tx, _rx) = std::sync::mpsc::channel();
+        app.dialog = Some(Dialog::ToolPermission(PermissionDialog::new(
+            "run_command:git@shell".into(),
+            "run git commit".into(),
+            tx,
+        )));
+        let snap = render_snapshot(&app);
+        insta::assert_snapshot!("dialog_permission_no_project", snap);
+    }
+
+    #[test]
+    fn dialog_ask_question() {
+        let mut app = TuiApp::new("m".into(), std::env::temp_dir());
+        let (tx, _rx) = std::sync::mpsc::channel();
+        app.dialog = Some(Dialog::AskQuestion(AskDialog {
+            prompt: "What file should I edit?".into(),
+            input: "".into(),
+            reply_tx: tx,
+        }));
+        let snap = render_snapshot(&app);
+        insta::assert_snapshot!("dialog_ask_question", snap);
+    }
+
+    #[test]
+    fn dialog_plan_approval() {
+        let mut app = TuiApp::new("m".into(), std::env::temp_dir());
+        let (tx, _rx) = std::sync::mpsc::channel();
+        app.dialog = Some(Dialog::PlanApproval(PlanDialog {
+            plan: "1. Read the file\n2. Edit the line\n3. Commit".into(),
+            selected: 0,
+            reply_tx: tx,
+        }));
+        let snap = render_snapshot(&app);
+        insta::assert_snapshot!("dialog_plan_approval", snap);
+    }
+
+    #[test]
+    fn dialog_confirm() {
+        let mut app = TuiApp::new("m".into(), std::env::temp_dir());
+        let (tx, _rx) = std::sync::mpsc::channel();
+        app.dialog = Some(Dialog::Confirm(ConfirmDialog {
+            prompt: "Are you sure you want to delete this file?".into(),
+            selected: 0,
+            reply_tx: tx,
+        }));
+        let snap = render_snapshot(&app);
+        insta::assert_snapshot!("dialog_confirm", snap);
+    }
+
+    #[test]
+    fn dialog_trust() {
+        let mut app = TuiApp::new("m".into(), std::env::temp_dir());
+        let (tx, _rx) = std::sync::mpsc::channel();
+        app.dialog = Some(Dialog::Trust(TrustDialog {
+            root: "/tmp/project".into(),
+            selected: 0,
+            reply_tx: tx,
+        }));
+        let snap = render_snapshot(&app);
+        insta::assert_snapshot!("dialog_trust", snap);
+    }
 }
