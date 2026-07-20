@@ -335,6 +335,21 @@ impl AgentLoop {
         self.project_allowlist = ProjectAllowlist::load(&self.root);
     }
 
+    /// Rebuild `system_prompt` from the shared daemon Registry if this session
+    /// has one and is trusted. Called at the top of every `process_turn` so a
+    /// skill/capability written by another session (or a manual edit) shows up
+    /// on this session's next turn. No-op for sub-agents / background agents
+    /// (`shared_registry` is `None`) and for untrusted/pending projects.
+    fn refresh_system_prompt_if_shared(&mut self) {
+        if self.trust != TrustState::Trusted {
+            return;
+        }
+        if let Some(reg) = &self.shared_registry {
+            let g = reg.read().unwrap();
+            self.system_prompt = build_system_prompt_with_registry(&self.root, &g);
+        }
+    }
+
     pub fn cancel_token(&self) -> CancelToken {
         self.cancel.clone()
     }
@@ -677,6 +692,7 @@ impl AgentLoop {
     }
 
     fn process_turn(&mut self, text: String, event_tx: &Sender<AgentEvent>) {
+        self.refresh_system_prompt_if_shared();
         // Special message: `/verify` command — run the test suite.
         if text == "__verify__" {
             self.run_verify(event_tx);
@@ -2050,6 +2066,36 @@ mod tests {
         let reg = Registry::scan(&dir);
         let prompt = build_system_prompt_with_registry(&dir, &reg);
         assert!(prompt.contains("shared-skill — a shared skill"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn refresh_system_prompt_picks_up_new_skill() {
+        use std::sync::{Arc, RwLock};
+        let dir = std::env::temp_dir().join(format!("cc_refresh_shared_{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("skills")).unwrap();
+        std::fs::write(
+            dir.join("skills/old.md"),
+            "---\nname: old\ndescription: o\n---\nbody",
+        ).unwrap();
+        let reg = Arc::new(RwLock::new(crate::registry::Registry::scan(&dir)));
+        let mut agent = AgentLoop::new_daemon(
+            Arc::new(crate::provider::stub::StubClient),
+            String::from("gpt-4o"),
+            4096,
+            0.7,
+            dir.clone(),
+            reg.clone(),
+        );
+        agent.trust = crate::agent::TrustState::Trusted;
+        // shared registry gains a new skill AFTER construction
+        std::fs::write(
+            dir.join("skills/new.md"),
+            "---\nname: new\ndescription: n\n---\nbody",
+        ).unwrap();
+        reg.write().unwrap().reload(&dir);
+        agent.refresh_system_prompt_if_shared();
+        assert!(agent.system_prompt.contains("new"), "refresh must pick up the new skill");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
