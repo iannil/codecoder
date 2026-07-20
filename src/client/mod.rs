@@ -1,6 +1,7 @@
 // cc 客户端连接模块：连 Unix socket，写 ClientRequest 行，读 ServerEvent 行。
 use crate::config::Config;
 use crate::daemon::proto::{ClientRequest, ServerEvent};
+use crate::registry::Registry;
 use std::io::{BufRead, BufReader};
 use std::os::unix::net::UnixStream;
 use std::path::Path;
@@ -84,8 +85,9 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let sock = dir.join(".ccd.sock");
         let server = SocketServer::bind(&sock).unwrap();
+        let registry = Arc::new(Registry::scan(&dir));
         let mgr = Arc::new(Mutex::new(DaemonSessionManager::new(
-            Arc::new(StubClient), "gpt-4o".into(), 4096, 0.7, dir.clone(),
+            Arc::new(StubClient), "gpt-4o".into(), 4096, 0.7, dir.clone(), registry,
         )));
         let shutdown = Arc::new(AtomicBool::new(false));
         let mgr_c = mgr.clone();

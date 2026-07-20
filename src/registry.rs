@@ -74,6 +74,12 @@ impl Registry {
         }
         out
     }
+
+    /// 重新扫描，覆盖当前 catalog（daemon 共享实例在写盘后调用）。
+    pub fn reload(&mut self, root: &Path) {
+        let fresh = Registry::scan(root);
+        self.catalog = fresh.catalog;
+    }
 }
 
 fn scan_skills(dir: &Path, scope: SourceScope, out: &mut Vec<CatalogEntry>) {
@@ -218,5 +224,18 @@ mod tests {
         let (n, d) = parse_skill_meta("# Title\n\nDo the thing.\n", "myskill");
         assert_eq!(n, "myskill");
         assert_eq!(d, "Do the thing.");
+    }
+
+    #[test]
+    fn reload_picks_up_newly_written_skill() {
+        let dir = std::env::temp_dir().join(format!("cc_regreload_{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("skills")).unwrap();
+        let mut reg = Registry::scan(&dir);
+        assert!(reg.catalog.is_empty());
+        std::fs::write(dir.join("skills/new.md"), "---\nname: new\ndescription: d\n---\nb").unwrap();
+        reg.reload(&dir);
+        assert_eq!(reg.catalog.len(), 1);
+        assert_eq!(reg.catalog[0].name, "new");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

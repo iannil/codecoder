@@ -104,6 +104,7 @@ mod tests {
     use crate::daemon::proto::{write_event, ClientRequest, ServerEvent};
     use crate::daemon::session_manager::DaemonSessionManager;
     use crate::provider::stub::StubClient;
+    use crate::registry::Registry;
     use std::io::BufRead;
     use std::sync::atomic::AtomicBool;
     use std::sync::{Arc, Mutex};
@@ -116,8 +117,9 @@ mod tests {
         let sock = dir.join(".ccd.sock");
 
         let server = SocketServer::bind(&sock).unwrap();
+        let registry = Arc::new(Registry::scan(&dir));
         let mgr = Mutex::new(DaemonSessionManager::new(
-            Arc::new(StubClient), "gpt-4o".into(), 4096, 0.7, dir.clone(),
+            Arc::new(StubClient), "gpt-4o".into(), 4096, 0.7, dir.clone(), registry,
         ));
         let shutdown = Arc::new(AtomicBool::new(false));
 

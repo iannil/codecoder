@@ -4,6 +4,7 @@
 use super::proto::ServerEvent;
 use crate::agent::{AgentCommand, AgentEvent, AgentLoop};
 use crate::provider::Provider;
+use crate::registry::Registry;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -27,6 +28,7 @@ pub struct DaemonSessionManager {
     max_tokens: u32,
     temperature: f32,
     root: PathBuf,
+    registry: Arc<Registry>,
     sessions: HashMap<String, DaemonSession>,
     next_seq: u64,
 }
@@ -38,6 +40,7 @@ impl DaemonSessionManager {
         max_tokens: u32,
         temperature: f32,
         root: PathBuf,
+        registry: Arc<Registry>,
     ) -> Self {
         Self {
             provider,
@@ -45,6 +48,7 @@ impl DaemonSessionManager {
             max_tokens,
             temperature,
             root,
+            registry,
             sessions: HashMap::new(),
             next_seq: 0,
         }
@@ -57,12 +61,13 @@ impl DaemonSessionManager {
         let (cmd_tx, cmd_rx) = mpsc::channel::<AgentCommand>();
         let (event_tx, event_rx) = mpsc::channel::<AgentEvent>();
 
-        let agent = AgentLoop::new(
+        let agent = AgentLoop::new_daemon(
             self.provider.clone(),
             self.model.clone(),
             self.max_tokens,
             self.temperature,
             self.root.clone(),
+            self.registry.clone(),
         );
         let agent = thread::spawn(move || agent.run(cmd_rx, event_tx));
 
@@ -170,12 +175,14 @@ mod tests {
     fn mgr_with_temp_root() -> (DaemonSessionManager, PathBuf) {
         let dir = std::env::temp_dir().join(format!("cc_sessmgr_{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
+        let registry = Arc::new(Registry::scan(&dir));
         let mgr = DaemonSessionManager::new(
             Arc::new(StubClient),
             "gpt-4o".into(),
             4096,
             0.7,
             dir.clone(),
+            registry,
         );
         (mgr, dir)
     }

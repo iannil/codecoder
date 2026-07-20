@@ -197,6 +197,8 @@ pub struct AgentLoop {
     steer: SteerQueue,
     /// Derived tier-2 summary overlay (ADR 0023); never persisted.
     tier2: Option<Tier2Summary>,
+    /// daemon 共享目录（ADR 0020）。`None` 时 build_system_prompt 自扫（TUI/sub-agent）。
+    shared_registry: Option<Arc<Registry>>,
 }
 
 impl AgentLoop {
@@ -207,7 +209,7 @@ impl AgentLoop {
         temperature: f32,
         root: PathBuf,
     ) -> Self {
-        Self::build(provider, model.into(), max_tokens, temperature, root, Toolbox::builtin(), true, false)
+        Self::build(provider, model.into(), max_tokens, temperature, root, Toolbox::builtin(), true, false, None)
     }
 
     /// A Background Agent (ADR 0026): full builtin toolbox, persists its session,
@@ -220,7 +222,19 @@ impl AgentLoop {
         temperature: f32,
         root: PathBuf,
     ) -> Self {
-        Self::build(provider, model.into(), max_tokens, temperature, root, Toolbox::builtin(), true, true)
+        Self::build(provider, model.into(), max_tokens, temperature, root, Toolbox::builtin(), true, true, None)
+    }
+
+    /// daemon 托管的 session：共享 daemon 的 Registry（ADR 0020 daemon 级目录）。
+    pub fn new_daemon(
+        provider: Arc<dyn Provider>,
+        model: impl Into<String>,
+        max_tokens: u32,
+        temperature: f32,
+        root: PathBuf,
+        registry: Arc<Registry>,
+    ) -> Self {
+        Self::build(provider, model.into(), max_tokens, temperature, root, Toolbox::builtin(), true, false, Some(registry))
     }
 
     /// Drive exactly one turn to completion (headless). Thin public wrapper over
@@ -240,7 +254,7 @@ impl AgentLoop {
         temperature: f32,
         root: PathBuf,
     ) -> Self {
-        Self::build(provider, model, max_tokens, temperature, root, Toolbox::read_only_child(), false, false)
+        Self::build(provider, model, max_tokens, temperature, root, Toolbox::read_only_child(), false, false, None)
     }
 
     fn build(
@@ -252,6 +266,7 @@ impl AgentLoop {
         toolbox: Toolbox,
         persist: bool,
         headless: bool,
+        shared_registry: Option<Arc<Registry>>,
     ) -> Self {
         let stamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -281,7 +296,12 @@ impl AgentLoop {
         // The disk "self" loads only when trusted; otherwise the agent runs on its
         // compiled-in base identity + native tools, with an empty allowlist.
         let trusted = trust == TrustState::Trusted;
-        let system_prompt = if trusted { build_system_prompt(&root) } else { String::new() };
+        let system_prompt = if trusted {
+            match &shared_registry {
+                Some(reg) => build_system_prompt_with_registry(&root, reg),
+                None => build_system_prompt(&root),
+            }
+        } else { String::new() };
         let project_allowlist = if trusted { ProjectAllowlist::load(&root) } else { ProjectAllowlist::default() };
 
         Self {
@@ -304,6 +324,7 @@ impl AgentLoop {
             trust,
             steer: SteerQueue::default(),
             tier2: None,
+            shared_registry,
         }
     }
 
@@ -377,9 +398,14 @@ impl AgentLoop {
                     // Only a trusted project re-scans its disk "self" (ADR 0028);
                     // an untrusted/pending one keeps its empty identity.
                     if self.trust == TrustState::Trusted {
-                        let reg = Registry::scan(&self.root);
-                        let n = reg.catalog.len();
-                        self.system_prompt = build_system_prompt(&self.root);
+                        let n = match &self.shared_registry {
+                            Some(reg) => reg.catalog.len(), // 共享只读实例；内容由 daemon 侧负责刷新（M2：重启级）
+                            None => Registry::scan(&self.root).catalog.len(),
+                        };
+                        self.system_prompt = match &self.shared_registry {
+                            Some(reg) => build_system_prompt_with_registry(&self.root, reg),
+                            None => build_system_prompt(&self.root),
+                        };
                         let _ = event_tx.send(AgentEvent::Notice(format!("reloaded — {n} skills/capabilities in catalog")));
                     } else {
                         let _ = event_tx.send(AgentEvent::Notice("project not trusted; nothing reloaded".into()));
@@ -1197,7 +1223,8 @@ impl AgentLoop {
 
 /// Build the System prompt from AGENTS.md (identity) + the scanned catalog
 /// (ADR 0020). "Filesystem as self": both come from disk, not hardcoded.
-fn build_system_prompt(root: &std::path::Path) -> String {
+/// 用外部传入的共享 Registry 渲染 system prompt（daemon 路径）。
+fn build_system_prompt_with_registry(root: &std::path::Path, reg: &Registry) -> String {
     let mut parts = Vec::new();
     if let Ok(agents) = std::fs::read_to_string(root.join("AGENTS.md")) {
         let agents = agents.trim();
@@ -1205,7 +1232,7 @@ fn build_system_prompt(root: &std::path::Path) -> String {
             parts.push(agents.to_string());
         }
     }
-    let catalog = Registry::scan(root).render_catalog();
+    let catalog = reg.render_catalog();
     if !catalog.is_empty() {
         parts.push(catalog);
     }
@@ -1217,6 +1244,11 @@ fn build_system_prompt(root: &std::path::Path) -> String {
         parts.push(wg_text);
     }
     parts.join("\n\n")
+}
+
+/// 兼容旧路径：自扫一次。TUI/sub-agent 用此（无共享 Registry）。
+fn build_system_prompt(root: &std::path::Path) -> String {
+    build_system_prompt_with_registry(root, &Registry::scan(root))
 }
 
 /// Compact one-line preview of tool args for the transcript (e.g. `path=a.txt`).
@@ -2001,5 +2033,20 @@ mod tests {
 
         unsafe { std::env::remove_var("CODECODER_TRUST_FILE") };
         std::fs::remove_dir_all(&base).ok();
+    }
+
+    #[test]
+    fn build_system_prompt_uses_provided_registry() {
+        use crate::registry::Registry;
+        let dir = std::env::temp_dir().join(format!("cc_regshare_{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("skills")).unwrap();
+        std::fs::write(
+            dir.join("skills/shared-skill.md"),
+            "---\nname: shared-skill\ndescription: a shared skill\n---\nbody",
+        ).unwrap();
+        let reg = Registry::scan(&dir);
+        let prompt = build_system_prompt_with_registry(&dir, &reg);
+        assert!(prompt.contains("shared-skill — a shared skill"));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
