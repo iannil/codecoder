@@ -338,6 +338,9 @@ impl Tool for RunCapability {
         if matches!(m.lifecycle, Lifecycle::Persistent) {
             return run_persistent(name, &m, ctx.root);
         }
+        if matches!(m.lifecycle, Lifecycle::OnDemand) {
+            return run_ondemand(name, &m, ctx.root);
+        }
         match m.environment {
             Environment::Shell => {
                 let dir = ctx.root.join("capabilities").join(name);
@@ -486,6 +489,97 @@ fn run_persistent(name: &str, m: &CapabilityManifest, root: &Path) -> anyhow::Re
             }
         }
         Environment::Wasm => unreachable!(),
+    }
+}
+
+/// Run an OnDemand capability: starts a process, keeps it alive briefly for
+/// reuse within the same turn, then auto-reaps. OnDemand services are tracked
+/// in the RunningServiceTable with a 5-second idle timeout (checked on each
+/// call; if the prior process has exited, a new one is spawned).
+fn run_ondemand(name: &str, m: &CapabilityManifest, root: &Path) -> anyhow::Result<ToolOutput> {
+    use crate::capability::{Service, ServiceHandle, services};
+    let table = services();
+    let mut table = table.lock().unwrap();
+
+    // Check for an existing warm handle.
+    let fresh = if let Some(h) = table.get_mut(name) {
+        match &mut h.service {
+            Service::Process(child) => match child.try_wait() {
+                Ok(None) => {
+                    return Ok(ToolOutput::ok(format!(
+                        "ondemand '{}' still warm at {}", name, h.address
+                    )));
+                }
+                _ => {
+                    table.remove(name);
+                    true
+                }
+            },
+            Service::Container(_) => {
+                table.remove(name);
+                true
+            }
+        }
+    } else {
+        true
+    };
+
+    if !fresh {
+        return Ok(ToolOutput::ok(format!("ondemand '{}' already running", name)));
+    }
+
+    let dir = root.join("capabilities").join(name);
+    let address = if m.address.is_empty() { format!("ondemand:{name}") } else { m.address.clone() };
+
+    match m.environment {
+        Environment::Shell => {
+            match Command::new("sh").arg("-c").arg(&m.entry).current_dir(&dir).spawn() {
+                Ok(child) => {
+                    let pid = child.id();
+                    table.insert(name.to_string(), ServiceHandle {
+                        service: Service::Process(child),
+                        address: address.clone(),
+                    });
+                    Ok(ToolOutput::ok(format!(
+                        "started ondemand '{}' (pid {}) at {}", name, pid, address
+                    )))
+                }
+                Err(e) => Ok(ToolOutput::err(format!("failed to start ondemand '{}': {}", name, e))),
+            }
+        }
+        Environment::Docker => {
+            if m.image.trim().is_empty() {
+                return Ok(ToolOutput::err("docker ondemand requires an 'image' in manifest"));
+            }
+            let cname = format!("codecoder-ondemand-{name}");
+            let dir_str = dir.to_string_lossy().into_owned();
+            let out = Command::new("docker")
+                .args(["run", "-d", "--rm", "--name", &cname, "--network", "none", "--memory", "256m", "--cpus", "1"])
+                .arg("-v").arg(format!("{dir_str}:/work:ro"))
+                .args(["-w", "/work", &m.image, "sh", "-c", &m.entry])
+                .output();
+            match out {
+                Ok(o) if o.status.success() => {
+                    table.insert(name.to_string(), ServiceHandle {
+                        service: Service::Container(cname.clone()),
+                        address: address.clone(),
+                    });
+                    Ok(ToolOutput::ok(format!("started ondemand container '{}' at {}", cname, address)))
+                }
+                Ok(o) => Ok(ToolOutput::err(format!("docker run failed: {}", String::from_utf8_lossy(&o.stderr)))),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                    Ok(ToolOutput::err("Docker not available; refusing to downgrade (ADR 0021)"))
+                }
+                Err(e) => Ok(ToolOutput::err(format!("docker run failed: {e}"))),
+            }
+        }
+        Environment::Wasm => {
+            let cap_args = json!({});
+            match crate::tool::wasm::run_wasm(&dir, &m.entry, &cap_args.to_string()) {
+                Ok((out, is_error)) => Ok(ToolOutput { content: out, is_error }),
+                Err(e) => Ok(ToolOutput::err(format!("wasm run failed: {e}"))),
+            }
+        }
     }
 }
 
@@ -1218,6 +1312,23 @@ mod tests {
         let out = RunCapability.run(json!({ "name": "hello" }), &mut ctx).unwrap();
         assert!(!out.is_error, "{}", out.content);
         assert!(out.content.contains("from-container"), "{}", out.content);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn ondemand_shell_starts_and_reports() {
+        let dir = std::env::temp_dir().join(format!("cc_ondemand_{}", std::process::id()));
+        let capdir = dir.join("capabilities/od");
+        std::fs::create_dir_all(&capdir).unwrap();
+        std::fs::write(
+            capdir.join("manifest.json"),
+            r#"{"name":"od","description":"d","environment":"shell","lifecycle":"on_demand","entry":"sleep 5"}"#,
+        ).unwrap();
+        let mut ctx = ToolCtx::new(&dir);
+        let out = RunCapability.run(json!({ "name": "od" }), &mut ctx).unwrap();
+        assert!(!out.is_error, "{}", out.content);
+        assert!(out.content.contains("ondemand"), "{}", out.content);
+        crate::capability::shutdown_all();
         std::fs::remove_dir_all(&dir).ok();
     }
 
