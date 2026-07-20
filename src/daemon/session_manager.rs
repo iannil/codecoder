@@ -27,7 +27,7 @@ pub struct DaemonSessionManager {
     max_tokens: u32,
     temperature: f32,
     root: PathBuf,
-    registry: Arc<Registry>,
+    registry: Arc<std::sync::RwLock<Registry>>,
     sessions: HashMap<String, DaemonSession>,
     next_seq: u64,
     /// Turn 令牌：用户 turn 在 `drain_agent_events` 全程持有此 Mutex，
@@ -44,7 +44,7 @@ impl DaemonSessionManager {
         max_tokens: u32,
         temperature: f32,
         root: PathBuf,
-        registry: Arc<Registry>,
+        registry: Arc<std::sync::RwLock<Registry>>,
     ) -> Self {
         Self {
             provider,
@@ -172,7 +172,7 @@ mod tests {
     fn mgr_with_temp_root() -> (DaemonSessionManager, PathBuf) {
         let dir = std::env::temp_dir().join(format!("cc_sessmgr_{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        let registry = Arc::new(Registry::scan(&dir));
+        let registry = Arc::new(std::sync::RwLock::new(Registry::scan(&dir)));
         let mgr = DaemonSessionManager::new(
             Arc::new(StubClient),
             "gpt-4o".into(),

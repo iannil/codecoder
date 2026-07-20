@@ -248,7 +248,7 @@ mod tests {
         let sock = dir.join(".ccd.sock");
 
         let server = SocketServer::bind(&sock).unwrap();
-        let registry = Arc::new(Registry::scan(&dir));
+        let registry = Arc::new(std::sync::RwLock::new(Registry::scan(&dir)));
         let mgr = Mutex::new(DaemonSessionManager::new(
             Arc::new(StubClient), "gpt-4o".into(), 4096, 0.7, dir.clone(), registry,
         ));

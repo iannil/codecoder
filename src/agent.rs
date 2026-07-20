@@ -198,7 +198,7 @@ pub struct AgentLoop {
     /// Derived tier-2 summary overlay (ADR 0023); never persisted.
     tier2: Option<Tier2Summary>,
     /// daemon 共享目录（ADR 0020）。`None` 时 build_system_prompt 自扫（TUI/sub-agent）。
-    shared_registry: Option<Arc<Registry>>,
+    shared_registry: Option<Arc<std::sync::RwLock<Registry>>>,
 }
 
 impl AgentLoop {
@@ -232,7 +232,7 @@ impl AgentLoop {
         max_tokens: u32,
         temperature: f32,
         root: PathBuf,
-        registry: Arc<Registry>,
+        registry: Arc<std::sync::RwLock<Registry>>,
     ) -> Self {
         Self::build(provider, model.into(), max_tokens, temperature, root, Toolbox::builtin(), true, false, Some(registry))
     }
@@ -266,7 +266,7 @@ impl AgentLoop {
         toolbox: Toolbox,
         persist: bool,
         headless: bool,
-        shared_registry: Option<Arc<Registry>>,
+        shared_registry: Option<Arc<std::sync::RwLock<Registry>>>,
     ) -> Self {
         let stamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -298,7 +298,7 @@ impl AgentLoop {
         let trusted = trust == TrustState::Trusted;
         let system_prompt = if trusted {
             match &shared_registry {
-                Some(reg) => build_system_prompt_with_registry(&root, reg),
+                Some(reg) => build_system_prompt_with_registry(&root, &reg.read().unwrap()),
                 None => build_system_prompt(&root),
             }
         } else { String::new() };
@@ -399,11 +399,14 @@ impl AgentLoop {
                     // an untrusted/pending one keeps its empty identity.
                     if self.trust == TrustState::Trusted {
                         let n = match &self.shared_registry {
-                            Some(reg) => reg.catalog.len(), // 共享只读实例；内容由 daemon 侧负责刷新（M2：重启级）
+                            Some(reg) => reg.read().unwrap().catalog.len(),
                             None => Registry::scan(&self.root).catalog.len(),
                         };
                         self.system_prompt = match &self.shared_registry {
-                            Some(reg) => build_system_prompt_with_registry(&self.root, reg),
+                            Some(reg) => build_system_prompt_with_registry(
+                                &self.root,
+                                &reg.read().unwrap(),
+                            ),
                             None => build_system_prompt(&self.root),
                         };
                         let _ = event_tx.send(AgentEvent::Notice(format!("reloaded — {n} skills/capabilities in catalog")));

@@ -21,7 +21,7 @@ impl Daemon {
         let sock_path = socket::default_sock_path(&self.cfg);
         let server = socket::SocketServer::bind(&sock_path)?;
         let provider = crate::select_provider(&self.cfg);
-        let registry = Arc::new(crate::registry::Registry::scan(&self.cfg.root));
+        let registry = Arc::new(std::sync::RwLock::new(crate::registry::Registry::scan(&self.cfg.root)));
         let mgr = Arc::new(Mutex::new(session_manager::DaemonSessionManager::new(
             provider,
             self.cfg.model.clone(),
