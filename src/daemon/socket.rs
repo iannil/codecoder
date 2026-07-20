@@ -21,6 +21,9 @@ impl SocketServer {
         // 残留 socket 文件先清掉（上次 daemon 没干净退出）。
         let _ = std::fs::remove_file(sock_path);
         let listener = UnixListener::bind(sock_path)?;
+        // 限制 socket 文件权限为仅 owner 可读写（安全加固）。
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(sock_path, std::fs::Permissions::from_mode(0o600));
         Ok(Self { listener, sock_path: sock_path.to_path_buf() })
     }
 

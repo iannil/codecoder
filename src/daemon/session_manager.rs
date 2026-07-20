@@ -114,11 +114,27 @@ impl DaemonSessionManager {
         thread::spawn(move || {
             // Acquire the lock inside the spawned thread
             let rx = event_rx_mutex.lock().unwrap();
-            for ev in rx.iter() {
-                if let Some(se) = translate(ev) {
-                    let terminal = matches!(se, ServerEvent::TurnComplete);
-                    if out_tx_clone.send(se).is_err() { break; }
-                    if terminal { break; }
+            loop {
+                match rx.recv_timeout(std::time::Duration::from_secs(120)) {
+                    Ok(ev) => {
+                        if let Some(se) = translate(ev) {
+                            let terminal = matches!(se, ServerEvent::TurnComplete);
+                            if out_tx_clone.send(se).is_err() { break; }
+                            if terminal { break; }
+                        }
+                    }
+                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                        let _ = out_tx_clone.send(ServerEvent::Error {
+                            message: "turn timed out (agent unresponsive)".into()
+                        });
+                        break;
+                    }
+                    Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                        let _ = out_tx_clone.send(ServerEvent::Error {
+                            message: "agent disconnected".into()
+                        });
+                        break;
+                    }
                 }
             }
         });
