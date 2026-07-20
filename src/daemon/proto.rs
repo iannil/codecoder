@@ -78,6 +78,9 @@ pub enum ServerEvent {
     Error { message: String },
     /// 交互式提示（permission/ask/confirm/plan/trust），需客户端回答后继续。
     Prompt { id: u64, body: PromptBody },
+    /// daemon 级广播通知（来自 event bus，如 workgraph/supervisor）。
+    /// 与 per-turn `Notice` 区分：带 `source` 标签，客户端可不同渲染。
+    BusNotice { source: String, text: String },
 }
 
 /// 从一行读一个 `ClientRequest`。`Ok(None)` 表示客户端关闭（EOF）。

@@ -73,6 +73,7 @@ pub fn print_event(ev: &ServerEvent) -> bool {
             eprintln!("(prompt event should be handled by interactive loop)");
             false
         }
+        ServerEvent::BusNotice { source, text } => { println!("· [{source}] {text}"); false }
     }
 }
 

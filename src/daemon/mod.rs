@@ -7,6 +7,7 @@ use std::sync::{Arc, Mutex};
 pub mod proto;
 pub mod session_manager;
 pub mod socket;
+pub mod bus;
 
 pub struct Daemon {
     cfg: Config,
