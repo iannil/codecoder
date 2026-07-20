@@ -88,7 +88,6 @@ impl Toolbox {
                 Box::new(builtin::AskUser),
                 Box::new(builtin::Review),
                 Box::new(builtin::Confirm),
-                Box::new(builtin::SelfHeal),
                 Box::new(net::SearchWeb),
                 Box::new(net::SearchGithub),
                 Box::new(net::ReverseApi),
