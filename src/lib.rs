@@ -23,6 +23,7 @@ pub mod tool;
 pub mod tui;
 pub mod verify;
 pub mod daemon;
+pub mod client;
 
 use std::sync::Arc;
 use std::sync::mpsc;

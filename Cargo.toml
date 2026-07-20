@@ -4,6 +4,14 @@ version = "0.1.0"
 edition = "2024"
 description = "Autonomous AI agent — event-driven, filesystem-as-self"
 
+[[bin]]
+name = "codecoder"
+path = "src/main.rs"
+
+[[bin]]
+name = "cc"
+path = "src/bin/cc.rs"
+
 [dependencies]
 # Serialization: unified message model + session persistence (ADR 0015, 0004, 0017)
 serde = { version = "1", features = ["derive"] }
