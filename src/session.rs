@@ -69,7 +69,7 @@ impl SessionManager {
         let exact: Vec<_> = all.iter().filter(|m| m.id == id_or_prefix).collect();
         if exact.len() == 1 { return Some(exact[0].id.clone()); }
         let prefix: Vec<_> = all.iter().filter(|m| m.id.starts_with(id_or_prefix)).collect();
-        if !prefix.is_empty() { return Some(prefix[0].id.clone()); }
+        if prefix.len() == 1 { return Some(prefix[0].id.clone()); }
         None
     }
 
@@ -548,7 +548,7 @@ mod tests {
         ids.sort();
         assert_eq!(ids, vec!["session-a".to_string(), "session-b".to_string()]);
         assert_eq!(mgr.find("session-a"), Some("session-a".into())); // 全名
-        assert_eq!(mgr.find("session-"), Some("session-a".into())); // 前缀匹配
+        assert_eq!(mgr.find("session-"), None, "ambiguous prefix must return None"); // 多个匹配前缀
         assert_eq!(mgr.find("zzz"), None);
         // last：取 mtime 最新的；这里两者同秒，任一即可，仅断言非空
         assert!(mgr.last().is_some());
