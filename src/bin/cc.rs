@@ -1,6 +1,6 @@
 // cc — 薄 CLI 客户端，连 ccd daemon（$CODECODER_ROOT/.ccd.sock）。
 // 无 ratatui，纯 stdin/stdout。
-use codecoder::client::{default_sock_path, print_event, Connection};
+use codecoder::client::{default_sock_path, print_event, prompt_user, Connection};
 use codecoder::daemon::proto::ClientRequest;
 use codecoder::Config;
 use std::io::{BufRead, Write};
@@ -23,7 +23,7 @@ fn main() -> anyhow::Result<()> {
     }
 }
 
-/// 发单个请求，打印所有事件直到终态，退出。
+/// 发单个请求，打印所有事件直到终态，退出（Task 9a: 支持 Prompt）。
 fn send_one(sock: &std::path::Path, req: ClientRequest) -> anyhow::Result<()> {
     let mut conn = Connection::connect(sock)
         .map_err(|e| anyhow::anyhow!("cannot connect to daemon at {}: {e}\n(is `ccd` running? CODECODER_DAEMON=1 cargo run)", sock.display()))?;
@@ -32,6 +32,12 @@ fn send_one(sock: &std::path::Path, req: ClientRequest) -> anyhow::Result<()> {
         match conn.next_event()? {
             None => break,
             Some(ev) => {
+                // Task 9a: 交互式处理 Prompt 事件
+                if let codecoder::daemon::proto::ServerEvent::Prompt { id, body } = ev {
+                    let answer = prompt_user(id, &body);
+                    conn.send(&codecoder::daemon::proto::ClientRequest::PromptReply { id, answer })?;
+                    continue;
+                }
                 if print_event(&ev) { break; }
             }
         }
@@ -39,7 +45,7 @@ fn send_one(sock: &std::path::Path, req: ClientRequest) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// REPL：读 stdin 一行 → 发 SendMessage → 流式打印 → 直到 TurnComplete。
+/// REPL：读 stdin 一行 → 发 SendMessage → 流式打印 → 直到 TurnComplete（Task 9a: 支持 Prompt）。
 fn repl(sock: &std::path::Path) -> anyhow::Result<()> {
     let mut conn = Connection::connect(sock)
         .map_err(|e| anyhow::anyhow!("cannot connect to daemon at {}: {e}", sock.display()))?;
@@ -59,6 +65,12 @@ fn repl(sock: &std::path::Path) -> anyhow::Result<()> {
             match conn.next_event()? {
                 None => break,
                 Some(ev) => {
+                    // Task 9a: 交互式处理 Prompt 事件
+                    if let codecoder::daemon::proto::ServerEvent::Prompt { id, body } = ev {
+                        let answer = prompt_user(id, &body);
+                        conn.send(&codecoder::daemon::proto::ClientRequest::PromptReply { id, answer })?;
+                        continue;
+                    }
                     if print_event(&ev) { break; }
                 }
             }

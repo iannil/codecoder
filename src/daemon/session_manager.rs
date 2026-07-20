@@ -1,7 +1,6 @@
 // daemon 级 session 管理：每个 session = 一个 OS 线程跑 AgentLoop::run(cmd_rx, event_tx)。
-// 管理器持有每个 session 的 cmd_tx 与 event_rx；turn 级把 AgentEvent 翻译成 ServerEvent
-// 推入临时 mpsc，由 socket 层读出写回客户端。
-use super::proto::ServerEvent;
+// 管理器持有每个 session 的 cmd_tx 与 event_rx；turn 级返回原始 AgentEvent，
+// 由 socket 层进行翻译及交互式提示处理（Task 9a）。
 use crate::agent::{AgentCommand, AgentEvent, AgentLoop};
 use crate::provider::Provider;
 use crate::registry::Registry;
@@ -101,39 +100,33 @@ impl DaemonSessionManager {
         self.sessions.get(id)
     }
 
-    /// 通用：向某 session 发一条 AgentCommand，返回该轮事件流（drain 到 TurnComplete）。
-    fn dispatch(&mut self, id: &str, cmd: AgentCommand) -> anyhow::Result<Receiver<ServerEvent>> {
+    /// 通用：向某 session 发一条 AgentCommand，返回该轮原始 AgentEvent 流
+    ///（由 socket 层翻译成 ServerEvent 并处理交互式提示）。
+    fn dispatch(&mut self, id: &str, cmd: AgentCommand) -> anyhow::Result<Receiver<AgentEvent>> {
         let sess = self.sessions.get(id)
             .ok_or_else(|| anyhow::anyhow!("unknown session: {id}"))?;
         let cmd_tx = sess.cmd_tx.clone();
         let event_rx_mutex = Arc::clone(&sess.event_rx);
-        let (out_tx, out_rx) = mpsc::channel::<ServerEvent>();
+        let (out_tx, out_rx) = mpsc::channel::<AgentEvent>();
         cmd_tx.send(cmd).map_err(|_| anyhow::anyhow!("agent thread closed"))?;
 
-        // Now spawn a thread that will acquire the lock when needed
+        // drainer 线程：持有 event_rx Mutex 锁，转发原始 AgentEvent 到临时 mpsc
+        //（recv_timeout(120s) 检测 agent 僵死；Timeout/Disconnected 时直接 drop out_tx，
+        // 让接收端的 recv_timeout 观察 Disconnected）。
         let out_tx_clone = out_tx;
         thread::spawn(move || {
-            // Acquire the lock inside the spawned thread
             let rx = event_rx_mutex.lock().unwrap();
             loop {
                 match rx.recv_timeout(std::time::Duration::from_secs(120)) {
                     Ok(ev) => {
-                        if let Some(se) = translate(ev) {
-                            let terminal = matches!(se, ServerEvent::TurnComplete);
-                            if out_tx_clone.send(se).is_err() { break; }
-                            if terminal { break; }
-                        }
+                        let terminal = matches!(ev, AgentEvent::TurnComplete);
+                        if out_tx_clone.send(ev).is_err() { break; }
+                        if terminal { break; }
                     }
-                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
-                        let _ = out_tx_clone.send(ServerEvent::Error {
-                            message: "turn timed out (agent unresponsive)".into()
-                        });
-                        break;
-                    }
-                    Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
-                        let _ = out_tx_clone.send(ServerEvent::Error {
-                            message: "agent disconnected".into()
-                        });
+                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) |
+                         Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                        // 直接 drop out_tx，让接收端观察到 Disconnected
+                        drop(out_tx_clone);
                         break;
                     }
                 }
@@ -142,12 +135,12 @@ impl DaemonSessionManager {
         Ok(out_rx)
     }
 
-    pub fn send_message(&mut self, id: &str, content: String) -> anyhow::Result<Receiver<ServerEvent>> {
+    pub fn send_message(&mut self, id: &str, content: String) -> anyhow::Result<Receiver<AgentEvent>> {
         self.dispatch(id, AgentCommand::ProcessMessage(content))
     }
 
     /// 按 id/前缀解析磁盘 session；内存无此 session 则新建一个并对其发 Resume。
-    pub fn resume(&mut self, id_or_prefix: &str) -> anyhow::Result<Receiver<ServerEvent>> {
+    pub fn resume(&mut self, id_or_prefix: &str) -> anyhow::Result<Receiver<AgentEvent>> {
         let sm = SessionManager::new(&self.root);
         let resolved = sm.find(id_or_prefix);
         let target = match resolved {
@@ -160,23 +153,6 @@ impl DaemonSessionManager {
     /// 磁盘上的全部 session id（daemon `ListSessions` 用此，而非内存 session 列表）。
     pub fn disk_sessions(&self) -> Vec<String> {
         SessionManager::new(&self.root).list().into_iter().map(|m| m.id).collect()
-    }
-}
-
-/// AgentEvent → Option<ServerEvent>。丢弃进程内专属、不可回传客户端的事件
-/// （PermissionRequest/AskUser 等带 oneshot 的事件由后续 task 处理；当前 daemon
-/// 测试用 StubClient，不会产生它们）。
-fn translate(ev: AgentEvent) -> Option<ServerEvent> {
-    match ev {
-        AgentEvent::StreamDelta(text) => Some(ServerEvent::StreamDelta { text }),
-        AgentEvent::Notice(text) => Some(ServerEvent::Notice { text }),
-        AgentEvent::Context { pct } => Some(ServerEvent::Context { pct }),
-        AgentEvent::ToolStarted { name, preview } => Some(ServerEvent::ToolStarted { name, preview }),
-        AgentEvent::ToolFinished { name, is_error, output } => {
-            Some(ServerEvent::ToolFinished { name, is_error, output })
-        }
-        AgentEvent::TurnComplete => Some(ServerEvent::TurnComplete),
-        _ => None,
     }
 }
 
@@ -213,8 +189,8 @@ mod tests {
         let mut saw_complete = false;
         for ev in rx.iter() {
             match ev {
-                ServerEvent::StreamDelta { .. } => saw_delta = true,
-                ServerEvent::TurnComplete => {
+                AgentEvent::StreamDelta(_) => saw_delta = true,
+                AgentEvent::TurnComplete => {
                     saw_complete = true;
                     break;
                 }

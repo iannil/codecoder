@@ -45,7 +45,8 @@ impl Drop for SocketServer {
 }
 
 /// 处理单个连接：读一行 ClientRequest，在 mgr 上执行，把结果事件写回流。
-/// 当前仅支持 `SendMessage`/`NewSession`/`ListSessions`/`Shutdown`；其余回 Error。
+/// 当前支持 `SendMessage`/`NewSession`/`ListSessions`/`Resume`/`Shutdown`；其余回 Error。
+/// (Task 9a: 新增对 5 种 prompt AgentEvent 的内联处理。)
 pub fn handle_connection(
     stream: UnixStream,
     mgr: &Mutex<super::session_manager::DaemonSessionManager>,
@@ -57,7 +58,7 @@ pub fn handle_connection(
     let mut reader = BufReader::new(stream.try_clone()?);
     let mut writer = BufWriter::new(stream);
 
-    // 简化：单连接只处理第一个请求（M1 足够；REPL 多请求在 Task 3 由客户端循环驱动）。
+    // 简化：单连接只处理第一个请求（M1 足够；REPL 多请求在客户端循环驱动）。
     let Some(req) = read_request(&mut reader)? else {
         return Ok(());
     };
@@ -71,12 +72,8 @@ pub fn handle_connection(
             write_event(&mut writer, &ServerEvent::Sessions { ids: g.disk_sessions() })?;
         }
         ClientRequest::Resume { id } => {
-            let rx = g.resume(&id)?;
+            drain_agent_events(g.resume(&id)?, &mut reader, &mut writer)?;
             drop(g);
-            for ev in rx.iter() {
-                write_event(&mut writer, &ev)?;
-                if matches!(ev, ServerEvent::TurnComplete) { break; }
-            }
         }
         ClientRequest::SendMessage { content } => {
             // 没指定 session → 自动取第一个（或新建）。
@@ -84,14 +81,8 @@ pub fn handle_connection(
                 Some(id) => id,
                 None => g.create(),
             };
-            let rx = g.send_message(&id, content)?;
+            drain_agent_events(g.send_message(&id, content)?, &mut reader, &mut writer)?;
             drop(g); // 释放 mgr 锁，让 agent 线程推进
-            for ev in rx.iter() {
-                write_event(&mut writer, &ev)?;
-                if matches!(ev, ServerEvent::TurnComplete) {
-                    break;
-                }
-            }
         }
         ClientRequest::Shutdown => {
             shutdown.store(true, std::sync::atomic::Ordering::SeqCst);
@@ -99,11 +90,127 @@ pub fn handle_connection(
         }
         other => {
             write_event(&mut writer, &ServerEvent::Error {
-                message: format!("unsupported in M1: {other:?}"),
+                message: format!("unsupported: {other:?}"),
             })?;
         }
     }
     Ok(())
+}
+
+/// drain_loop: 读取原始 AgentEvent，翻译成 ServerEvent 写回客户端，遇到 prompt 时
+/// 内联阻塞读取 PromptReply（synchronous 模型，无需新线程）。
+fn drain_agent_events(
+    rx: std::sync::mpsc::Receiver<crate::agent::AgentEvent>,
+    reader: &mut BufReader<UnixStream>,
+    writer: &mut std::io::BufWriter<UnixStream>,
+) -> anyhow::Result<()> {
+    use crate::agent::AgentEvent;
+    use super::proto::{PromptBody, ServerEvent, write_event};
+
+    let mut prompt_id = 0u64;
+    loop {
+        match rx.recv_timeout(std::time::Duration::from_secs(120)) {
+            Ok(AgentEvent::StreamDelta(text)) => {
+                write_event(writer, &ServerEvent::StreamDelta { text })?;
+            }
+            Ok(AgentEvent::Notice(text)) => {
+                write_event(writer, &ServerEvent::Notice { text })?;
+            }
+            Ok(AgentEvent::Context { pct }) => {
+                write_event(writer, &ServerEvent::Context { pct })?;
+            }
+            Ok(AgentEvent::ToolStarted { name, preview }) => {
+                write_event(writer, &ServerEvent::ToolStarted { name, preview })?;
+            }
+            Ok(AgentEvent::ToolFinished { name, is_error, output }) => {
+                write_event(writer, &ServerEvent::ToolFinished { name, is_error, output })?;
+            }
+            Ok(AgentEvent::TurnComplete) => {
+                write_event(writer, &ServerEvent::TurnComplete)?;
+                break;
+            }
+            // ===== Task 9a: 5 种 prompt 事件的内联处理 =====
+            Ok(AgentEvent::PermissionRequest { key, preview, reply_tx }) => {
+                prompt_id += 1;
+                write_event(writer, &ServerEvent::Prompt {
+                    id: prompt_id,
+                    body: PromptBody::Permission { key, preview },
+                })?;
+                let ans = read_prompt_reply(reader, prompt_id)?;
+                let _ = reply_tx.send(ans.to_permission_reply());
+            }
+            Ok(AgentEvent::AskUser { prompt, reply_tx }) => {
+                prompt_id += 1;
+                write_event(writer, &ServerEvent::Prompt {
+                    id: prompt_id,
+                    body: PromptBody::AskUser { prompt },
+                })?;
+                let ans = read_prompt_reply(reader, prompt_id)?;
+                let _ = reply_tx.send(ans.into_text());
+            }
+            Ok(AgentEvent::Confirm { prompt, reply_tx }) => {
+                prompt_id += 1;
+                write_event(writer, &ServerEvent::Prompt {
+                    id: prompt_id,
+                    body: PromptBody::Confirm { prompt },
+                })?;
+                let ans = read_prompt_reply(reader, prompt_id)?;
+                let _ = reply_tx.send(ans.yes());
+            }
+            Ok(AgentEvent::PlanApproval { plan, reply_tx }) => {
+                prompt_id += 1;
+                write_event(writer, &ServerEvent::Prompt {
+                    id: prompt_id,
+                    body: PromptBody::PlanApproval { plan },
+                })?;
+                let ans = read_prompt_reply(reader, prompt_id)?;
+                let _ = reply_tx.send(ans.approved());
+            }
+            Ok(AgentEvent::TrustPrompt { root, reply_tx }) => {
+                prompt_id += 1;
+                let root_str = root.to_string_lossy().to_string();
+                write_event(writer, &ServerEvent::Prompt {
+                    id: prompt_id,
+                    body: PromptBody::Trust { root: root_str },
+                })?;
+                let ans = read_prompt_reply(reader, prompt_id)?;
+                let _ = reply_tx.send(ans.to_trust_reply());
+            }
+            // 其他 AgentEvent 变体（Reasoning, SubAgentMilestone, Test*, L4*）保持丢弃（同之前）
+            Ok(_) => { /* drop unserializable events */ }
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                write_event(writer, &ServerEvent::Error {
+                    message: "turn timed out (agent unresponsive)".into(),
+                })?;
+                break;
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                write_event(writer, &ServerEvent::Error {
+                    message: "agent disconnected".into(),
+                })?;
+                break;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// 读取一个 `ClientRequest::PromptReply`，校验 id 匹配。
+fn read_prompt_reply(
+    reader: &mut BufReader<UnixStream>,
+    expected_id: u64,
+) -> anyhow::Result<super::proto::PromptAnswer> {
+    use super::proto::{ClientRequest, read_request};
+    let line = read_request(reader)?.ok_or_else(|| anyhow::anyhow!("client closed during prompt"))?;
+    match line {
+        ClientRequest::PromptReply { id, answer } => {
+            if id != expected_id {
+                anyhow::bail!("prompt reply id mismatch: expected {expected_id}, got {id}");
+            }
+            Ok(answer)
+        }
+        other => anyhow::bail!("expected PromptReply during prompt, got: {other:?}"),
+    }
 }
 
 #[cfg(test)]
