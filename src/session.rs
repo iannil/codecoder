@@ -94,6 +94,21 @@ impl Session {
         self.leaf = None;
     }
 
+    /// Look up an entry by its message id.
+    pub fn entry_by_id(&self, id: MessageId) -> Option<&SessionEntry> {
+        self.entries.iter().find(|e| e.message.id == id)
+    }
+
+    /// Update the meta field of an entry by id. Returns false when the id is unknown.
+    pub fn update_meta(&mut self, id: MessageId, f: impl FnOnce(&mut Option<serde_json::Value>)) -> bool {
+        if let Some(e) = self.entries.iter_mut().find(|e| e.message.id == id) {
+            f(&mut e.meta);
+            true
+        } else {
+            false
+        }
+    }
+
     /// Navigate to a specific entry, making it the new leaf. Next `append` will
     /// fork from this point (in-place time travel). Returns false if the id is
     /// unknown.

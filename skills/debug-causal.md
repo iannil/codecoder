@@ -1,25 +1,29 @@
 ---
 name: debug-causal
-description: 因果链 / 观察收敛方法论——系统化调试与根因分析
+description: Root-cause analysis using the inference tree — dig layer by layer to the high-leverage cause
 ---
 
-## 因果链调试法（基于 RC 观察收敛哲学）
+# Root-Cause Analysis with the Inference Tree
 
-当你面对一个反复失败或难以定位根因的问题时，使用此方法：
+Use the `reason` tool to build a causal tree when debugging a persistent problem ("为什么老是失败").
 
-### 纪律
-1. **一次只深挖一条**（过早共识守卫）：不要一次性展开整棵因果树。选择一个候选原因，从它开始，逐节点向下深挖，直到找到末端。
-2. **每节点先验证**（观察锁定）：每加一个候选原因节点，做三项即时校验：
-   - 该节点表述是否规范（具体、可验证、不模糊）？
-   - 该节点是否直接且完备地解释了上一级？
-   - 该节点是否与已有节点无重复？
-   未通过校验的节点标记为 `[假设]`——它还是可能性，不是事实。
-3. **末端二分**：当无法继续深挖时，判断是真末端（`⊗自然律`——真无余量）还是边界末端（`⊗边界`——余量在权力边界外）。
-4. **关键节点 = 可用余量 × 杠杆最大**：通常在汇聚节点（多条因果链的交汇点）。把关键缺点翻成关键问题：「如何在不重复计算的前提下得到结果？」。
-5. **可持续决策**：选择保留最多余量、避免不可逆失败的那步——「还能再来一轮」。
+## Workflow
 
-### 与 codecoder 会话树的配合
-- 每个分支 = 探索一个假设。`/fork` 开新分支（`/navigate_to <id>` 在 TUI 中）。
-- 离开分支时，在摘要中记录「此因已排除，因为…」——避免重复挖同一条死路。
-- 节点的 `status` 字段（在会话树中通过 SessionEntry.meta 记录）标记 `hypothesis` 或 `locked`。
-- 诊断收敛后，产出回喂 Work Graph（`milestone add`），构成诊断→构造闭环。
+1. **锚定初始问题**: `reason add question="Why is <problem> happening?"`
+2. **逐节点展开**: For each candidate direct cause, `reason add question="<direct cause>?" parent=<parent_id>`
+3. **验证后锁定**: `reason status id=<id> status=locked` (only after you have evidence from `reason list`)
+4. **标注余量/杠杆**: `reason margin id=<id> margin="<description>" leverage=high|medium|low terminal=excluded|natural_law|boundary`
+5. **追溯路径**: `reason trace id=<id>` 查看从根到该节点的完整链
+6. **收敛到行动**: 找到高余量×高杠杆的关键节点后，用 `milestone add title="<行动>"` 把诊断转为 Plan 里程碑
+
+## Principles
+
+- **一次一个节点** — 不要一次性摊开整棵树。深挖一条分支后再开新分支（反过早共识）。
+- **验证才锁定** — 节点默认为 `hypothesis`，有证据才 `status=locked`。没证据的节点是"猜测"，不是"事实"。
+- **末端纪律** — `terminal=excluded`(已验证排除)、`natural_law`(物理/数学约束，无余量)、`boundary`(余量在你的权力边界外)。
+- **关键节点 = 高余量 × 高杠杆** — 这才是你应该行动的地方。
+- **余量是你可改变的范围**，杠杆是改变它后对初始问题的影响程度。两者都高→值得做。
+
+## Managing Inference Trees
+
+When the agent has multiple ongoing causal trees (different problems being debugged), use `reason add` under the appropriate root or simply start fresh — `reason list` always shows the full tree so you know what exists. Each `causal_tree.json` is per-project, so different projects don't interfere.

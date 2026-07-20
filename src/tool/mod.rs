@@ -3,6 +3,7 @@
 pub mod builtin;
 pub mod dev;
 pub mod net;
+pub mod reason;
 pub mod search;
 pub mod wasm;
 
@@ -96,6 +97,7 @@ impl Toolbox {
                 Box::new(dev::Plan),
                 Box::new(dev::Milestone),
                 Box::new(dev::Memory),
+                Box::new(reason::Reason),
                 Box::new(search::Glob),
                 Box::new(search::Grep),
             ],
