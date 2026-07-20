@@ -23,6 +23,10 @@ pub enum NodeStatus {
     Blocked,
     NeedsFix,
     Done,
+    /// A candidate cause in a diagnostic (rc) tree — not yet verified (P2).
+    Hypothesis,
+    /// A cause that has passed the three-step verification (P2).
+    Locked,
 }
 
 impl NodeStatus {
@@ -33,6 +37,8 @@ impl NodeStatus {
             NodeStatus::Blocked => "#",
             NodeStatus::NeedsFix => "!",
             NodeStatus::Done => "x",
+            NodeStatus::Hypothesis => "?",
+            NodeStatus::Locked => "·",
         }
     }
     fn as_str(self) -> &'static str {
@@ -42,6 +48,8 @@ impl NodeStatus {
             NodeStatus::Blocked => "blocked",
             NodeStatus::NeedsFix => "needs_fix",
             NodeStatus::Done => "done",
+            NodeStatus::Hypothesis => "hypothesis",
+            NodeStatus::Locked => "locked",
         }
     }
 }
@@ -206,7 +214,8 @@ impl WorkGraph {
 
     /// Recompute the DERIVED `Blocked` state: a not-yet-active node with an unmet
     /// dependency shows `Blocked`; when its deps clear it returns to `Pending`.
-    /// Never touches `InProgress` / `NeedsFix` / `Done` (explicit intent).
+    /// Never touches `InProgress` / `NeedsFix` / `Done` / `Hypothesis` / `Locked`
+    /// (explicit intent).
     fn recompute_blocked(&mut self) {
         let unmet: Vec<bool> = self.nodes.iter().map(|n| !self.deps_done(n)).collect();
         for (n, blocked) in self.nodes.iter_mut().zip(unmet) {
@@ -275,6 +284,41 @@ impl WorkGraph {
                 line.push_str(&format!("  ✓{v}"));
             }
             lines.push(line);
+        }
+        lines.join("\n")
+    }
+
+    /// Render a concise text summary suitable for system-prompt injection.
+    /// Lists ready, in-progress, needs-fix, and blocked nodes in a compact form
+    /// so the agent is aware of its outstanding work.
+    pub fn render_for_prompt(&self) -> String {
+        if self.nodes.is_empty() {
+            return String::new();
+        }
+        let ready = self.next_ready().map(|n| n.id);
+        let mut lines = vec![format!(
+            "<!-- workgraph: {} nodes, {} done -->",
+            self.nodes.len(),
+            self.nodes.iter().filter(|n| n.status == NodeStatus::Done).count(),
+        )];
+        for n in &self.nodes {
+            let tag = match n.status {
+                NodeStatus::Done => continue,
+                NodeStatus::Pending if Some(n.id) == ready => "▶ready",
+                NodeStatus::Pending => "  pending",
+                NodeStatus::InProgress => "~active",
+                NodeStatus::Blocked => "#blocked",
+                NodeStatus::NeedsFix => "!needs_fix",
+                NodeStatus::Hypothesis => "?hypothesis",
+                NodeStatus::Locked => "·locked",
+            };
+            let deps = if n.deps.is_empty() {
+                String::new()
+            } else {
+                let ds: Vec<String> = n.deps.iter().map(|d| format!("#{d}")).collect();
+                format!(" ({})", ds.join(","))
+            };
+            lines.push(format!("- [{}] #{}{}{}", tag, n.id, n.title, deps));
         }
         lines.join("\n")
     }
@@ -400,5 +444,78 @@ mod tests {
         assert_eq!(g.get(1).unwrap().status, NodeStatus::Done);
         assert_eq!(g.get(2).unwrap().status, NodeStatus::Pending);
         assert!(g.get(2).unwrap().deps.is_empty());
+    }
+
+    #[test]
+    fn node_status_hypothesis_and_locked_round_trip() {
+        let mut g = wg();
+        g.add("root cause candidate", "", vec![]).unwrap();
+        g.set_status(1, NodeStatus::Hypothesis);
+        assert_eq!(g.get(1).unwrap().status, NodeStatus::Hypothesis);
+        assert_eq!(g.get(1).unwrap().status.tag(), "?");
+        assert_eq!(g.get(1).unwrap().status.as_str(), "hypothesis");
+
+        g.set_status(1, NodeStatus::Locked);
+        assert_eq!(g.get(1).unwrap().status, NodeStatus::Locked);
+        assert_eq!(g.get(1).unwrap().status.tag(), "·");
+        assert_eq!(g.get(1).unwrap().status.as_str(), "locked");
+
+        // Serialize and deserialize to verify JSON round-trip.
+        let dir = std::env::temp_dir().join(format!("wg_stat_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        g.save(&dir).unwrap();
+        let raw = std::fs::read_to_string(path(&dir)).unwrap();
+        let back = WorkGraph::load(&raw).unwrap();
+        assert_eq!(back.get(1).unwrap().status, NodeStatus::Locked);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn render_for_prompt_omits_done_and_shows_ready() {
+        let mut g = wg();
+        g.add("first", "", vec![]).unwrap();
+        g.add("second", "", vec![1]).unwrap();
+        g.set_status(1, NodeStatus::Done);
+        let prompt = g.render_for_prompt();
+        // #1 is done → omitted in prompt.
+        assert!(!prompt.contains("first"), "done node should be omitted: {prompt}");
+        // #2 is ready after #1 is done.
+        assert!(prompt.contains("▶ready"), "ready marker should be present: {prompt}");
+        assert!(prompt.contains("second"), "pending node should be listed: {prompt}");
+    }
+
+    #[test]
+    fn render_for_prompt_empty_returns_empty() {
+        let g = wg();
+        assert!(g.render_for_prompt().is_empty(), "empty graph returns empty");
+    }
+
+    #[test]
+    fn render_for_prompt_shows_all_statuses() {
+        let mut g = wg();
+        g.add("ready", "do it", vec![]).unwrap();
+        g.add("active", "", vec![]).unwrap();
+        g.set_status(2, NodeStatus::InProgress);
+        // Blocked manually: add a dep that won't be done.
+        g.add("blocked", "", vec![1]).unwrap(); // #1 is pending → blocked
+        g.add("fixme", "", vec![]).unwrap();
+        g.set_status(4, NodeStatus::NeedsFix);
+        g.add("done", "", vec![]).unwrap();
+        g.set_status(5, NodeStatus::Done);
+        g.add("hyp", "", vec![]).unwrap();
+        g.set_status(6, NodeStatus::Hypothesis);
+        g.add("locked", "", vec![]).unwrap();
+        g.set_status(7, NodeStatus::Locked);
+
+        let prompt = g.render_for_prompt();
+        // Done node omitted from list but header may mention count.
+        assert!(!prompt.contains("- [x] #5"), "done node should be omitted: {prompt}");
+        // Others present with correct tags.
+        assert!(prompt.contains("▶ready"), "ready marker: {prompt}");
+        assert!(prompt.contains("~active"), "active marker: {prompt}");
+        assert!(prompt.contains("#blocked"), "blocked marker: {prompt}");
+        assert!(prompt.contains("!needs_fix"), "needs_fix marker: {prompt}");
+        assert!(prompt.contains("?hypothesis"), "hypothesis marker: {prompt}");
+        assert!(prompt.contains("·locked"), "locked marker: {prompt}");
     }
 }

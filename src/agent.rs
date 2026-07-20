@@ -366,6 +366,11 @@ impl AgentLoop {
                 AgentCommand::ProcessMessage(text) => {
                     self.cancel.reset();
                     self.process_turn(text, &event_tx);
+                    // Auto-drive the workgraph: if there are ready milestones, advance
+                    // them without waiting for another user command (plan #2).
+                    if self.persist && self.trust == TrustState::Trusted {
+                        self.drive_workgraph(&event_tx);
+                    }
                 }
                 AgentCommand::Resume => self.resume_latest(&event_tx),
                 AgentCommand::Reload => {
@@ -1131,6 +1136,63 @@ impl AgentLoop {
             })
             .unwrap_or_default()
     }
+
+    /// If the workgraph has ready milestones, auto-drive them (Plan #2). Reads the
+    /// graph, picks the next ready node, and runs a turn for it. Repeats until no
+    /// more are ready, up to MAX_AUTO turns, so the user's one command can advance
+    /// several milestones in sequence. After each turn, parses the assistant text
+    /// for a review verdict and auto-updates the milestone status.
+    fn drive_workgraph(&mut self, event_tx: &Sender<AgentEvent>) {
+        use crate::workgraph::{NodeStatus, WorkGraph};
+        const MAX_AUTO: usize = 3;
+        for _ in 0..MAX_AUTO {
+            let milestone_id = {
+                let g = WorkGraph::read(&self.root);
+                match g.next_ready() {
+                    Some(n) => n.id,
+                    None => break,
+                }
+            };
+            // Build task text (no longer borrowing `g`).
+            let (task, title) = {
+                let g = WorkGraph::read(&self.root);
+                let n = g.get(milestone_id).expect("just read, must exist");
+                let t = format!(
+                    "workgraph milestone #{}: {}\nacceptance: {}\n\n\
+                     Complete this milestone, then review your changes and report the \
+                     verdict (pass / needs_fix / rebuild).",
+                    n.id,
+                    n.title,
+                    if n.acceptance.is_empty() { "(none)" } else { &n.acceptance },
+                );
+                (t, n.title.clone())
+            };
+            self.cancel.reset();
+            self.process_turn(task, event_tx);
+
+            // Auto-writeback: parse the turn's final assistant text for a review
+            // verdict. When found, update the milestone status accordingly.
+            let text = self.last_assistant_text();
+            let outcome = crate::review::parse_review(&text);
+            if !outcome.unparsed {
+                let mut g = WorkGraph::read(&self.root);
+                let (status, verdict_str) = match outcome.verdict {
+                    crate::review::Verdict::Pass => (NodeStatus::Done, "pass"),
+                    crate::review::Verdict::NeedsFix => (NodeStatus::NeedsFix, "needs_fix"),
+                    crate::review::Verdict::Rebuild => (NodeStatus::NeedsFix, "rebuild"),
+                };
+                g.set_status(milestone_id, status);
+                if let Some(n) = g.nodes.iter_mut().find(|n| n.id == milestone_id) {
+                    n.verdict = Some(verdict_str.to_string());
+                }
+                let _ = g.save(&self.root);
+                let _ = event_tx.send(AgentEvent::Notice(format!(
+                    "milestone #{} ({}) auto-updated: {}",
+                    milestone_id, title, verdict_str,
+                )));
+            }
+        }
+    }
 }
 
 /// Build the System prompt from AGENTS.md (identity) + the scanned catalog
@@ -1146,6 +1208,13 @@ fn build_system_prompt(root: &std::path::Path) -> String {
     let catalog = Registry::scan(root).render_catalog();
     if !catalog.is_empty() {
         parts.push(catalog);
+    }
+    // Append workgraph status (Plan #2) so the agent is always aware of
+    // outstanding milestones. Renders nothing when the graph is empty.
+    let wg = crate::workgraph::WorkGraph::read(root);
+    let wg_text = wg.render_for_prompt();
+    if !wg_text.is_empty() {
+        parts.push(wg_text);
     }
     parts.join("\n\n")
 }

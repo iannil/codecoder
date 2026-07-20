@@ -19,8 +19,34 @@ pub struct BgOutcome {
     pub events: Vec<String>,
 }
 
+/// Resolve the task for a background run: an explicit non-empty `task` wins;
+/// otherwise the workgraph's next ready milestone is used. Returns the chosen
+/// task text and a human-readable label for event logging.
+fn resolve_bg_task(task: &str, root: &std::path::Path) -> (String, String) {
+    if !task.trim().is_empty() {
+        return (task.to_string(), "explicit task".into());
+    }
+    // Empty task → check workgraph for a ready milestone (Plan #2).
+    let g = crate::workgraph::WorkGraph::read(root);
+    if let Some(n) = g.next_ready() {
+        let label = format!("workgraph milestone #{}: {}", n.id, n.title);
+        let ct = format!(
+            "workgraph milestone #{}: {}\nacceptance: {}\n\n\
+             Complete this milestone, then review your changes and report the \
+             verdict (pass / needs_fix / rebuild).",
+            n.id,
+            n.title,
+            if n.acceptance.is_empty() { "(none)" } else { &n.acceptance },
+        );
+        return (ct, label);
+    }
+    (String::new(), "no task (workgraph empty)".into())
+}
+
 /// Run one task to completion on the CURRENT thread, then drain events into a
 /// BgOutcome. Same-thread + post-turn drain keeps it deterministic (no interleave).
+/// When `task` is empty, falls back to the workgraph's next ready milestone and
+/// auto-advances through up to 3 milestones.
 pub fn run_background(
     provider: Arc<dyn Provider>,
     model: String,
@@ -29,12 +55,79 @@ pub fn run_background(
     root: PathBuf,
     task: String,
 ) -> anyhow::Result<BgOutcome> {
-    let mut agent = AgentLoop::new_background(provider, model, max_tokens, temperature, root);
-    let (tx, rx) = channel::<AgentEvent>();
-    agent.run_one_turn(task, &tx);
-    drop(tx); // close the sender so the drain below terminates
-
+    use crate::workgraph::{NodeStatus, WorkGraph};
+    const MAX_AUTO: usize = 3;
     let mut out = BgOutcome::default();
+
+    // Determine initial task from explicit arg or workgraph.
+    let (initial_task, label) = resolve_bg_task(&task, &root);
+    if initial_task.is_empty() && !label.starts_with("workgraph milestone") {
+        out.events.push(label);
+        return Ok(out);
+    }
+    out.events.push(format!("task: {label}"));
+
+    // Build the agent once; reuse across milestones.
+    let mut agent = AgentLoop::new_background(provider, model, max_tokens, temperature, root.clone());
+
+    // Run the first turn (explicit task or first workgraph milestone).
+    let (tx, rx) = channel::<AgentEvent>();
+    agent.run_one_turn(initial_task, &tx);
+    drop(tx);
+    drain_bg_events(rx, &mut out);
+
+    // If no explicit task was given, auto-advance through more workgraph milestones.
+    if task.trim().is_empty() {
+        for _ in 0..MAX_AUTO.saturating_sub(1) {
+            let milestone_id = {
+                let g = WorkGraph::read(&root);
+                match g.next_ready() {
+                    Some(n) => n.id,
+                    None => break,
+                }
+            };
+            let (task_text, title) = {
+                let g = WorkGraph::read(&root);
+                let n = g.get(milestone_id).expect("just read");
+                let t = format!(
+                    "workgraph milestone #{}: {}\nacceptance: {}\n\n\
+                     Complete this milestone, then review your changes and report the \
+                     verdict (pass / needs_fix / rebuild).",
+                    n.id, n.title,
+                    if n.acceptance.is_empty() { "(none)" } else { &n.acceptance },
+                );
+                (t, n.title.clone())
+            };
+            out.events.push(format!("task: workgraph milestone #{} ({})", milestone_id, title));
+            let (tx, rx) = channel::<AgentEvent>();
+            agent.run_one_turn(task_text, &tx);
+            drop(tx);
+            drain_bg_events(rx, &mut out);
+
+            // Auto-writeback: parse verdict and update milestone.
+            let text = &out.final_text.clone();
+            let outcome = crate::review::parse_review(text);
+            if !outcome.unparsed {
+                let mut g = WorkGraph::read(&root);
+                let (status, vs) = match outcome.verdict {
+                    crate::review::Verdict::Pass => (NodeStatus::Done, "pass"),
+                    crate::review::Verdict::NeedsFix => (NodeStatus::NeedsFix, "needs_fix"),
+                    crate::review::Verdict::Rebuild => (NodeStatus::NeedsFix, "rebuild"),
+                };
+                g.set_status(milestone_id, status);
+                if let Some(n) = g.nodes.iter_mut().find(|n| n.id == milestone_id) {
+                    n.verdict = Some(vs.to_string());
+                }
+                let _ = g.save(&root);
+                out.events.push(format!("milestone #{} ({}) auto-updated: {}", milestone_id, title, vs));
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// Drain events from a background turn's rx into the BgOutcome accumulator.
+fn drain_bg_events(rx: std::sync::mpsc::Receiver<AgentEvent>, out: &mut BgOutcome) {
     for ev in rx.into_iter() {
         match ev {
             AgentEvent::StreamDelta(s) => out.final_text.push_str(&s),
@@ -52,5 +145,4 @@ pub fn run_background(
             _ => {}
         }
     }
-    Ok(out)
 }
