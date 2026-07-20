@@ -3,7 +3,7 @@
 A Background Agent is a full-LLM-loop agent that runs autonomously with **no user
 present** (CONTEXT.md). v1 ships the minimal shape: a **headless one-shot runner**
 triggered by `CODECODER_BG_TASK=<task>`, which drives exactly one turn and exits.
-Scheduling is external (cron/CI).
+Scheduling is external (cron/CI/systemd timer / launchd). See `docs/background-agent-scheduling.md` for example configurations.
 
 ## Permission model (the "no user present" problem)
 

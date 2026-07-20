@@ -7,7 +7,7 @@ A Capability declares two orthogonal properties in its manifest: an `Environment
 `enum Environment { Shell, Wasm, Docker }`
 
 - `Shell` — host process; trusted domain but permission-gated per call.
-- `Wasm` — wasmtime + WASI isolation (no network, restricted FS). Uses wasmtime directly, **not** lunatic, and v1 accepts only `.wasm`/`.wat` input — compiling source to wasm is deferred as its own project.
+- `Wasm` — wasmtime + WASI isolation (no network, restricted FS). Uses wasmtime directly, **not** lunatic. Accepts `.wasm`/`.wat` input via `run_wasm()` in `src/tool/wasm.rs` — the runtime is fleshed out with MemoryOutputPipe capture. Compiling source to wasm is deferred as its own project.
 - `Docker` — container isolation for any language (no network, read-only workspace mount, CPU/memory limits). If the Docker daemon is absent, `run_capability` **errors explicitly** rather than silently downgrading to host execution — a silent downgrade would make the word "sandbox" lie.
 
 The Capability declares its `environment`; language may suggest a default but the declaration wins.
@@ -17,7 +17,7 @@ The Capability declares its `environment`; language may suggest a default but th
 `enum Lifecycle { OneShot, OnDemand, Persistent }`
 
 - `OneShot` — run once, capture stdout, destroy.
-- `OnDemand` — started on invocation, briefly reusable, then reclaimed.
+- `OnDemand` — started on invocation, briefly reusable, then reclaimed. Implemented in `run_ondemand()` (Shell, Docker, Wasm environments). Tracks warm processes in the RunningServiceTable.
 - `Persistent` — a long-running background service surviving across turns, invoked over network/IPC.
 
 ## Persistent service policy
