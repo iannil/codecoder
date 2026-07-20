@@ -563,6 +563,8 @@ fn history_next(app: &mut TuiApp) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agent::PermissionReply;
+    use crate::permission::PermScope;
     use std::sync::mpsc::channel;
 
     fn app_with_token() -> (TuiApp, CancelToken) {
@@ -730,5 +732,132 @@ mod tests {
 
         assert_eq!(app.input, "hello\n");
         assert_eq!(app.cursor, 6);
+    }
+
+    #[test]
+    fn permission_select_once() {
+        let (mut app, _token) = app_with_token();
+        let (tx, rx) = channel::<PermissionReply>();
+        app.dialog = Some(Dialog::ToolPermission(PermissionDialog::new(
+            "write_file".into(), "test".into(), tx,
+        )));
+        // simulate Enter (selected=0 = once)
+        handle_input(&mut app, Event::Key(KeyEvent::from(KeyCode::Enter)), &channel::<AgentCommand>().0);
+        if let Ok(reply) = rx.try_recv() {
+            assert_eq!(reply, PermissionReply::Grant(PermScope::Once));
+        } else {
+            panic!("expected Grant(Once)");
+        }
+    }
+
+    #[test]
+    fn permission_esc_denies() {
+        let (mut app, _token) = app_with_token();
+        let (tx, rx) = channel::<PermissionReply>();
+        app.dialog = Some(Dialog::ToolPermission(PermissionDialog::new(
+            "write_file".into(), "test".into(), tx,
+        )));
+        handle_input(&mut app, Event::Key(KeyEvent::from(KeyCode::Esc)), &channel::<AgentCommand>().0);
+        if let Ok(reply) = rx.try_recv() {
+            assert_eq!(reply, PermissionReply::Deny);
+        } else {
+            panic!("expected Deny");
+        }
+    }
+
+    #[test]
+    fn ask_question_submit() {
+        let (mut app, _token) = app_with_token();
+        let (tx, rx) = channel::<String>();
+        app.dialog = Some(Dialog::AskQuestion(AskDialog {
+            prompt: "Enter name:".into(),
+            input: "Alice".into(),
+            reply_tx: tx,
+        }));
+        // Simulate: type 's' (append to input), then Enter
+        handle_input(&mut app, Event::Key(KeyEvent::from(KeyCode::Char('s'))), &channel::<AgentCommand>().0);
+        // Then Enter
+        let (tx2, _) = channel::<AgentCommand>();
+        handle_input(&mut app, Event::Key(KeyEvent::from(KeyCode::Enter)), &tx2);
+        if let Ok(answer) = rx.try_recv() {
+            assert_eq!(answer, "Alices");
+        } else {
+            panic!("expected answer to be sent");
+        }
+    }
+
+    #[test]
+    fn ask_question_esc_cancels() {
+        let (mut app, _token) = app_with_token();
+        let (tx, rx) = channel::<String>();
+        app.dialog = Some(Dialog::AskQuestion(AskDialog {
+            prompt: "Enter name:".into(),
+            input: "".into(),
+            reply_tx: tx,
+        }));
+        let (tx2, _) = channel::<AgentCommand>();
+        handle_input(&mut app, Event::Key(KeyEvent::from(KeyCode::Esc)), &tx2);
+        if let Ok(answer) = rx.try_recv() {
+            assert_eq!(answer, "");
+        } else {
+            panic!("expected empty string on cancel");
+        }
+    }
+
+    #[test]
+    fn plan_approve() {
+        let (mut app, _token) = app_with_token();
+        let (tx, rx) = channel::<bool>();
+        app.dialog = Some(Dialog::PlanApproval(PlanDialog {
+            plan: "do something".into(),
+            selected: 0,
+            reply_tx: tx,
+        }));
+        let (tx2, _) = channel::<AgentCommand>();
+        // 'a' hotkey approves
+        handle_input(&mut app, Event::Key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE)), &tx2);
+        if let Ok(approved) = rx.try_recv() {
+            assert!(approved);
+        } else {
+            panic!("expected approved=true");
+        }
+    }
+
+    #[test]
+    fn plan_reject() {
+        let (mut app, _token) = app_with_token();
+        let (tx, rx) = channel::<bool>();
+        app.dialog = Some(Dialog::PlanApproval(PlanDialog {
+            plan: "do something".into(),
+            selected: 0,
+            reply_tx: tx,
+        }));
+        let (tx2, _) = channel::<AgentCommand>();
+        // 'r' hotkey rejects
+        handle_input(&mut app, Event::Key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE)), &tx2);
+        if let Ok(approved) = rx.try_recv() {
+            assert!(!approved);
+        } else {
+            panic!("expected approved=false");
+        }
+    }
+
+    #[test]
+    fn confirm_yes() {
+        let (mut app, _token) = app_with_token();
+        let (tx, rx) = channel::<bool>();
+        app.dialog = Some(Dialog::Confirm(ConfirmDialog {
+            prompt: "Are you sure?".into(),
+            selected: 0,
+            reply_tx: tx,
+        }));
+        let (tx2, _) = channel::<AgentCommand>();
+        // Enter with selected=0 = yes
+        handle_input(&mut app, Event::Key(KeyEvent::from(KeyCode::Enter)), &tx2);
+        if let Ok(yes) = rx.try_recv() {
+            assert!(yes);
+        } else {
+            panic!("expected confirmed=true");
+        }
     }
 }

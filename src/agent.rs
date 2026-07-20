@@ -34,6 +34,7 @@ pub enum AgentCommand {
 }
 
 /// The answer to a blocking request, sent back over the oneshot `reply_tx`.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PermissionReply {
     Grant(PermScope),
     Deny,
