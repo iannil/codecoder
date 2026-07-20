@@ -626,4 +626,109 @@ mod tests {
         assert!(steer.drain().is_empty(), "nothing should be steered when idle");
         assert!(matches!(rx.try_recv(), Ok(AgentCommand::ProcessMessage(m)) if m == "hello"));
     }
+
+    #[test]
+    fn submit_empty_text_does_nothing() {
+        let (mut app, _token) = app_with_token();
+        app.input = "  ".into();
+        let (tx, rx) = channel::<AgentCommand>();
+        let block_count = app.blocks.len();
+
+        handle_insert_key(&mut app, KeyEvent::from(KeyCode::Enter), &tx);
+
+        assert_eq!(app.blocks.len(), block_count, "empty input must not add a block");
+        assert!(rx.try_recv().is_err(), "empty input must not send ProcessMessage");
+    }
+
+    #[test]
+    fn submit_text_sends_process_message() {
+        let (mut app, _token) = app_with_token();
+        let steer = SteerQueue::default();
+        app.steer = steer.clone();
+        app.activity = None;
+        app.input = "hello".into();
+        let (tx, rx) = channel::<AgentCommand>();
+
+        handle_insert_key(&mut app, KeyEvent::from(KeyCode::Enter), &tx);
+
+        assert!(app.blocks.iter().any(|b| matches!(b, Block::User(_))));
+        assert!(matches!(rx.try_recv(), Ok(AgentCommand::ProcessMessage(m)) if m == "hello"));
+    }
+
+    #[test]
+    fn submit_during_turn_steers() {
+        let (mut app, _token) = app_with_token();
+        let steer = SteerQueue::default();
+        app.steer = steer.clone();
+        app.activity = Some(Activity { label: "working".into(), started: std::time::Instant::now() });
+        app.input = "keep going".into();
+        let (tx, rx) = channel::<AgentCommand>();
+
+        handle_insert_key(&mut app, KeyEvent::from(KeyCode::Enter), &tx);
+
+        assert_eq!(steer.drain(), vec!["keep going".to_string()]);
+        assert!(rx.try_recv().is_err(), "no ProcessMessage while a turn is in flight");
+    }
+
+    #[test]
+    fn slash_exit_quits() {
+        let (mut app, _token) = app_with_token();
+        app.input = "/exit".into();
+        let (tx, rx) = channel::<AgentCommand>();
+
+        handle_insert_key(&mut app, KeyEvent::from(KeyCode::Enter), &tx);
+
+        assert!(app.should_quit);
+        assert!(matches!(rx.try_recv(), Ok(AgentCommand::Shutdown)));
+    }
+
+    #[test]
+    fn slash_resume_sends_resume() {
+        let (mut app, _token) = app_with_token();
+        app.input = "/resume".into();
+        let (tx, rx) = channel::<AgentCommand>();
+
+        handle_insert_key(&mut app, KeyEvent::from(KeyCode::Enter), &tx);
+
+        assert!(matches!(rx.try_recv(), Ok(AgentCommand::Resume)));
+    }
+
+    #[test]
+    fn slash_clear_clears_blocks() {
+        let (mut app, _token) = app_with_token();
+        app.blocks.push(Block::User("old".into()));
+        app.browsing = true;
+        app.input = "/clear".into();
+        let (tx, _rx) = channel::<AgentCommand>();
+
+        handle_insert_key(&mut app, KeyEvent::from(KeyCode::Enter), &tx);
+
+        assert!(app.blocks.is_empty());
+        assert!(!app.browsing);
+    }
+
+    #[test]
+    fn ctrl_c_quits() {
+        let (mut app, _token) = app_with_token();
+        let k = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
+        let (tx, _rx) = channel::<AgentCommand>();
+
+        handle_insert_key(&mut app, k, &tx);
+
+        assert!(app.should_quit);
+    }
+
+    #[test]
+    fn shift_enter_inserts_newline() {
+        let (mut app, _token) = app_with_token();
+        app.input = "hello".into();
+        app.cursor = 5;
+        let k = KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT);
+        let (tx, _rx) = channel::<AgentCommand>();
+
+        handle_insert_key(&mut app, k, &tx);
+
+        assert_eq!(app.input, "hello\n");
+        assert_eq!(app.cursor, 6);
+    }
 }
