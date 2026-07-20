@@ -1,0 +1,29 @@
+---
+source: src/tui/render.rs
+assertion_line: 502
+expression: snap
+---
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"› line1                                                                         "
+"  line2                                                                         "
+"  line3                                                                         "
+" INSERT  m  ctx 0%  · ^J newline · ↑ browse · / cmd · ^C quit                   "

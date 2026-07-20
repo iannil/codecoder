@@ -1,0 +1,29 @@
+---
+source: src/tui/render.rs
+assertion_line: 526
+expression: snap
+---
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"             ┌ Permission ────────────────────────────────────────┐             "
+"             │git commit                                          │             "
+"             │key: run_command:git                                │             "
+"             │                                                    │             "
+"             │▸ [o] once    this call only                        │             "
+"             │  [s] session don't ask again this run              │             "
+"             │  [p] project persist to codecoder.json             │             "
+"             │  [n] deny                                          │             "
+"             │                                                    │             "
+"             └────────────────────────────────────────────────────┘             "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"› type a message, or / for commands                                             "
+" DIALOG  m  ctx 0%  · ↑/↓ select · enter confirm · esc deny                     "

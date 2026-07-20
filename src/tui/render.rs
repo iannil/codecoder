@@ -478,4 +478,51 @@ mod snapshot_tests {
         terminal.draw(|f| draw(f, app)).unwrap();
         terminal.backend().to_string()
     }
+
+    #[test]
+    fn insert_empty() {
+        let app = TuiApp::new("m".into(), std::env::temp_dir());
+        let snap = render_snapshot(&app);
+        insta::assert_snapshot!("insert_empty", snap);
+    }
+
+    #[test]
+    fn insert_with_text() {
+        let mut app = TuiApp::new("m".into(), std::env::temp_dir());
+        app.insert_str("hello world");
+        let snap = render_snapshot(&app);
+        insta::assert_snapshot!("insert_with_text", snap);
+    }
+
+    #[test]
+    fn insert_multiline() {
+        let mut app = TuiApp::new("m".into(), std::env::temp_dir());
+        app.insert_str("line1\nline2\nline3");
+        let snap = render_snapshot(&app);
+        insta::assert_snapshot!("insert_multiline", snap);
+    }
+
+    #[test]
+    fn insert_with_activity() {
+        let mut app = TuiApp::new("m".into(), std::env::temp_dir());
+        app.activity = Some(Activity {
+            label: "running test…".into(),
+            started: std::time::Instant::now(),
+        });
+        let snap = render_snapshot(&app);
+        insta::assert_snapshot!("insert_with_activity", snap);
+    }
+
+    #[test]
+    fn insert_permission_dialog() {
+        let mut app = TuiApp::new("m".into(), std::env::temp_dir());
+        let (tx, _rx) = std::sync::mpsc::channel();
+        app.dialog = Some(Dialog::ToolPermission(PermissionDialog::new(
+            "run_command:git".into(),
+            "git commit".into(),
+            tx,
+        )));
+        let snap = render_snapshot(&app);
+        insta::assert_snapshot!("insert_permission_dialog", snap);
+    }
 }
