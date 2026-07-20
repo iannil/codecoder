@@ -4,7 +4,7 @@
 
 ## 项目状态
 
-CodeCoder 是一个**已落地**的自主 AI agent，使用 Rust 编写。仓库已有 Cargo 项目、28 个源模块(`src/`,含 `background.rs`、`trust.rs`、`retry.rs`、`review.rs`、`workgraph.rs`)、25 个内置工具、160 个测试(156 通过 + 4 个 `#[ignore]`:2 Docker e2e + L2 pty 冒烟 + L3 真实 LLM 冒烟),以及 21 份 ADR(`docs/adr/`)。`tests/` 下为黑盒行为验证分层(L1 默认;L2/L3 门控),见 `docs/testing/behavioral-validation.md`。架构总览见 `ARCHITECTURE.md`;领域术语以 `CONTEXT.md` 为准。
+CodeCoder 是一个**已落地**的自主 AI agent，使用 Rust 编写。仓库已有 Cargo 项目、27 个源模块(`src/`,含 `background.rs`、`trust.rs`、`retry.rs`、`review.rs`、`workgraph.rs`、`daemon.rs`、`client.rs`)、25 个内置工具、202 个测试(202 通过 + 3 个 `#[ignore]`:2 Docker e2e + L3 真实 LLM 冒烟),以及 22 份 ADR(`docs/adr/`)。`tests/` 下为黑盒行为验证分层(L1 默认;L2/L3 门控),见 `docs/testing/behavioral-validation.md`。架构总览见 `ARCHITECTURE.md`;领域术语以 `CONTEXT.md` 为准。
 
 **已知未实现的部分(文档中已标注,勿误以为已就绪):**
 
@@ -22,7 +22,8 @@ CodeCoder 是一个**已落地**的自主 AI agent，使用 Rust 编写。仓库
 cargo build          # 编译
 cargo test           # 运行测试套件
 cargo test <name>    # 按名称子串运行单个测试
-cargo run            # 启动 TUI / REPL
+CODECODER_DAEMON=1 cargo run  # 启动 ccd daemon
+cargo run --bin cc            # 启动 cc 客户端
 ```
 
 未设置 `CODECODER_API_KEY` 时会回退到 `StubClient`（模拟 LLM 响应）——这是无需真实 key 进行测试的预期方式。
@@ -41,7 +42,7 @@ cargo run            # 启动 TUI / REPL
 - `sessions/` — 以带版本号的 JSON 保存的对话历史（通过 `/resume` 加载）
 - `docs/adr/` — 架构决策记录；`docs/design/`、`docs/audit/`
 
-**事件驱动、多线程内核(OS 线程 + channel,非 tokio/lunatic)。** TUI 线程经 `cmd_tx` 发 `AgentCommand`(仅用户主动意图:ProcessMessage、Shutdown、Cancel);agent 线程经 `event_rx` 回传 `AgentEvent`(流式增量 + 结构化状态)。权限/`ask_user` 应答走 `AgentEvent` 内嵌的 `reply_tx` oneshot,**不走** `cmd_tx`——故 `PermissionResponse` 不是 `AgentCommand`。一个 turn 内工具**串行**执行;取消是协作式:TUI 的 `Esc`(有 turn 在跑时)直接翻转共享 `CancelToken`(不走 `cmd_tx`,因 agent 线程 turn 内阻塞在 `process_turn`),`run_command` 与 shell Capability 轮询该 token 并 kill 子进程。只有顶层 agent 拥有面向用户的通道;`agent` 工具派生的 sub-agent 汇报回父 agent,其 read-only 的精确含义 = 工具集仅限 `Permission::None` 那批,且深度锁定为 1。详见 `docs/adr/0016`、`0019`。
+**事件驱动、多线程内核(OS 线程 + channel,非 tokio/lunatic)。** daemon 长驻,监听 Unix socket;`cc` 客户端经 stdin/stdout 交互,permission/ask/confirm/plan/trust 弹窗行内 `y/n`。daemon 线程经 `cmd_tx` 发 `AgentCommand`(仅用户主动意图:ProcessMessage、Shutdown、Cancel);agent 线程经 `event_rx` 回传 `AgentEvent`(流式增量 + 结构化状态)。权限/`ask_user` 应答走 `AgentEvent` 内嵌的 `reply_tx` oneshot,**不走** `cmd_tx`——故 `PermissionResponse` 不是 `AgentCommand`。一个 turn 内工具**串行**执行;取消是协作式:`cc` 的 `Ctrl+C`(有 turn 在跑时)直接翻转共享 `CancelToken`(不走 `cmd_tx`,因 agent 线程 turn 内阻塞在 `process_turn`),`run_command` 与 shell Capability 轮询该 token 并 kill 子进程。只有顶层 agent 拥有面向用户的通道;`agent` 工具派生的 sub-agent 汇报回父 agent,其 read-only 的精确含义 = 工具集仅限 `Permission::None` 那批,且深度锁定为 1。详见 `docs/adr/0016`、`0019`、`0032`。
 
 **三分自我进化:Tool / Skill / Capability。** **Tool** 是编译进二进制的原生原语(25 个:读/列/写/编辑文件、运行命令、带 tree-sitter AST 查询的 glob/grep、`diff`、web 与 GitHub 搜索、`reverse_api`、git `commit`、`plan`、`milestone`、`memory`、`ask_user`、`confirm`、`agent`、`review`、`generate_skill`、`generate_prompt`、`promote_prompt`、`generate_capability`、`use_skill`、`run_capability`;完整清单见 `README.md` 表)。**Skill** 是 agent 自撰的 `.md` 程序性知识(只改变「怎么想」,不执行);**Prompt** 是 Skill 的草稿态(`prompts/`,经 `promote_prompt` 晋升为 Skill,见 ADR 0025);**Capability** 是 agent 自撰的可执行产物(长出新手脚)。三者由 `Registry` 扫描 `skills/`、`prompts/`、`capabilities/` 成常驻目录、按需激活。Capability 在自己 manifest 里声明 **Environment**(`Shell`/`Wasm`/`Docker`)× **Lifecycle**(`OneShot`/`OnDemand`/`Persistent`);权限闸门在 `run_capability`(按 `能力名+环境` keying),`generate_*` 仅 `write_file` 级。消息模型 provider 中立,OpenAI 为规范协议。详见 `CONTEXT.md` 与 `docs/adr/0017`、`0018`、`0020`–`0022`。
 

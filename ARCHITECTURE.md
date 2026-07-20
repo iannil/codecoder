@@ -1,32 +1,34 @@
 # CodeCoder 架构
 
-自主 AI agent,Rust 编写,**事件驱动、文件系统即自我**。本文串起 29 个源模块 ↔ 21 个 ADR ↔ 26 个内置工具 ↔ 6 点自我进化诉求,供人与未来 agent 导航。术语以 `CONTEXT.md` 为准,决策依据见 `docs/adr/`。
+自主 AI agent,Rust 编写,**事件驱动、文件系统即自我**。本文串起 27 个源模块 ↔ 21 个 ADR ↔ 25 个内置工具 ↔ 6 点自我进化诉求,供人与未来 agent 导航。术语以 `CONTEXT.md` 为准,决策依据见 `docs/adr/`。
 
 ## 一句话
 
 一个跑在 OS 线程 + channel 上的 agent 内核,用 provider 中立的消息模型对话,用一套自报权限的工具行动,把「技能/能力」当文件存在磁盘上自我扩展,并能在 shell/wasm/docker 三种环境里执行自撰的代码。
 
-## 运行时形状(ADR 0016)
+## 运行时形状(ADR 0016 + client-server migration)
 
 ```
         cmd_tx (AgentCommand: ProcessMessage/Resume/Reload/Cancel/Shutdown)
   ┌──────────────┐ ───────────────────────────────▶ ┌──────────────┐
-  │  TUI 线程     │                                    │  agent 线程   │
-  │ (main thread)│ ◀─────────────────────────────── │  AgentLoop   │
+  │  daemon 线程  │                                    │  agent 线程   │
+  │ (Unix socket)│ ◀─────────────────────────────── │  AgentLoop   │
   └──────────────┘  event_rx (AgentEvent: 流式增量/    └──────────────┘
-      阻塞往返         工具状态/权限请求/ask/通知)              │
-   (permission/ask)  经 AgentEvent 内嵌 reply_tx oneshot ◀────┘
+      cc 客户端          工具状态/权限请求/ask/通知)              │
+      stdin/stdout     经 AgentEvent 内嵌 reply_tx oneshot ◀────┘
+   (permission/ask)
 ```
 
+- **client-server 架构**: `ccd` daemon 长驻,监听 Unix socket; `cc` 客户端无状态,经 stdin/stdout 交互(ADR 0032)。
+- **权限/ask/confirm/plan/trust 弹窗**经 daemon wire protocol 往返,`cc` 在终端行内显示 `y/n` 提示(Task 9a)。
 - **无 async 运行时**:阻塞式,HTTP 用 ureq,子 agent/服务用 OS 线程/子进程。
-- **权限/ask 应答走 oneshot**,不走 cmd_tx——待决请求的答复不会被新消息错序。
-- **取消**是协作式:TUI 的 `Esc`(仅当有 turn 在跑时)**直接翻转共享 `CancelToken`**——`cmd_tx` 的 `Cancel` 到不了正在 `process_turn` 阻塞的 agent 线程。`run_command` 与 shell Capability 经同一 `run_shell_cancellable` 轮询该 token 并 kill 子进程,turn 循环在每次迭代顶部再检查一次(不硬杀线程)。
+- **取消**是协作式:`cc` 的 `Ctrl+C`(仅当有 turn 在跑时)**直接翻转共享 `CancelToken`**。`run_command` 与 shell Capability 经同一 `run_shell_cancellable` 轮询该 token 并 kill 子进程,turn 循环在每次迭代顶部再检查一次(不硬杀线程)。
 
 ## 模块地图
 
 | 模块 | 职责 | ADR |
 |---|---|---|
-| `main.rs` | 入口:选 provider、起 agent 线程、跑 TUI、退出时杀常驻服务 | 0016 0024 |
+| `main.rs` | 入口分发:`CODECODER_BG_TASK`→`run_background`, 否则→`run_daemon` | 0016 0026 0032 |
 | `config.rs` | `CODECODER_*` 环境变量 | — |
 | `message.rs` | `Message`/`MessageItem`/`MessageId`/`Role`(provider 中立) | 0015 0017 |
 | `provider/{mod,openai,stub}` | `Provider` trait;`OpenAiClient`(chat-completions)/`StubClient` | 0017 |
@@ -44,11 +46,12 @@
 | `memory.rs` | `memory/<key>` 文件级 KV + 数据索引(**跨 session 共享**) | — |
 | `workgraph.rs` | **Work Graph(一等公民 #2)**:持久化、依赖有序的里程碑图,`Milestone` 节点含 `NodeStatus`(含 `Hypothesis`/`Locked`)、`next_ready()` 调度、`render_for_prompt()` 摘要 | 设计文档 |
 | `review.rs` | **结构化验收裁决(一等公民 #4)**:`Verdict`(pass/needs_fix/rebuild)+ 四信号(`foundation`/`over_engineering`/`volume`/`terminology`),纯函数解析 | 设计文档 |
-| `tui/{mod,render,run}` | `TuiApp`/派生 `Mode`/`Theme`/`Dialog`/`Popup`、渲染、主循环 | 0001 0003 0024 |
+| `daemon.rs` | **Daemon(长驻服务)**:Unix socket 监听、多 client 复用、session 管理、permission/ask/confirm/plan/trust 往返 wire protocol | 0032 |
+| `client.rs` | **cc 客户端**:daemon 连接、stdin→消息、消息→stdout 格式化、permission 弹窗行内 `y/n` | 0032 |
 
 ## 一个 turn 的生命周期
 
-1. 用户在 TUI 输入 → `cmd_tx` 送 `AgentCommand::ProcessMessage`。
+1. 用户在 `cc` 客户端输入 → 经 Unix socket 送 `AgentCommand::ProcessMessage`。
 2. `AgentLoop::process_turn`:追加 user `Message` → Session **自动落盘**(0004)。
 3. 取 **Context Working Set**(0023,派生自全量 messages)+ 前置 **System prompt**(AGENTS.md + 目录 + **workgraph 状态摘要**,0020)。
 4. `tokenizer` 精确计 token → `AgentEvent::Context{pct}` 驱动状态栏 `ctx%`。
@@ -59,7 +62,7 @@
    - 执行 → `ToolResult` 回灌 → 再问 LLM,直到无工具调用或触及 `MAX_TOOL_ITERATIONS`。
 7. 无工具调用 → `TurnComplete` → `run()` 循环自动调用 `drive_workgraph()` 推进 workgraph 就绪里程碑(**Plan #2 自动驱动**)。
 
-## 工具体系(26 内置)
+## 工具体系(25 内置)
 
 `Tool` 自报 `Permission`(0018):`None`(只读免问)/ `Ask{key}`(细粒度 key,命令类/前缀甜点区)。**子 agent 只能用 `Permission::None` 的一个只读子集(9 个),且无 `agent`——深度锁 1(0019)。**
 
@@ -128,26 +131,23 @@ codecoder 的「文件系统即自我」覆盖了三层身份与工作/推理层
 - **子 agent 无用户通道** → 只能用 `Permission::None` 工具(没人能答它的权限提问),这是 read-only 的可强制定义。
 - **隔离不静默降级**:Docker 缺失/Wasm 未编译 → 明确报错,绝不偷偷落到宿主。
 
-## TUI(0001/0003/0024)
+## Client-Server UI(0032)
 
-- **全屏托管视口**(alternate screen):放弃原生 scrollback,换任意行可重绘(Reasoning 折叠/Dialog/BROWSE)。
-- **`Mode` 派生**、每帧从子状态算(dialog→help→popup→search→browse→insert),不存字段、不失同步。
-- **事件/动画驱动渲染**:统一 channel 阻塞 recv,空闲零 CPU;动画期 ~20fps tick。
-- 3 区(messages/input/status)+ 活动行;permission/ask **Dialog**、slash/@file **Popup**、search、help、完整 readline;`Enter` 提交 / `Shift+Enter`(Kitty 协议,`Ctrl+J` 兜底)换行。
+- **`ccd` daemon**:长驻服务,监听 Unix socket,管理多 client、session 复用、Registry 共享。
+- **`cc` 客户端**:无状态 CLI,经 stdin/stdout 交互,permission/ask/confirm/plan/trust 弹窗行内 `y/n`。
+- **已移除 ratatui TUI**:原全屏托管视口(Mode/Dialog/Popup/alternate screen)已删除,仅 daemon+cc 两路。
 
 ## ADR 索引
 
-`0001` TUI 键位与 Mode 语义 · `0002` slash 本地派发 · `0003` 中心 Theme · `0004` Session 持久化与迁移 · `0005` 权限 scope 与 allowlist · `0007` prompt 注入 slash · `0015` 统一消息模型 · `0016` channel 拓扑与事件模型 · `0017` provider 中立消息模型 · `0018` Tool trait 与 PermissionKey · `0019` 子 agent 能力边界 · `0020` Skills/Capabilities Registry · `0021` Capability 环境与生命周期 · `0022` 自撰安全回路 · `0023` 上下文压缩 · `0024` TUI 视口与渲染循环 · `0025` Prompt 作为 Skill 草稿层 · `0026` Background Agent · `0027` pi 对照分析 · `0028` 项目信任加载门禁 · `0029` turn steering 与 follow-up · `0031` 拦截中间件边界论证(不做)。
+`0001` TUI 键位与 Mode 语义(已废弃)· `0002` slash 本地派发 · `0003` 中心 Theme(已废弃)· `0004` Session 持久化与迁移 · `0005` 权限 scope 与 allowlist · `0007` prompt 注入 slash · `0015` 统一消息模型 · `0016` channel 拓扑与事件模型 · `0017` provider 中立消息模型 · `0018` Tool trait 与 PermissionKey · `0019` 子 agent 能力边界 · `0020` Skills/Capabilities Registry · `0021` Capability 环境与生命周期 · `0022` 自撰安全回路 · `0023` 上下文压缩 · `0024` TUI 视口与渲染循环(已废弃)· `0025` Prompt 作为 Skill 草稿层 · `0026` Background Agent · `0027` pi 对照分析 · `0028` 项目信任加载门禁 · `0029` turn steering 与 follow-up · `0031` 拦截中间件边界论证(不做)· `0032` client-server 架构 ·
 
 ## 测试与验证边界
 
-- **167 个离线单元/集成测试**(默认套件,hermetic)+ **4 个 `#[ignore]`**(2 Docker e2e + L2 pty 冒烟 + L3 真实 LLM 冒烟;`cargo test -- --ignored`,部分另需门控 env)。Wasm e2e 在默认套件内(纯进程内)。
+- **202 个离线单元/集成测试**(默认套件,hermetic)+ **3 个 `#[ignore]`**(2 Docker e2e + L3 真实 LLM 冒烟;`cargo test -- --ignored`,部分另需门控 env)。Wasm e2e 在默认套件内(纯进程内)。
 - `tests/` 下为**黑盒行为验证分层**:只编译于 `src/lib.rs` 公共 API,驱动真实 `AgentLoop`+真实工具,断言只落三面(`AgentEvent` 流 / 文件系统+git / `ScriptedProvider` 记录的 `CompletionRequest`)。分层与门控开关见 `docs/testing/behavioral-validation.md`。
-- **无法在无 TTY 环境验证 TUI 交互**——需真终端。TUI 观感由人工真机验收。
+- **L2 pty 冒烟测试已删除**(原 TUI 交互验证);client-server 交互由 daemon+`cc` 的手动验收覆盖。
 - token 计数用 tiktoken(准确);`run_command`/`commit` 走真实 `git`/shell(运行期生效)。
 
 ## 交互能力(全部实现)
 
-四种 Dialog 均有触发:`ToolPermission`(权限)· `PlanApproval`(`plan` 工具)· `AskQuestion`(`ask_user`)· `Confirm`(`confirm` 工具,yes/no)。鼠标滚轮滚动 transcript;`F2` 切换鼠标捕获以启用终端原生选择/复制。grep AST 支持 rust/python/javascript/go/c。
-
-自绘选区 copy-mode 有意不做——全屏 TUI 下工程量大、价值低,`F2` 放行原生复制已覆盖需求。
+五种 Dialog 均有触发:`ToolPermission`(权限)· `PlanApproval`(`plan` 工具)· `AskQuestion`(`ask_user`)· `Confirm`(`confirm` 工具,yes/no)· `TrustQuestion`(`trust` 工具)。均经 daemon wire protocol 往返,`cc` 在终端行内显示 `y/n` 提示。grep AST 支持 rust/python/javascript/go/c。

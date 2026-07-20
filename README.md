@@ -11,10 +11,11 @@
 export CODECODER_API_KEY=sk-your-key-here
 export CODECODER_MODEL=gpt-4o  # 默认 gpt-4o
 
-# 2. 启动
-cargo run
+# 2. 启动 daemon + 连接客户端
+CODECODER_DAEMON=1 cargo run  # 启动 ccd daemon
+cargo run --bin cc            # 连接 daemon (cc 客户端)
 
-# 3. 在 REPL 中试试
+# 3. 在客户端中试试
 cc> 列出当前目录的文件
 cc> 搜索 GitHub 上的 Rust Web 框架
 cc> /help      # 查看所有命令
@@ -26,10 +27,11 @@ cc> /exit      # 退出
 不设置 API key 时使用 StubClient（模拟 LLM 响应），可用于测试：
 
 ```bash
-cargo run
+CODECODER_DAEMON=1 cargo run  # 启动 daemon
+cargo run --bin cc            # 连接 (cc 客户端)
 ```
 
-## 内置工具（26 个）
+## 内置工具（25 个）
 
 > **Tool / Skill / Capability 三分**:**Tool** 是编译进二进制的原生原语(下表);**Skill** 是 agent 自撰的 `.md` 程序性知识(改变怎么想);**Capability** 是 agent 自撰的可执行产物(长出新手脚)。**Skill** 另有一个草稿前身 **Prompt**(`prompts/`,经 `promote_prompt` 转正,见 `docs/adr/0025`)。详见 `CONTEXT.md` 与 `docs/adr/0020`–`0022`、`0025`。
 
@@ -126,7 +128,8 @@ project/
 | `CODECODER_MAX_TOKENS` | `4096` | 最大 token 数 |
 | `CODECODER_TEMPERATURE` | `0.7` | 温度参数 |
 | `CODECODER_ROOT` | 当前目录 | 项目根目录 |
-| `CODECODER_BG_TASK` | — | 设置后以 Background Agent headless 模式跑完该 task 即退出（无 TUI、无用户在场；权限走 `codecoder.json` 预授权，见 ADR 0026） |
+| `CODECODER_DAEMON` | — | 设置后以 daemon 模式启动长驻服务（client-server 架构，无 TUI；见 ADR 0032） |
+| `CODECODER_BG_TASK` | — | 设置后以 Background Agent headless 模式跑完该 task 即退出（无 daemon、无用户在场；权限走 `codecoder.json` 预授权，见 ADR 0026） |
 | `CODECODER_DEFAULT_TRUST` | `never` | 无用户在场（headless）时的默认信任策略：`never`/`always`/`once`（见 ADR 0028）。未信任则不加载 `AGENTS.md`/skills/capabilities 与 `codecoder.json` allowlist |
 | `CODECODER_TRUST_FILE` | `~/.codecoder/trust.json` | 全局信任决策存储路径（就近祖先匹配，见 ADR 0028） |
 | `GITHUB_TOKEN` | — | GitHub API token（提升 rate limit） |
@@ -135,9 +138,10 @@ project/
 
 ```bash
 cargo build      # 编译
-cargo test       # 运行 167 个测试（163 通过 + 4 个 #[ignore]：2 Docker e2e + L2 pty + L3 LLM 冒烟）
+cargo test       # 运行 202 个测试（202 通过 + 3 个 #[ignore]：2 Docker e2e + L3 LLM 冒烟）
                  # tests/ 下为黑盒行为验证分层（L1 默认；L2/L3 门控，见 docs/testing/behavioral-validation.md）
-cargo run        # 启动 TUI / REPL
+CODECODER_DAEMON=1 cargo run  # 启动 ccd daemon
+cargo run --bin cc            # 启动 cc 客户端
 ```
 
 ## 架构

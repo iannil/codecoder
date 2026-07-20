@@ -4,6 +4,8 @@
 
 ## Interaction & UI
 
+> **NOTE:** The following terms (Mode, Dialog, Popup, Overlay, Reasoning, Frame, DisplayState) are **legacy TUI concepts** from the pre-client-server architecture. Since ADR 0032 (client-server migration), the UI is handled by the `cc` CLI client over stdin/stdout; permission/ask/confirm/plan/trust dialogs are rendered inline as `y/n` prompts. These terms are kept for historical reference and ADR consistency but no longer represent the current UI implementation.
+
 **Mode**:
 The TUI's current interaction context, governing how key presses are interpreted. Concrete modes: `INSERT` (normal input), `SEARCH` (Ctrl+F), `R-SEARCH` (Ctrl+R reverse search), `DIALOG` (permission/plan/ask overlay open), `HELP`, `MODEL` (model picker), `SLASH` (an input-completion popup is open — either the slash-command list or the `@`-file-completion list; both are non-blocking popups above the input), `BROWSE` (message-list browse after Up/Down on empty input). **Derived, not stored:** `TuiApp` holds no `mode` field — the active mode is *computed each frame* from authoritative sub-state via a fixed precedence chain (dialog → popup → search → browse → INSERT), so "exactly one mode per frame" is structurally true and the mode can never desync from what is actually open. Computing it during render keeps `Frame` read-only. Shown in the status bar. See [[0001-tui-keybinding-and-mode-semantics]].
 _Avoid_: state, screen, view, panel.

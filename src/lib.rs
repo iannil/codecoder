@@ -20,14 +20,11 @@ pub mod tokenizer;
 pub mod trust;
 pub mod workgraph;
 pub mod tool;
-pub mod tui;
 pub mod verify;
 pub mod daemon;
 pub mod client;
 
 use std::sync::Arc;
-use std::sync::mpsc;
-use std::thread;
 
 pub use agent::{AgentCommand, AgentEvent, AgentLoop, PermissionReply, SteerQueue, TrustReply};
 pub use background::BgOutcome;
@@ -72,33 +69,6 @@ pub fn run_background(cfg: Config, task: String) -> anyhow::Result<()> {
     }
     println!("=== summary: {} tools, {} denied ===", outcome.tool_calls.len(), outcome.denied.len());
     Ok(())
-}
-
-/// TUI 入口（ADR 0016/0024）：起 agent 线程 + 跑 ratatui 主循环。
-pub fn run_tui(cfg: Config) -> anyhow::Result<()> {
-    let provider = select_provider(&cfg);
-    let (cmd_tx, cmd_rx) = mpsc::channel::<AgentCommand>();
-    let (event_tx, event_rx) = mpsc::channel::<AgentEvent>();
-
-    let agent = AgentLoop::new(
-        provider,
-        cfg.model.clone(),
-        cfg.max_tokens,
-        cfg.temperature,
-        cfg.root.clone(),
-    );
-    // Clone the cancel token before moving the agent into its thread so the TUI
-    // can interrupt an in-flight turn directly (ADR 0016).
-    let cancel = agent.cancel_token();
-    let steer = agent.steer_handle();
-    let agent_thread = thread::spawn(move || agent.run(cmd_rx, event_tx));
-
-    let result = tui::run::run(cfg.model.clone(), cfg.root.clone(), cmd_tx.clone(), event_rx, cancel, steer);
-
-    let _ = cmd_tx.send(AgentCommand::Shutdown);
-    let _ = agent_thread.join();
-    capability::shutdown_all();
-    result
 }
 
 /// Daemon 入口（client-server 架构）：起长驻 daemon，无 TUI。socket/session 逻辑
