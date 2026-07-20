@@ -30,6 +30,10 @@ impl Daemon {
             self.cfg.root.clone(),
             registry,
         )));
+        // Turn 令牌在 DaemonSessionManager 内创建、所有线程共享同一 Arc clone。
+        // mgr 的 Mutex 在 drain 之前释放（Task 9a：保持多客户端活性），无法用它探测
+        // 「有 turn 在跑」；turn_token 在 drain 全程持有，正是这个信号。
+        let turn_token = mgr.lock().unwrap().turn_token();
         let shutdown = Arc::new(AtomicBool::new(false));
 
         let mut supervisor = crate::capability::Supervisor::start_all(&self.cfg.root)
@@ -51,16 +55,22 @@ impl Daemon {
         };
 
         // workgraph 自动推进线程（first-class citizen #2 的 daemon 级形态）：空闲时推进。
-        // 用户 active turn 优先——通过 try_lock(mgr) 探测：拿不到锁说明有 turn 在跑，skip。
+        // 用户 active turn 优先——通过 try_lock(turn_token) 探测：
+        //   - 用户 turn 在 `drain_agent_events` 全程持有 turn_token（见 socket.rs::handle_connection）；
+        //   - mgr 的 Mutex 不能用于此探测——它在 drain 之前就释放了（Task 9a：多客户端活性）。
+        // 持锁期间推进，确保「turn」与「tick」在 workgraph 上互斥，避免 lost-update。
         let shutdown_c2 = shutdown.clone();
         let cfg_for_wg = self.cfg.clone();
-        let mgr_for_wg = mgr.clone();
+        let turn_token_for_wg = Arc::clone(&turn_token);
         let wg_handle = std::thread::spawn(move || {
             while !shutdown_c2.load(Ordering::SeqCst) {
                 std::thread::sleep(std::time::Duration::from_secs(30));
-                // 仅当无 active turn（mgr 锁可立即取得）时推进
-                if mgr_for_wg.try_lock().is_err() { continue; }
-                // 释放锁后再跑（advance 内部自建 agent，不复用 mgr）
+                // 拿到 token 才推进，且跨整段 advance 持有；拿不到（有 turn 在跑）跳过。
+                let _guard = match turn_token_for_wg.try_lock() {
+                    Ok(g) => g,
+                    Err(_) => continue,
+                };
+                // advance 内部自建 agent，不复用 mgr；故此处不锁 mgr
                 let provider = crate::select_provider(&cfg_for_wg);
                 let _ = crate::background::advance_one_milestone(
                     provider,
@@ -84,8 +94,9 @@ impl Daemon {
             };
             let mgr = mgr.clone();
             let shutdown = shutdown.clone();
+            let turn_token_c = Arc::clone(&turn_token);
             std::thread::spawn(move || {
-                if let Err(e) = socket::handle_connection(stream, &mgr, &shutdown) {
+                if let Err(e) = socket::handle_connection(stream, &mgr, &shutdown, &turn_token_c) {
                     eprintln!("ccd: connection error: {e}");
                 }
             });

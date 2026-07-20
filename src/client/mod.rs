@@ -170,9 +170,10 @@ mod tests {
         let shutdown = Arc::new(AtomicBool::new(false));
         let mgr_c = mgr.clone();
         let shutdown_c = shutdown.clone();
+        let turn_token = mgr.lock().unwrap().turn_token();
         let h = std::thread::spawn(move || {
             let s = server.accept_one().unwrap();
-            crate::daemon::socket::handle_connection(s, &mgr_c, &shutdown_c).unwrap();
+            crate::daemon::socket::handle_connection(s, &mgr_c, &shutdown_c, &turn_token).unwrap();
         });
         std::thread::sleep(std::time::Duration::from_millis(50));
 

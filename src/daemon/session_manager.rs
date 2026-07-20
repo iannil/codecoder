@@ -13,9 +13,8 @@ use std::thread::JoinHandle;
 
 /// 一个被 daemon 托管的 session：发命令用 cmd_tx；agent 线程产出的事件汇总到
 /// `event_rx`（由 forwarder 线程把 AgentEvent 搬到这里）。
-pub struct DaemonSession {
-    pub id: String,
-    pub cmd_tx: Sender<AgentCommand>,
+struct DaemonSession {
+    cmd_tx: Sender<AgentCommand>,
     /// 单一 drainer 串行化同 session 的 turn（Mutex 锁住接收端）。
     event_rx: Arc<std::sync::Mutex<Receiver<AgentEvent>>>,
     _agent: JoinHandle<()>,
@@ -31,6 +30,11 @@ pub struct DaemonSessionManager {
     registry: Arc<Registry>,
     sessions: HashMap<String, DaemonSession>,
     next_seq: u64,
+    /// Turn 令牌：用户 turn 在 `drain_agent_events` 全程持有此 Mutex，
+    /// workgraph tick 线程用 `try_lock` 探测——拿不到说明有 turn 在跑，跳过。
+    /// 这与 `mgr` 的 Mutex 解耦（mgr 锁在 drain 之前释放以保持多客户端活性，
+    /// Task 9a）；两者不可合用，否则又退化成单客户端。
+    turn_token: Arc<std::sync::Mutex<()>>,
 }
 
 impl DaemonSessionManager {
@@ -51,7 +55,13 @@ impl DaemonSessionManager {
             registry,
             sessions: HashMap::new(),
             next_seq: 0,
+            turn_token: Arc::new(std::sync::Mutex::new(())),
         }
+    }
+
+    /// 共享的 turn 令牌：`drain_agent_events` 全程持有，workgraph tick 线程探测。
+    pub fn turn_token(&self) -> Arc<std::sync::Mutex<()>> {
+        self.turn_token.clone()
     }
 
     /// 新建一个 session，返回其 id。agent 线程立刻进入 `run` 阻塞循环等待命令。
@@ -80,7 +90,6 @@ impl DaemonSessionManager {
         self.sessions.insert(
             id.clone(),
             DaemonSession {
-                id: id.clone(),
                 cmd_tx,
                 event_rx: Arc::new(Mutex::new(event_rx)),
                 _agent: forward,
@@ -94,10 +103,6 @@ impl DaemonSessionManager {
         let mut v: Vec<String> = self.sessions.keys().cloned().collect();
         v.sort();
         v
-    }
-
-    pub fn get(&self, id: &str) -> Option<&DaemonSession> {
-        self.sessions.get(id)
     }
 
     /// 通用：向某 session 发一条 AgentCommand，返回该轮原始 AgentEvent 流
@@ -208,6 +213,42 @@ mod tests {
         let (mut mgr, dir) = mgr_with_temp_root();
         let err = mgr.send_message("nope", "x".into()).unwrap_err();
         assert!(format!("{err}").contains("unknown session"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// C1: turn_token 必须 lock 与 try_lock 行为正确，且跨线程互斥。
+    #[test]
+    fn turn_token_locks_and_try_locks_correctly() {
+        let (mgr, dir) = mgr_with_temp_root();
+        let token = mgr.turn_token();
+        let token2 = mgr.turn_token();
+        assert!(Arc::ptr_eq(&token, &token2), "turn_token() returns clones of same Arc");
+
+        // 单线程：可直接 lock、try_lock 成功；持有时 try_lock 失败。
+        {
+            let _g = token.lock().unwrap();
+            assert!(token.try_lock().is_err(), "held token must block try_lock");
+        }
+        assert!(token.try_lock().is_ok(), "released token must be try_lockable");
+
+        // 跨线程互斥：子线程持有 token 期间，主线程 try_lock 必须返回 Err。
+        let token_c = Arc::clone(&token);
+        let barrier = Arc::new(std::sync::Barrier::new(2));
+        let barrier_c = Arc::clone(&barrier);
+        let h = std::thread::spawn(move || {
+            let _g = token_c.lock().unwrap();
+            barrier_c.wait(); // 子线程已持有 token
+            std::thread::sleep(std::time::Duration::from_millis(80));
+            // _g 释放后退出
+        });
+        barrier.wait(); // 子线程已持有 token
+        match token.try_lock() {
+            Err(std::sync::TryLockError::WouldBlock) => (), // 预期：互斥成立
+            other => panic!("expected WouldBlock while other thread holds token, got {other:?}"),
+        }
+        h.join().unwrap();
+        // 子线程释放后，主线程可重新取得
+        assert!(token.try_lock().is_ok(), "token must be re-lockable after holder exits");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

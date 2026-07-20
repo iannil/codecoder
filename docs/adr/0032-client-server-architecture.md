@@ -17,7 +17,7 @@ We adopted a **client-server architecture** with a long-running `ccd` daemon and
 
 ### Core components
 
-- **`ccd` daemon**: A long-running process that manages the `AgentLoop`, `Registry`, sessions, and capabilities. It listens on a Unix socket (`$XDG_RUNTIME_DIR/codecoder.sock` or `/tmp/codecoder.sock`).
+- **`ccd` daemon**: A long-running process that manages the `AgentLoop`, `Registry`, sessions, and capabilities. It listens on a Unix socket at `$CODECODER_ROOT/.ccd.sock` (i.e. `Config.root.join(".ccd.sock")`, see `src/daemon/socket.rs::default_sock_path`; `src/client/mod.rs` matches).
 - **`cc` client**: A lightweight CLI that connects to the daemon via stdin/stdout. It has no state — all session memory lives in the daemon.
 - **Wire protocol**: JSON messages over the Unix socket for commands, events, and the 5 interactive prompts (permission/ask/confirm/plan/trust).
 
@@ -67,6 +67,7 @@ The `cc` binary is invoked separately to connect to the running daemon.
 1. **Startup overhead**: Users must start `ccd` before `cc` (managed by shell aliases or systemd).
 2. **Socket dependency**: Requires Unix socket support (no Windows support without named pipes).
 3. **Migration pain**: Existing users must adapt to the two-process model.
+4. **L4 verify events not yet on the wire**: `AgentEvent::TestSuiteLoaded`, `TestProgress`, `TestSuiteComplete`, `L4ScenarioProgress`, and `L4ExploreProgress` are dropped by `drain_agent_events` — they only fire in L4 verify scenarios and are not surfaced to `cc` clients. `SubAgentMilestone` and `Reasoning` are translated to `ServerEvent::Notice` (prefixed `↳ ` / `💭 `) rather than getting dedicated protocol variants, so styling fidelity is lost.
 
 ### Neutral
 

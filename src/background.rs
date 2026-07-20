@@ -180,7 +180,7 @@ pub fn advance_one_milestone(
 mod tests {
     use super::*;
     use crate::provider::stub::StubClient;
-    use crate::workgraph::{NodeStatus, WorkGraph};
+    use crate::workgraph::WorkGraph;
     use std::sync::Arc;
 
     fn root_with_one_milestone() -> std::path::PathBuf {

@@ -51,6 +51,7 @@ pub fn handle_connection(
     stream: UnixStream,
     mgr: &Mutex<super::session_manager::DaemonSessionManager>,
     shutdown: &std::sync::atomic::AtomicBool,
+    turn_token: &std::sync::Arc<std::sync::Mutex<()>>,
 ) -> anyhow::Result<()> {
     use super::proto::{read_request, write_event, ClientRequest, ServerEvent};
     use std::io::BufWriter;
@@ -74,6 +75,8 @@ pub fn handle_connection(
         ClientRequest::Resume { id } => {
             let rx = g.resume(&id)?;
             drop(g); // release the manager lock BEFORE draining so other clients can proceed
+            // 持有 turn_token 全程——workgraph tick 线程的 try_lock 探测到此即跳过推进。
+            let _turn_guard = turn_token.lock().unwrap();
             drain_agent_events(rx, &mut reader, &mut writer)?;
         }
         ClientRequest::SendMessage { content } => {
@@ -84,6 +87,8 @@ pub fn handle_connection(
             };
             let rx = g.send_message(&id, content)?;
             drop(g); // release the manager lock BEFORE draining so other clients can proceed
+            // 持有 turn_token 全程——workgraph tick 线程的 try_lock 探测到此即跳过推进。
+            let _turn_guard = turn_token.lock().unwrap();
             drain_agent_events(rx, &mut reader, &mut writer)?;
         }
         ClientRequest::Shutdown => {
@@ -178,7 +183,16 @@ fn drain_agent_events(
                 let ans = read_prompt_reply(reader, prompt_id)?;
                 let _ = reply_tx.send(ans.to_trust_reply());
             }
-            // 其他 AgentEvent 变体（Reasoning, SubAgentMilestone, Test*, L4*）保持丢弃（同之前）
+            // Sub-agent 进度（agent/review 工具产出）——以 Notice 转发，保留可见性。
+            Ok(AgentEvent::SubAgentMilestone(s)) => {
+                write_event(writer, &ServerEvent::Notice { text: format!("↳ {s}") })?;
+            }
+            // Chain-of-thought——以 Notice 转发（无独立 wire 变体；ADR 0032 Negative 中记录）。
+            Ok(AgentEvent::Reasoning(s)) => {
+                write_event(writer, &ServerEvent::Notice { text: format!("💭 {s}") })?;
+            }
+            // 其他 AgentEvent 变体（Test*, L4*）仍丢弃：仅 L4 verify 场景产出，
+            // 暂未在 wire 协议中暴露（见 ADR 0032 Negative consequences）。
             Ok(_) => { /* drop unserializable events */ }
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
                 write_event(writer, &ServerEvent::Error {
@@ -238,13 +252,14 @@ mod tests {
         let mgr = Mutex::new(DaemonSessionManager::new(
             Arc::new(StubClient), "gpt-4o".into(), 4096, 0.7, dir.clone(), registry,
         ));
+        let turn_token = mgr.lock().unwrap().turn_token();
         let shutdown = Arc::new(AtomicBool::new(false));
 
         // 服务端线程：accept 一次并处理。
         let shutdown_c = shutdown.clone();
         let h = std::thread::spawn(move || {
             let stream = server.accept_one().unwrap();
-            handle_connection(stream, &mgr, &shutdown_c).unwrap();
+            handle_connection(stream, &mgr, &shutdown_c, &turn_token).unwrap();
         });
 
         // 客户端：连、发 SendMessage、读到 TurnComplete。给服务端一点时间 bind。
