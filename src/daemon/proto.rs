@@ -1,7 +1,7 @@
 // 客户端 ↔ daemon 的可序列化线协议（newline-delimited JSON）。
 // 与进程内 `AgentCommand`/`AgentEvent` 平行存在：后者携带 oneshot Sender，无法 serde，
 // 故 daemon 在两者间翻译。ADR 0016 的通道拓扑不变。
-use serde::{de::DeserializeOwned, Deserialize, Serialize};
+use serde::{Deserialize, Serialize};
 use std::io::{BufRead, Write};
 
 /// 客户端 → daemon 的请求。

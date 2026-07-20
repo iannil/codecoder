@@ -1,7 +1,6 @@
 // Daemon (ADR 待补): 长驻后台进程，管理 N 个 AgentLoop，对外暴露 Unix socket。
 // 本文件随 Task 2 起逐步填充真实逻辑；当前仅提供可空跑的骨架。
 use crate::config::Config;
-use crate::provider::Provider;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
