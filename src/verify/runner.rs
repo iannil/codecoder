@@ -71,12 +71,13 @@ impl VerifyRunner {
         let cancel_clone = Arc::clone(&cancel);
         let (done_tx, done_rx) = channel();
 
-        // Build the cargo test command with `--quiet` so only test-result
-        // lines are printed (no compilation output). We parse the standard
-        // text format since `--format json` requires nightly.
+        // Build the cargo test command. We parse the standard text format
+        // since `--format json` requires nightly.
+        // Note: we intentionally do NOT use `--quiet` here — it suppresses both
+        // the "Running tests/..." header lines (needed for `has_running` detection)
+        // and the individual "test ... ok" lines that our regex parser depends on.
         let mut cmd = Command::new("cargo");
         cmd.arg("test");
-        cmd.arg("--quiet");
         for file in files {
             cmd.arg("--test");
             cmd.arg(file);
