@@ -1,7 +1,6 @@
 // cc 客户端连接模块：连 Unix socket，写 ClientRequest 行，读 ServerEvent 行。
 use crate::config::Config;
 use crate::daemon::proto::{ClientRequest, ServerEvent};
-use crate::registry::Registry;
 use std::io::{BufRead, BufReader};
 use std::os::unix::net::UnixStream;
 use std::path::Path;
