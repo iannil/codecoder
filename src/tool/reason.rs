@@ -17,12 +17,13 @@ impl Tool for Reason {
     }
     fn description(&self) -> &str {
         "Manage inference-tree nodes for root-cause analysis: \
-         action = add | status | margin | list | trace. \
+         action = add | status | margin | list | trace | to_milestone. \
          `add <question>` creates a causal node. \
          `status <id> <hypothesis|locked>` sets verification state. \
          `margin <id> [margin] [leverage] [terminal]` sets metadata. \
          `list` renders the causal tree. \
-         `trace <id>` walks from a node up to the root."
+         `trace <id>` walks from a node up to the root. \
+         `to_milestone <id>` converts a locked node into a workgraph milestone."
     }
     fn schema(&self) -> Value {
         json!({
@@ -30,14 +31,15 @@ impl Tool for Reason {
             "properties": {
                 "action": {
                     "type": "string",
-                    "enum": ["add", "status", "margin", "list", "trace"]
+                    "enum": ["add", "status", "margin", "list", "trace", "to_milestone"]
                 },
                 "id": { "type": "integer" },
                 "question": { "type": "string", "description": "The causal question for `add`" },
                 "status": { "type": "string", "enum": ["hypothesis", "locked"], "description": "Verification state for `status`" },
                 "margin": { "type": "string", "description": "Available margin description" },
                 "leverage": { "type": "string", "description": "Leverage level (high/medium/low)" },
-                "terminal": { "type": "string", "description": "Terminal reason: excluded | natural_law | boundary" }
+                "terminal": { "type": "string", "description": "Terminal reason: excluded | natural_law | boundary" },
+                "milestone_title": { "type": "string", "description": "Optional title for the milestone (default: the node's question)" }
             },
             "required": ["action"]
         })
@@ -53,6 +55,7 @@ impl Tool for Reason {
             "margin" => self.set_margin(args, ctx),
             "list" => self.list(ctx),
             "trace" => self.trace(args, ctx),
+            "to_milestone" => self.to_milestone(args, ctx),
             other => Ok(ToolOutput::err(format!("unknown action: {other}"))),
         }
     }
@@ -81,7 +84,24 @@ impl Reason {
         let mut tree = CausalTree::load(ctx.root);
         if tree.set_status(id, status) {
             tree.save(ctx.root)?;
-            Ok(ToolOutput::ok(format!("node #{id} status → {status}")))
+            // After locking, suggest milestone conversion if margin+leverage are set.
+            let extra = if status == "locked" {
+                if let Some(n) = tree.nodes.iter().find(|n| n.id == id) {
+                    if n.margin.is_some() && n.leverage.is_some() && n.terminal.is_none() {
+                        format!(
+                            "\n\n💡 node #{id} is locked with margin+leverage — \
+                             convert to a workgraph milestone: `reason action=to_milestone id={id}`"
+                        )
+                    } else {
+                        String::new()
+                    }
+                } else {
+                    String::new()
+                }
+            } else {
+                String::new()
+            };
+            Ok(ToolOutput::ok(format!("node #{id} status → {status}{extra}")))
         } else {
             Ok(ToolOutput::err(format!("unknown node id: {id}")))
         }
@@ -115,6 +135,46 @@ impl Reason {
         let Some(id) = id else { return Ok(ToolOutput::err("missing required arg: id")) };
         let tree = CausalTree::load(ctx.root);
         Ok(ToolOutput::ok(tree.render_trace(id)))
+    }
+
+    fn to_milestone(&self, args: Value, ctx: &mut ToolCtx) -> anyhow::Result<ToolOutput> {
+        let id = args.get("id").and_then(Value::as_u64);
+        let Some(id) = id else {
+            return Ok(ToolOutput::err("to_milestone requires `id`"));
+        };
+        let tree = CausalTree::load(ctx.root);
+        let node = tree.nodes.iter().find(|n| n.id == id);
+        let Some(node) = node else {
+            return Ok(ToolOutput::err(format!("unknown node id: {id}")));
+        };
+        if node.status != "locked" {
+            return Ok(ToolOutput::err(format!(
+                "node #{id} is '{status}', must be 'locked' to convert to milestone",
+                status = node.status
+            )));
+        }
+        let title = args.get("milestone_title")
+            .and_then(Value::as_str)
+            .filter(|t| !t.is_empty())
+            .unwrap_or(&node.question)
+            .to_string();
+        let acceptance = format!(
+            "Resolve the causal finding: {}. margin: {} leverage: {}",
+            node.question,
+            node.margin.as_deref().unwrap_or("(unspecified)"),
+            node.leverage.as_deref().unwrap_or("(unspecified)"),
+        );
+
+        let mut wg = crate::workgraph::WorkGraph::read(ctx.root);
+        match wg.add(&title, &acceptance, vec![]) {
+            Ok(new_id) => {
+                wg.save(ctx.root)?;
+                Ok(ToolOutput::ok(format!(
+                    "converted inference node #{id} → workgraph milestone #{new_id}: {title}"
+                )))
+            }
+            Err(e) => Ok(ToolOutput::err(e.to_string())),
+        }
     }
 }
 
@@ -393,6 +453,37 @@ mod tests {
         let out = Reason.run(json!({ "action": "status", "id": 99, "status": "locked" }), &mut ctx).unwrap();
         assert!(out.is_error);
         assert!(out.content.contains("unknown node"));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn to_milestone_requires_locked() {
+        let dir = std::env::temp_dir().join(format!("cc_reason_tm_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut ctx = ToolCtx::new(&dir);
+        // Add a node (starts as hypothesis).
+        Reason.run(json!({ "action": "add", "question": "why?" }), &mut ctx).unwrap();
+        // Try to_milestone on hypothesis → should error.
+        let out = Reason.run(json!({ "action": "to_milestone", "id": 0 }), &mut ctx).unwrap();
+        assert!(out.is_error, "hypothesis node should not convert: {}", out.content);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn to_milestone_creates_milestone_from_locked_node() {
+        let dir = std::env::temp_dir().join(format!("cc_reason_tm2_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut ctx = ToolCtx::new(&dir);
+        Reason.run(json!({ "action": "add", "question": "root cause X" }), &mut ctx).unwrap();
+        Reason.run(json!({ "action": "status", "id": 0, "status": "locked" }), &mut ctx).unwrap();
+        Reason.run(json!({ "action": "margin", "id": 0, "margin": "can fix config", "leverage": "high" }), &mut ctx).unwrap();
+        let out = Reason.run(json!({ "action": "to_milestone", "id": 0 }), &mut ctx).unwrap();
+        assert!(!out.is_error, "to_milestone failed: {}", out.content);
+        assert!(out.content.contains("milestone #1"), "should create milestone #1: {}", out.content);
+        // Verify the workgraph has the new milestone.
+        let wg = crate::workgraph::WorkGraph::read(&dir);
+        assert_eq!(wg.nodes.len(), 1);
+        assert_eq!(wg.nodes[0].title, "root cause X");
         std::fs::remove_dir_all(&dir).ok();
     }
 }
