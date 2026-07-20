@@ -29,7 +29,7 @@ cc> /exit      # 退出
 cargo run
 ```
 
-## 内置工具（25 个）
+## 内置工具（26 个）
 
 > **Tool / Skill / Capability 三分**:**Tool** 是编译进二进制的原生原语(下表);**Skill** 是 agent 自撰的 `.md` 程序性知识(改变怎么想);**Capability** 是 agent 自撰的可执行产物(长出新手脚)。**Skill** 另有一个草稿前身 **Prompt**(`prompts/`,经 `promote_prompt` 转正,见 `docs/adr/0025`)。详见 `CONTEXT.md` 与 `docs/adr/0020`–`0022`、`0025`。
 
@@ -60,6 +60,7 @@ cargo run
 | `ask_user` | 用户交互 |
 | `confirm` | yes/no 确认对话 |
 | `agent` | 子代理调用 |
+| `reason` | 推理树管理（root-cause 分析：add/status/margin/list/trace，持久化到 `causal_tree.json`） |
 
 ## 文件系统即自我
 
@@ -70,6 +71,7 @@ project/
 ├── skills/       ← Skill:.md 程序性知识,Registry 扫描入目录
 ├── capabilities/ ← Capability:agent 自撰的可执行产物 + manifest
 ├── memory/       ← 系统持久化的 key-value 记忆
+├── causal_tree.json ← 推理树（根因分析节点，`reason` 工具管理）
 ├── sessions/     ← 对话历史 JSON 文件
 ├── docs/         ← 设计文档、ADR、审计报告
 │   ├── adr/      ← 架构决策记录
@@ -133,7 +135,7 @@ project/
 
 ```bash
 cargo build      # 编译
-cargo test       # 运行 160 个测试（156 通过 + 4 个 #[ignore]：2 Docker e2e + L2 pty + L3 LLM 冒烟）
+cargo test       # 运行 167 个测试（163 通过 + 4 个 #[ignore]：2 Docker e2e + L2 pty + L3 LLM 冒烟）
                  # tests/ 下为黑盒行为验证分层（L1 默认；L2/L3 门控，见 docs/testing/behavioral-validation.md）
 cargo run        # 启动 TUI / REPL
 ```
