@@ -463,3 +463,19 @@ fn centered(w: u16, h: u16, area: Rect) -> Rect {
     let y = area.y + (area.height.saturating_sub(h)) / 2;
     Rect { x, y, width: w, height: h }
 }
+
+#[cfg(test)]
+mod snapshot_tests {
+    use super::*;
+    use crate::tui::{TuiApp, Block, Dialog, Popup, PopupKind, PermissionDialog, AskDialog, PlanDialog, ConfirmDialog, TrustDialog, Activity, ToolResultView};
+    use ratatui::backend::TestBackend;
+    use ratatui::Terminal;
+
+    /// 在 80×24 TestBackend 上渲染 app 并返回纯文本网格
+    fn render_snapshot(app: &TuiApp) -> String {
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| draw(f, app)).unwrap();
+        terminal.backend().to_string()
+    }
+}
