@@ -494,8 +494,10 @@ fn run_persistent(name: &str, m: &CapabilityManifest, root: &Path) -> anyhow::Re
 
 /// Run an OnDemand capability: starts a process, keeps it alive briefly for
 /// reuse within the same turn, then auto-reaps. OnDemand services are tracked
-/// in the RunningServiceTable with a 5-second idle timeout (checked on each
-/// call; if the prior process has exited, a new one is spawned).
+/// in the RunningServiceTable and checked for liveness on each call (via
+/// `try_wait`); if the prior process has exited, a new one is spawned.
+/// For Wasm, OnDemand behaves as OneShot (no reuse — wasmtime modules are
+/// ephemeral and cheaper to re-instantiate).
 fn run_ondemand(name: &str, m: &CapabilityManifest, root: &Path) -> anyhow::Result<ToolOutput> {
     use crate::capability::{Service, ServiceHandle, services};
     let table = services();
