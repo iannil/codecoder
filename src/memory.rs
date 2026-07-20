@@ -2,6 +2,10 @@
 // across sessions. "Filesystem as self" — each key is a file `memory/<key>`, so
 // memories are individually inspectable/editable. Doubles as the discoverable
 // index of locally-stored data (`data:<name> -> {path, source, fetched, desc}`).
+//
+// **Cross-session by design**: Memory is shared across all sessions within a project
+// because it's a file-level KV store under the project root. Any session can read
+// or write any memory key, enabling long-term knowledge retention across conversations.
 use std::path::{Path, PathBuf};
 
 pub fn dir(root: &Path) -> PathBuf {

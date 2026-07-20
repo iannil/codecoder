@@ -358,9 +358,89 @@ fn write_node(
     }
 }
 
+// ── Cross-Session Inference Tree Collection ─────────────────────────────
+
+/// A cross-session inference node collected from session files' `meta` fields.
+#[derive(Debug, Clone)]
+pub struct CrossSessionNode {
+    /// The session file stem (e.g., "session-1718...")
+    pub session_id: String,
+    /// The message id within the session
+    pub message_id: crate::message::MessageId,
+    /// A brief preview of the message content (first ~60 chars)
+    pub preview: String,
+}
+
+/// Collects all inference-tree hypothesis nodes across all session files.
+/// Scans `sessions/*.json` under `root`, filters entries where `meta.status == "hypothesis"`,
+/// and returns them as `CrossSessionNode` entries with a preview of the message content.
+///
+/// This enables cross-session causal reasoning: an agent can see what hypotheses
+/// were raised in other sessions, enabling follow-up investigation or convergence
+/// of related debugging efforts.
+pub fn collect_cross_session_hypotheses(root: &Path) -> Vec<CrossSessionNode> {
+    use crate::session::{SessionManager, Session, sessions_dir};
+
+    let mut out = Vec::new();
+    let mgr = SessionManager::new(root);
+
+    for meta in mgr.list() {
+        let session_path = sessions_dir(root).join(format!("{}.json", meta.id));
+        // Skip files we can't read (permissions, corruption, etc.)
+        let raw = match std::fs::read_to_string(&session_path) {
+            Ok(r) => r,
+            Err(_) => continue,
+        };
+
+        let session = match Session::load(&raw) {
+            Ok(s) => s,
+            Err(_) => continue,
+        };
+
+        // Collect entries with meta.status == "hypothesis"
+        for entry in &session.entries {
+            let is_hypothesis = entry.meta
+                .as_ref()
+                .and_then(|m| m.get("status"))
+                .and_then(|s| s.as_str())
+                .map(|s| s == "hypothesis")
+                .unwrap_or(false);
+
+            if is_hypothesis {
+                let preview = extract_preview(&entry.message);
+                out.push(CrossSessionNode {
+                    session_id: meta.id.clone(),
+                    message_id: entry.message.id,
+                    preview,
+                });
+            }
+        }
+    }
+
+    out
+}
+
+/// Extract a brief preview from a message (first ~60 characters of text content).
+fn extract_preview(msg: &crate::message::Message) -> String {
+    use crate::message::MessageItem;
+    for item in &msg.items {
+        if let MessageItem::Text { text } = item {
+            let truncated = if text.len() > 60 {
+                format!("{}…", &text[..60])
+            } else {
+                text.clone()
+            };
+            return truncated;
+        }
+    }
+    "(no text preview)".to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::session::{Session, SessionEntry};
+    use crate::message::{Message, Role, MessageItem};
 
     #[test]
     fn add_creates_node_with_hypothesis_status() {
@@ -375,6 +455,78 @@ mod tests {
         assert_eq!(tree.nodes.len(), 1);
         assert_eq!(tree.nodes[0].status, "hypothesis");
         assert_eq!(tree.nodes[0].question, "why is this failing?");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn collect_cross_session_hypotheses_gathers_meta_nodes() {
+        let dir = std::env::temp_dir().join(format!("cc_cross_session_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // Create two session files with hypothesis-meta entries
+        let sessions_dir = dir.join("sessions");
+        std::fs::create_dir_all(&sessions_dir).unwrap();
+
+        // Session 1: Two entries, one with hypothesis status
+        let mut session1 = Session::new("gpt-4o");
+        let msg1 = Message {
+            id: 0,
+            role: Role::User,
+            items: vec![MessageItem::Text { text: "Why is the server slow?".to_string() }],
+        };
+        session1.entries.push(SessionEntry {
+            message: msg1,
+            parent: None,
+            meta: Some(serde_json::json!({"status": "hypothesis"})),
+        });
+
+        let msg2 = Message {
+            id: 1,
+            role: Role::Assistant,
+            items: vec![MessageItem::Text { text: "Let me investigate...".to_string() }],
+        };
+        session1.entries.push(SessionEntry {
+            message: msg2,
+            parent: Some(0),
+            meta: None,
+        });
+        session1.leaf = Some(1);
+
+        let session1_path = sessions_dir.join("session-aaa.json");
+        session1.save(&session1_path).unwrap();
+
+        // Session 2: One entry with hypothesis status
+        let mut session2 = Session::new("gpt-4o");
+        let msg3 = Message {
+            id: 10,
+            role: Role::User,
+            items: vec![MessageItem::Text { text: "Database connection timeout".to_string() }],
+        };
+        session2.entries.push(SessionEntry {
+            message: msg3,
+            parent: None,
+            meta: Some(serde_json::json!({"status": "hypothesis"})),
+        });
+        session2.leaf = Some(10);
+
+        let session2_path = sessions_dir.join("session-bbb.json");
+        session2.save(&session2_path).unwrap();
+
+        // Test the collection function
+        let hypotheses = collect_cross_session_hypotheses(&dir);
+
+        // Should find 2 hypothesis nodes from both sessions
+        assert_eq!(hypotheses.len(), 2, "expected 2 hypotheses, got {}: {:?}", hypotheses.len(), hypotheses);
+
+        // Verify session_id and message_id mapping
+        let h1 = hypotheses.iter().find(|h| h.session_id == "session-aaa" && h.message_id == 0);
+        assert!(h1.is_some(), "should find hypothesis from session-aaa message 0");
+        assert!(h1.unwrap().preview.contains("server slow"), "preview should contain 'server slow': {}", h1.unwrap().preview);
+
+        let h2 = hypotheses.iter().find(|h| h.session_id == "session-bbb" && h.message_id == 10);
+        assert!(h2.is_some(), "should find hypothesis from session-bbb message 10");
+        assert!(h2.unwrap().preview.contains("timeout"), "preview should contain 'timeout': {}", h2.unwrap().preview);
+
         std::fs::remove_dir_all(&dir).ok();
     }
 

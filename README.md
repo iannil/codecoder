@@ -56,11 +56,11 @@ cargo run
 | `review` | 架构审查(只读子 agent → 结构化 Verdict + 漂移 rubric) |
 | `plan` | 任务计划 |
 | `milestone` | 工作图管理（list/add/start/done/needs_fix/next/remove，持久依赖有序） |
-| `memory` | 持久化 key-value 记忆读写 |
+| `memory` | 持久化 key-value 记忆读写（**跨 session 共享**） |
 | `ask_user` | 用户交互 |
 | `confirm` | yes/no 确认对话 |
 | `agent` | 子代理调用 |
-| `reason` | 推理树管理（root-cause 分析：add/status/margin/list/trace，持久化到 `causal_tree.json`） |
+| `reason` | 推理树管理（root-cause 分析：add/status/margin/list/trace，持久化到 `causal_tree.json`，**跨 session 检索 meta 节点**） |
 
 ## 文件系统即自我
 
