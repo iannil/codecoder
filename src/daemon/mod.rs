@@ -83,15 +83,15 @@ impl Daemon {
             }
         });
 
-        // Registry 热重载线程：周期性扫描 skills/capabilities/prompts 的 mtime，变化时重新加载。
-        // 使用 3s 轮询间隔；检测到变化后调用 tick_reload 更新共享 Registry。
+        // Registry 热重载线程：每 3s 无条件重新扫描 skills/capabilities/prompts。
+        // 不再用目录 mtime 作为闸门——POSIX 下目录 mtime 不会因 in-place 编辑而变化，
+        // 会导致内容修改被漏掉。tick_reload 在锁外做磁盘 I/O，锁内只做廉价 swap。
         let root_for_reload = self.cfg.root.clone();
         let shutdown_for_reload = Arc::clone(&shutdown);
         let reload_handle = std::thread::spawn(move || {
-            let mut last = crate::registry::DirMtimes::default();
             while !shutdown_for_reload.load(Ordering::SeqCst) {
                 std::thread::sleep(std::time::Duration::from_secs(3));
-                crate::registry::tick_reload(&registry_for_reload, &root_for_reload, &mut last);
+                crate::registry::tick_reload(&registry_for_reload, &root_for_reload);
             }
         });
 
@@ -125,7 +125,7 @@ impl Daemon {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::registry::{tick_reload, DirMtimes, Registry};
+    use crate::registry::{tick_reload, Registry};
     use std::sync::{Arc, RwLock};
     use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -152,15 +152,12 @@ mod tests {
         let shutdown = Arc::new(AtomicBool::new(false));
         let shutdown_for_thread = shutdown.clone();
         let handle = std::thread::spawn(move || {
-            let mut last = DirMtimes::default();
-            // First tick to record mtimes
-            tick_reload(&reg_for_thread, &root_for_thread, &mut last);
             while !shutdown_for_thread.load(Ordering::SeqCst) {
                 std::thread::sleep(std::time::Duration::from_millis(50)); // fast tick for the test
-                tick_reload(&reg_for_thread, &root_for_thread, &mut last);
+                tick_reload(&reg_for_thread, &root_for_thread);
             }
         });
-        // Give the thread time to start and record initial mtimes
+        // Give the thread time to start
         std::thread::sleep(std::time::Duration::from_millis(20));
         // write a new skill AFTER the loop started
         std::fs::write(

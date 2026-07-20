@@ -298,7 +298,12 @@ impl AgentLoop {
         let trusted = trust == TrustState::Trusted;
         let system_prompt = if trusted {
             match &shared_registry {
-                Some(reg) => build_system_prompt_with_registry(&root, &reg.read().unwrap()),
+                // Render the catalog under a brief read-lock, then DROP the lock
+                // before the disk I/O inside `build_system_prompt_with_catalog`.
+                Some(reg) => {
+                    let catalog = reg.read().unwrap().render_catalog();
+                    build_system_prompt_with_catalog(&root, &catalog)
+                }
                 None => build_system_prompt(&root),
             }
         } else { String::new() };
@@ -345,8 +350,10 @@ impl AgentLoop {
             return;
         }
         if let Some(reg) = &self.shared_registry {
-            let g = reg.read().unwrap();
-            self.system_prompt = build_system_prompt_with_registry(&self.root, &g);
+            // Render the catalog under a brief read-lock, then DROP the lock
+            // before any disk I/O (`AGENTS.md`, `WorkGraph::read`).
+            let catalog = reg.read().unwrap().render_catalog();
+            self.system_prompt = build_system_prompt_with_catalog(&self.root, &catalog);
         }
     }
 
@@ -413,17 +420,21 @@ impl AgentLoop {
                     // Only a trusted project re-scans its disk "self" (ADR 0028);
                     // an untrusted/pending one keeps its empty identity.
                     if self.trust == TrustState::Trusted {
-                        let n = match &self.shared_registry {
-                            Some(reg) => reg.read().unwrap().catalog.len(),
-                            None => Registry::scan(&self.root).catalog.len(),
+                        // Acquire the read-lock ONCE for both `n` (count) and the
+                        // rendered catalog, then DROP it before any disk I/O
+                        // (Critical #2 + Important #4 — avoids both a held-lock-
+                        // across-I/O and a TOCTOU between count and prompt).
+                        let (n, catalog) = match &self.shared_registry {
+                            Some(reg) => {
+                                let g = reg.read().unwrap();
+                                (g.catalog.len(), g.render_catalog())
+                            }
+                            None => {
+                                let r = Registry::scan(&self.root);
+                                (r.catalog.len(), r.render_catalog())
+                            }
                         };
-                        self.system_prompt = match &self.shared_registry {
-                            Some(reg) => build_system_prompt_with_registry(
-                                &self.root,
-                                &reg.read().unwrap(),
-                            ),
-                            None => build_system_prompt(&self.root),
-                        };
+                        self.system_prompt = build_system_prompt_with_catalog(&self.root, &catalog);
                         let _ = event_tx.send(AgentEvent::Notice(format!("reloaded — {n} skills/capabilities in catalog")));
                     } else {
                         let _ = event_tx.send(AgentEvent::Notice("project not trusted; nothing reloaded".into()));
@@ -692,7 +703,6 @@ impl AgentLoop {
     }
 
     fn process_turn(&mut self, text: String, event_tx: &Sender<AgentEvent>) {
-        self.refresh_system_prompt_if_shared();
         // Special message: `/verify` command — run the test suite.
         if text == "__verify__" {
             self.run_verify(event_tx);
@@ -714,6 +724,11 @@ impl AgentLoop {
             // prefixed by the System prompt (AGENTS.md + catalog, ADR 0020).
             let working = self.context_working_set(event_tx);
             let mut messages = Vec::with_capacity(working.len() + 1);
+            // Refresh the system_prompt from the shared Registry JUST BEFORE we
+            // push it as the System message — so non-chat paths (`__verify__`
+            // and other early returns above) skip the refresh, and the refresh
+            // takes effect for the current turn. (Important #5.)
+            self.refresh_system_prompt_if_shared();
             if !self.system_prompt.is_empty() {
                 messages.push(Message::text(u64::MAX, Role::System, self.system_prompt.clone()));
             }
@@ -1240,10 +1255,14 @@ impl AgentLoop {
     }
 }
 
-/// Build the System prompt from AGENTS.md (identity) + the scanned catalog
-/// (ADR 0020). "Filesystem as self": both come from disk, not hardcoded.
-/// 用外部传入的共享 Registry 渲染 system prompt（daemon 路径）。
-fn build_system_prompt_with_registry(root: &std::path::Path, reg: &Registry) -> String {
+/// Build the System prompt from AGENTS.md (identity) + the already-rendered
+/// catalog string (ADR 0020). "Filesystem as self": both come from disk, not
+/// hardcoded. The caller renders the catalog under a brief Registry read-lock
+/// and DROPS that lock before this function does any disk I/O
+/// (`AGENTS.md` read, `WorkGraph::read`) — no `RwLock` guard may span those
+/// reads, otherwise the reload thread's writer would be blocked (and a panic
+/// during I/O would poison the lock).
+fn build_system_prompt_with_catalog(root: &std::path::Path, catalog: &str) -> String {
     let mut parts = Vec::new();
     if let Ok(agents) = std::fs::read_to_string(root.join("AGENTS.md")) {
         let agents = agents.trim();
@@ -1251,9 +1270,8 @@ fn build_system_prompt_with_registry(root: &std::path::Path, reg: &Registry) -> 
             parts.push(agents.to_string());
         }
     }
-    let catalog = reg.render_catalog();
     if !catalog.is_empty() {
-        parts.push(catalog);
+        parts.push(catalog.to_string());
     }
     // Append workgraph status (Plan #2) so the agent is always aware of
     // outstanding milestones. Renders nothing when the graph is empty.
@@ -1267,7 +1285,8 @@ fn build_system_prompt_with_registry(root: &std::path::Path, reg: &Registry) -> 
 
 /// 兼容旧路径：自扫一次。TUI/sub-agent 用此（无共享 Registry）。
 fn build_system_prompt(root: &std::path::Path) -> String {
-    build_system_prompt_with_registry(root, &Registry::scan(root))
+    let catalog = Registry::scan(root).render_catalog();
+    build_system_prompt_with_catalog(root, &catalog)
 }
 
 /// Compact one-line preview of tool args for the transcript (e.g. `path=a.txt`).
@@ -2064,7 +2083,10 @@ mod tests {
             "---\nname: shared-skill\ndescription: a shared skill\n---\nbody",
         ).unwrap();
         let reg = Registry::scan(&dir);
-        let prompt = build_system_prompt_with_registry(&dir, &reg);
+        // Caller renders the catalog (under whatever lock policy it chooses),
+        // then passes the string — disk I/O inside the builder touches no lock.
+        let catalog = reg.render_catalog();
+        let prompt = build_system_prompt_with_catalog(&dir, &catalog);
         assert!(prompt.contains("shared-skill — a shared skill"));
         let _ = std::fs::remove_dir_all(&dir);
     }

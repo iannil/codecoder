@@ -3,7 +3,6 @@
 use crate::trust::{SourceInfo, SourceOrigin, SourceScope};
 use std::path::Path;
 use std::sync::{Arc, RwLock};
-use std::time::SystemTime;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EntryKind {
@@ -84,49 +83,25 @@ impl Registry {
     }
 }
 
-/// Remembered mtimes of the three scanned directories, kept between reload
-/// ticks. `Default` is all-`None` (first tick records without reporting change).
-#[derive(Debug, Default, Clone, PartialEq, Eq)]
-pub struct DirMtimes {
-    pub skills: Option<SystemTime>,
-    pub capabilities: Option<SystemTime>,
-    pub prompts: Option<SystemTime>,
-}
-
-/// Stat `skills/`, `capabilities/`, `prompts/` under `root` and compare to
-/// `last`. Returns `true` iff any observed mtime differs from the previously
-/// remembered value; updates `last` to the just-observed mtimes. The FIRST
-/// observation of a dir (slot was `None`) records the mtime but does NOT count
-/// as a change (the startup scan already populated the Registry). A failed
-/// stat (missing dir) leaves the prior value untouched — the catalog is never
-/// clobbered by a transient stat error.
-pub fn mtime_changed(root: &Path, last: &mut DirMtimes) -> bool {
-    let slots: [(&str, &mut Option<SystemTime>); 3] = [
-        ("skills", &mut last.skills),
-        ("capabilities", &mut last.capabilities),
-        ("prompts", &mut last.prompts),
-    ];
-    let mut changed = false;
-    for (sub, slot) in slots {
-        match root.join(sub).metadata().and_then(|m| m.modified()) {
-            Ok(mtime) => match *slot {
-                None => *slot = Some(mtime),                 // first observation: record, no change
-                Some(prev) if prev != mtime => { *slot = Some(mtime); changed = true; }
-                _ => {}                                       // unchanged
-            },
-            Err(_) => {}                                       // keep prior; no change
-        }
-    }
-    changed
-}
-
-/// If any scanned dir's mtime changed since `last`, re-scan into the shared
-/// Registry under a write lock. Otherwise no-op. Call this on a timer (the
-/// daemon reload thread) — it has no internal clock, so it is directly testable.
-pub fn tick_reload(reg: &Arc<RwLock<Registry>>, root: &Path, last: &mut DirMtimes) {
-    if mtime_changed(root, last) {
-        reg.write().unwrap().reload(root);
-    }
+/// Always re-scan `skills/`/`capabilities/`/`prompts/` and swap the result
+/// into the shared Registry under a brief write lock.
+///
+/// We deliberately do NOT gate on directory mtime: on POSIX filesystems
+/// (macOS APFS, Linux ext4/xfs, …) a directory's mtime changes only when
+/// entries are added/removed/renamed — NOT when an existing file's contents
+/// are overwritten in place. The agent's own tools (`edit_file`, `write_file`,
+/// `generate_skill` on an existing name, `generate_capability` rewriting
+/// `manifest.json`) overwrite in place, so a mtime gate would silently miss
+/// content edits. `Registry::scan` is sub-millisecond for typical projects
+/// (<50 entries), so always rescanning is both simpler and correct.
+///
+/// The disk I/O (`Registry::scan`) runs OUTSIDE the write lock — only the
+/// cheap `catalog` swap is done under the lock, so the reload thread never
+/// blocks agent threads reading the Registry. Call this on a timer (the daemon
+/// reload thread); it has no internal clock, so it is directly testable.
+pub fn tick_reload(reg: &Arc<RwLock<Registry>>, root: &Path) {
+    let fresh = Registry::scan(root);              // disk I/O OUTSIDE the lock
+    reg.write().unwrap().catalog = fresh.catalog;  // cheap swap under the lock
 }
 
 fn scan_skills(dir: &Path, scope: SourceScope, out: &mut Vec<CatalogEntry>) {
@@ -288,45 +263,53 @@ mod tests {
     }
 
     #[test]
-    fn mtime_changed_first_call_records_and_returns_false() {
-        let dir = std::env::temp_dir().join(format!("cc_mtime_first_{}", std::process::id()));
-        std::fs::create_dir_all(dir.join("skills")).unwrap();
-        let mut last = DirMtimes::default();
-        assert!(!mtime_changed(&dir, &mut last), "first call records, no change");
-        assert!(last.skills.is_some(), "skills mtime recorded");
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
     fn tick_reload_picks_up_new_skill() {
         let dir = std::env::temp_dir().join(format!("cc_reload_new_{}", std::process::id()));
         std::fs::create_dir_all(dir.join("skills")).unwrap();
         let reg = Arc::new(RwLock::new(Registry::default()));
-        let mut last = DirMtimes::default();
-        tick_reload(&reg, &dir, &mut last); // records mtimes, catalog empty
+        tick_reload(&reg, &dir); // catalog empty
         assert!(reg.read().unwrap().catalog.is_empty());
         std::fs::write(
             dir.join("skills/x.md"),
             "---\nname: x\ndescription: d\n---\nbody",
         ).unwrap();
-        tick_reload(&reg, &dir, &mut last); // detects change, rescans
+        tick_reload(&reg, &dir); // rescans, detects new file
         let cat = &reg.read().unwrap().catalog;
         assert_eq!(cat.len(), 1);
         assert_eq!(cat[0].name, "x");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// Regression test for the in-place content-edit bug: on POSIX filesystems
+    /// overwriting an existing file's contents does NOT change the parent
+    /// directory's mtime, so the old dir-mtime gate never reloaded. The
+    /// always-rescan `tick_reload` picks the new content up.
     #[test]
-    fn tick_reload_noop_when_unchanged() {
-        let dir = std::env::temp_dir().join(format!("cc_reload_noop_{}", std::process::id()));
+    fn tick_reload_picks_up_edited_skill() {
+        let dir = std::env::temp_dir().join(format!("cc_reload_edit_{}", std::process::id()));
         std::fs::create_dir_all(dir.join("skills")).unwrap();
-        std::fs::write(dir.join("skills/x.md"), "---\nname: x\ndescription: d\n---\nb").unwrap();
+        std::fs::write(
+            dir.join("skills/x.md"),
+            "---\nname: x\ndescription: first\n---\nbody",
+        ).unwrap();
         let reg = Arc::new(RwLock::new(Registry::default()));
-        let mut last = DirMtimes::default();
-        tick_reload(&reg, &dir, &mut last); // loads x
-        let n = reg.read().unwrap().catalog.len();
-        tick_reload(&reg, &dir, &mut last); // no change
-        assert_eq!(reg.read().unwrap().catalog.len(), n);
+        tick_reload(&reg, &dir);
+        {
+            let cat = &reg.read().unwrap().catalog;
+            assert_eq!(cat.len(), 1);
+            assert_eq!(cat[0].description, "first");
+        }
+        // OVERWRITE the same path in place — no entry added/removed/renamed,
+        // so the directory mtime does not change on POSIX. Always-rescan
+        // must still observe the new description.
+        std::fs::write(
+            dir.join("skills/x.md"),
+            "---\nname: x\ndescription: second\n---\nbody",
+        ).unwrap();
+        tick_reload(&reg, &dir);
+        let cat = &reg.read().unwrap().catalog;
+        assert_eq!(cat.len(), 1);
+        assert_eq!(cat[0].description, "second", "in-place edit must propagate");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -335,8 +318,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("cc_reload_missing_{}", std::process::id()));
         // intentionally do NOT create skills/capabilities/prompts
         let reg = Arc::new(RwLock::new(Registry::default()));
-        let mut last = DirMtimes::default();
-        tick_reload(&reg, &dir, &mut last); // must not panic, must not clobber
+        tick_reload(&reg, &dir); // must not panic, must not clobber
         assert!(reg.read().unwrap().catalog.is_empty());
         let _ = std::fs::remove_dir_all(&dir);
     }
