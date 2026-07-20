@@ -22,6 +22,7 @@ pub mod workgraph;
 pub mod tool;
 pub mod tui;
 pub mod verify;
+pub mod daemon;
 
 use std::sync::Arc;
 use std::sync::mpsc;
@@ -72,8 +73,8 @@ pub fn run_background(cfg: Config, task: String) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Kernel wiring (ADR 0016): OS threads + channels; TUI owns the main thread (0024).
-pub fn run(cfg: Config) -> anyhow::Result<()> {
+/// TUI 入口（ADR 0016/0024）：起 agent 线程 + 跑 ratatui 主循环。
+pub fn run_tui(cfg: Config) -> anyhow::Result<()> {
     let provider = select_provider(&cfg);
     let (cmd_tx, cmd_rx) = mpsc::channel::<AgentCommand>();
     let (event_tx, event_rx) = mpsc::channel::<AgentEvent>();
@@ -97,4 +98,11 @@ pub fn run(cfg: Config) -> anyhow::Result<()> {
     let _ = agent_thread.join();
     capability::shutdown_all();
     result
+}
+
+/// Daemon 入口（client-server 架构）：起长驻 daemon，无 TUI。socket/session 逻辑
+/// 在 `daemon::Daemon::run` 中（Task 2 起填充）。
+pub fn run_daemon(cfg: Config) -> anyhow::Result<()> {
+    let daemon = daemon::Daemon::new(cfg);
+    daemon.run()
 }
