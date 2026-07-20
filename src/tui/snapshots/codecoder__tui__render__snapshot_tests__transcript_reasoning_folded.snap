@@ -1,0 +1,28 @@
+---
+source: src/tui/render.rs
+expression: snap
+---
+"  ▸ reasoning (3 lines)                                                         "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"› type a message, or / for commands                                             "
+" INSERT  m  ctx 0%  · ^J newline · ↑ browse · / cmd · ^C quit                   "

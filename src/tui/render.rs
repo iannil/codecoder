@@ -525,4 +525,84 @@ mod snapshot_tests {
         let snap = render_snapshot(&app);
         insta::assert_snapshot!("insert_permission_dialog", snap);
     }
+
+    // ------------------------------------------------------------------
+    // Transcript render snapshot tests (Task 4)
+
+    #[test]
+    fn transcript_empty() {
+        let app = TuiApp::new("m".into(), std::env::temp_dir());
+        let snap = render_snapshot(&app);
+        insta::assert_snapshot!("transcript_empty", snap);
+    }
+
+    #[test]
+    fn transcript_user() {
+        let mut app = TuiApp::new("m".into(), std::env::temp_dir());
+        app.blocks.push(Block::User("hello".into()));
+        let snap = render_snapshot(&app);
+        insta::assert_snapshot!("transcript_user", snap);
+    }
+
+    #[test]
+    fn transcript_assistant() {
+        let mut app = TuiApp::new("m".into(), std::env::temp_dir());
+        app.blocks.push(Block::Assistant("response".into()));
+        let snap = render_snapshot(&app);
+        insta::assert_snapshot!("transcript_assistant", snap);
+    }
+
+    #[test]
+    fn transcript_tool_no_result() {
+        let mut app = TuiApp::new("m".into(), std::env::temp_dir());
+        app.blocks.push(Block::Tool {
+            name: "read_file".into(),
+            preview: "src/main.rs".into(),
+            result: None,
+            folded: true,
+        });
+        let snap = render_snapshot(&app);
+        insta::assert_snapshot!("transcript_tool_no_result", snap);
+    }
+
+    #[test]
+    fn transcript_tool_long_folded() {
+        let mut app = TuiApp::new("m".into(), std::env::temp_dir());
+        let long = (0..15).map(|i| format!("line {i}")).collect::<Vec<_>>().join("\n");
+        app.blocks.push(Block::Tool {
+            name: "run_command".into(),
+            preview: "cargo test".into(),
+            result: Some(ToolResultView { text: long, is_error: false }),
+            folded: true,
+        });
+        let snap = render_snapshot(&app);
+        insta::assert_snapshot!("transcript_tool_long_folded", snap);
+    }
+
+    #[test]
+    fn transcript_reasoning_folded() {
+        let mut app = TuiApp::new("m".into(), std::env::temp_dir());
+        app.blocks.push(Block::Reasoning {
+            text: "thinking about\nthis problem\nstep by step".into(),
+            folded: true,
+        });
+        let snap = render_snapshot(&app);
+        insta::assert_snapshot!("transcript_reasoning_folded", snap);
+    }
+
+    #[test]
+    fn transcript_mixed_blocks() {
+        let mut app = TuiApp::new("m".into(), std::env::temp_dir());
+        app.blocks.push(Block::User("explain the code".into()));
+        app.blocks.push(Block::Reasoning { text: "analyzing…".into(), folded: true });
+        app.blocks.push(Block::Assistant("Here is the analysis:\nThe code does X.".into()));
+        app.blocks.push(Block::Tool {
+            name: "read_file".into(),
+            preview: "src/main.rs".into(),
+            result: Some(ToolResultView { text: "fn main() {}".into(), is_error: false }),
+            folded: true,
+        });
+        let snap = render_snapshot(&app);
+        insta::assert_snapshot!("transcript_mixed_blocks", snap);
+    }
 }
