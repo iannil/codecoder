@@ -76,6 +76,7 @@ mod tests {
     use crate::daemon::session_manager::DaemonSessionManager;
     use crate::daemon::socket::SocketServer;
     use crate::provider::stub::StubClient;
+    use crate::registry::Registry;
     use std::sync::{Arc, Mutex, atomic::AtomicBool};
 
     #[test]

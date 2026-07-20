@@ -32,6 +32,24 @@ impl Daemon {
         )));
         let shutdown = Arc::new(AtomicBool::new(false));
 
+        let mut supervisor = crate::capability::Supervisor::start_all(&self.cfg.root)
+            .unwrap_or_else(|e| {
+                eprintln!("ccd: supervisor init failed: {e}");
+                crate::capability::Supervisor { max_restarts: 3, window_secs: 60, states: Default::default() }
+            });
+
+        // 监督线程：周期 supervise（独立线程，避免阻塞 accept）。
+        let shutdown_c = shutdown.clone();
+        let sup_handle = {
+            std::thread::spawn(move || {
+                while !shutdown_c.load(Ordering::SeqCst) {
+                    supervisor.supervise();
+                    std::thread::sleep(std::time::Duration::from_secs(1));
+                }
+                supervisor.shutdown_all();
+            })
+        };
+
         // 优雅退出：SIGINT/daemon 被 shutdown 请求后，退出时杀常驻 Capability（ADR 0021）。
         while !shutdown.load(Ordering::SeqCst) {
             let stream = match server.accept_one() {
@@ -50,6 +68,7 @@ impl Daemon {
                 }
             });
         }
+        let _ = sup_handle.join();
         crate::capability::shutdown_all();
         Ok(())
     }
