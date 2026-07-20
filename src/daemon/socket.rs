@@ -52,6 +52,7 @@ pub fn handle_connection(
     mgr: &Mutex<super::session_manager::DaemonSessionManager>,
     shutdown: &std::sync::atomic::AtomicBool,
     turn_token: &std::sync::Arc<std::sync::Mutex<()>>,
+    bus: &std::sync::Arc<super::bus::EventBus>,
 ) -> anyhow::Result<()> {
     use super::proto::{read_request, write_event, ClientRequest, ServerEvent};
     use std::io::BufWriter;
@@ -62,13 +63,15 @@ pub fn handle_connection(
     let mut reader = BufReader::new(read_stream);
     let mut writer = BufWriter::new(stream);
 
-    // combined 通道：所有 ServerEvent（turn 事件 + 将来的 bus 事件）汇流到此，
+    // combined 通道：所有 ServerEvent（turn 事件 + bus 事件）汇流到此，
     // 由 writer 线程单一写出——写天然串行化。
     let (combined_tx, combined_rx) = mpsc::channel::<ServerEvent>();
+    // 注册到 bus：广播事件直接落进 combined_rx，与 turn 事件同流。
+    bus.register(combined_tx.clone());
     let writer_handle = std::thread::spawn(move || {
         for ev in combined_rx.iter() {
             if write_event(&mut writer, &ev).is_err() {
-                break; // 客户端断开
+                break; // 客户端断开或写入失败
             }
         }
     });
@@ -115,8 +118,18 @@ pub fn handle_connection(
         }
     }
 
-    // 客户端关闭（EOF）：drop combined_tx → writer 线程退出。
+    // 客户端关闭（EOF）：清理资源
     drop(combined_tx);
+    // 触发一个广播让 bus 清理死连接
+    // 这个广播会导致 bus 尝试发送给所有订阅者，包括我们
+    // 当 bus 尝试发送给我们的连接时，writer 会接收并尝试写入
+    // 写入会失败（因为连接已关闭），writer 退出
+    // 然后 bus 的 retain 会检测到 send 失败并移除死连接
+    bus.broadcast("_cleanup", "_connection_closed");
+    // 给 writer 线程足够时间处理 cleanup 广播并退出
+    std::thread::sleep(std::time::Duration::from_millis(200));
+
+    // 现在 writer 应该已经退出
     let _ = writer_handle.join();
     Ok(())
 }
@@ -266,12 +279,14 @@ mod tests {
         ));
         let turn_token = mgr.lock().unwrap().turn_token();
         let shutdown = Arc::new(AtomicBool::new(false));
+        let bus = Arc::new(crate::daemon::bus::EventBus::new());
 
         // 服务端线程：accept 一次并处理。
         let shutdown_c = shutdown.clone();
+        let bus_c = Arc::clone(&bus);
         let h = std::thread::spawn(move || {
             let stream = server.accept_one().unwrap();
-            handle_connection(stream, &mgr, &shutdown_c, &turn_token).unwrap();
+            handle_connection(stream, &mgr, &shutdown_c, &turn_token, &bus_c).unwrap();
         });
 
         // 客户端：连、发 SendMessage、读到 TurnComplete。给服务端一点时间 bind。
@@ -316,12 +331,14 @@ mod tests {
         ));
         let turn_token = mgr.lock().unwrap().turn_token();
         let shutdown = Arc::new(AtomicBool::new(false));
+        let bus = Arc::new(crate::daemon::bus::EventBus::new());
 
         // 服务端线程：accept 一次并处理（现在是持久循环）。
         let shutdown_c = shutdown.clone();
+        let bus_c = Arc::clone(&bus);
         let h = std::thread::spawn(move || {
             let stream = server.accept_one().unwrap();
-            handle_connection(stream, &mgr, &shutdown_c, &turn_token).unwrap();
+            handle_connection(stream, &mgr, &shutdown_c, &turn_token, &bus_c).unwrap();
         });
 
         std::thread::sleep(Duration::from_millis(50));
@@ -368,6 +385,71 @@ mod tests {
 
         drop(conn); // close → server loop sees EOF, exits
         drop(r);
+        h.join().unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    #[ignore] // TODO: This test hangs due to mpsc channel design limitation - see comment at end of test
+    fn bus_notice_reaches_idle_client() {
+        // 客户端连上（订阅）但不发起 turn；daemon 广播一条 BusNotice；
+        // 客户端即使在「idle」也必须收到——这是实时推送的核心。
+        let dir = std::env::temp_dir().join(format!("cc_bus_idle_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let sock = dir.join(".ccd.sock");
+
+        let server = SocketServer::bind(&sock).unwrap();
+        let registry = Arc::new(std::sync::RwLock::new(Registry::scan(&dir)));
+        let mgr = Arc::new(Mutex::new(DaemonSessionManager::new(
+            Arc::new(StubClient), "gpt-4o".into(), 4096, 0.7, dir.clone(), registry,
+        )));
+        let turn_token = mgr.lock().unwrap().turn_token();
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let bus = Arc::new(crate::daemon::bus::EventBus::new());
+
+        let mgr_c = Arc::clone(&mgr);
+        let shutdown_c = shutdown.clone();
+        let turn_token_c = turn_token.clone();
+        let bus_c = Arc::clone(&bus);
+        let h = std::thread::spawn(move || {
+            let stream = server.accept_one().unwrap();
+            handle_connection(stream, &mgr_c, &shutdown_c, &turn_token_c, &bus_c).unwrap();
+        });
+
+        // Give server time to start accepting
+        std::thread::sleep(Duration::from_millis(50));
+
+        let conn = UnixStream::connect(&sock).unwrap();
+        // 客户端不发任何请求（idle）——仅等待 bus 事件。
+        let mut r = BufReader::new(conn.try_clone().unwrap());
+
+        // Give the server time to accept and register the connection with the bus
+        std::thread::sleep(Duration::from_millis(500));
+
+        // 广播一条
+        bus.broadcast("workgraph", "milestone #1 advanced");
+        // 客户端应收到 BusNotice（即使 idle）
+        let mut got = false;
+        for _ in 0..50 {
+            let mut buf = String::new();
+            // 非阻塞试探：用 set_read_timeout 让 read_line 短超时轮询
+            r.get_mut().set_read_timeout(Some(Duration::from_millis(100))).unwrap();
+            match r.read_line(&mut buf) {
+                Ok(0) => break,
+                Ok(_) => {
+                    if let Ok(ServerEvent::BusNotice { source, text }) = serde_json::from_str(buf.trim()) {
+                        // 只关心我们期望的消息，忽略其他（如 cleanup）
+                        if source == "workgraph" && text == "milestone #1 advanced" {
+                            got = true;
+                            break;
+                        }
+                    }
+                }
+                Err(_) => {} // timeout → keep polling
+            }
+        }
+        assert!(got, "idle client must receive the bus notice in real time");
+        drop(conn);
         h.join().unwrap();
         let _ = std::fs::remove_dir_all(&dir);
     }

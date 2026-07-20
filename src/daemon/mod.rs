@@ -37,6 +37,7 @@ impl Daemon {
         // 「有 turn 在跑」；turn_token 在 drain 全程持有，正是这个信号。
         let turn_token = mgr.lock().unwrap().turn_token();
         let shutdown = Arc::new(AtomicBool::new(false));
+        let bus = Arc::new(crate::daemon::bus::EventBus::new());
 
         let mut supervisor = crate::capability::Supervisor::start_all(&self.cfg.root)
             .unwrap_or_else(|e| {
@@ -109,8 +110,9 @@ impl Daemon {
             let mgr = mgr.clone();
             let shutdown = shutdown.clone();
             let turn_token_c = Arc::clone(&turn_token);
+            let bus_c = Arc::clone(&bus);
             std::thread::spawn(move || {
-                if let Err(e) = socket::handle_connection(stream, &mgr, &shutdown, &turn_token_c) {
+                if let Err(e) = socket::handle_connection(stream, &mgr, &shutdown, &turn_token_c, &bus_c) {
                     eprintln!("ccd: connection error: {e}");
                 }
             });
