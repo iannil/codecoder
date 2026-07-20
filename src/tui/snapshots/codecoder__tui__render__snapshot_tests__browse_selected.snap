@@ -1,0 +1,28 @@
+---
+source: src/tui/render.rs
+expression: snap
+---
+"  ▸ reasoning (2 lines)                                                         "
+"                                                                                "
+"  ▸ reasoning (2 lines)                                                         "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"› type a message, or / for commands                                             "
+" BROWSE  m  ctx 0%  · ↑/↓ select · tab fold · esc exit                          "

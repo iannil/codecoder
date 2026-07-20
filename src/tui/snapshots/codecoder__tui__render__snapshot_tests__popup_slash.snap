@@ -1,0 +1,28 @@
+---
+source: src/tui/render.rs
+expression: snap
+---
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"┌─────────┐                                                                     "
+"│ /resume │                                                                     "
+"│ /reload │                                                                     "
+"└─────────┘                                                                     "
+"› /re                                                                           "
+" SLASH  m  ctx 0%  · ^J newline · ↑ browse · / cmd · ^C quit                    "

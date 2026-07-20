@@ -686,4 +686,174 @@ mod snapshot_tests {
         let snap = render_snapshot(&app);
         insta::assert_snapshot!("dialog_trust", snap);
     }
+
+    // ------------------------------------------------------------------
+    // Search / Browse / Help / Verify / Popup render snapshot tests (Task 6)
+
+    #[test]
+    fn search_active() {
+        let mut app = TuiApp::new("m".into(), std::env::temp_dir());
+        app.begin_search(false);
+        app.search_query = "test".into();
+        let snap = render_snapshot(&app);
+        insta::assert_snapshot!("search_active", snap);
+    }
+
+    #[test]
+    fn search_reverse() {
+        let mut app = TuiApp::new("m".into(), std::env::temp_dir());
+        app.begin_search(true);
+        app.search_query = "test".into();
+        let snap = render_snapshot(&app);
+        insta::assert_snapshot!("search_reverse", snap);
+    }
+
+    #[test]
+    fn browse_selected() {
+        let mut app = TuiApp::new("m".into(), std::env::temp_dir());
+        app.blocks.push(Block::Reasoning { text: "analysis\nline2".into(), folded: true });
+        app.blocks.push(Block::Reasoning { text: "more thoughts\nline2".into(), folded: true });
+        app.browsing = true;
+        app.browse_sel = 0;
+        let snap = render_snapshot(&app);
+        insta::assert_snapshot!("browse_selected", snap);
+    }
+
+    #[test]
+    fn help_open() {
+        let mut app = TuiApp::new("m".into(), std::env::temp_dir());
+        app.help_open = true;
+        let snap = render_snapshot(&app);
+        insta::assert_snapshot!("help_open", snap);
+    }
+
+    #[test]
+    fn verify_running() {
+        let mut app = TuiApp::new("m".into(), std::env::temp_dir());
+        app.verify_state.running = true;
+        app.verify_state.total_tests = 10;
+        app.verify_state.passed = 3;
+        app.verify_state.failed = 1;
+        app.verify_state.completed = 4;
+        // Add one layer with one module with one passed case
+        let state = &mut app.verify_state;
+        state.layers[0].modules.push(crate::verify::state::ModuleState {
+            name: "kernel".into(),
+            cases: vec![
+                crate::verify::state::CaseState {
+                    name: "test_compiles".into(),
+                    status: crate::verify::state::CaseStatus::Passed,
+                    output: Vec::new(),
+                    duration_ms: 120,
+                },
+                crate::verify::state::CaseState {
+                    name: "test_behavior".into(),
+                    status: crate::verify::state::CaseStatus::Failed("assertion failed".into()),
+                    output: vec!["expected: true".into(), "actual: false".into()],
+                    duration_ms: 50,
+                },
+            ],
+            folded: false,
+            passed: 1,
+            failed: 1,
+            skipped: 0,
+            running: 0,
+        });
+        state.layers[0].passed = 1;
+        state.layers[0].failed = 1;
+        let snap = render_snapshot(&app);
+        insta::assert_snapshot!("verify_running", snap);
+    }
+
+    #[test]
+    fn verify_all_passed() {
+        let mut app = TuiApp::new("m".into(), std::env::temp_dir());
+        app.verify_state.total_tests = 5;
+        app.verify_state.passed = 5;
+        app.verify_state.completed = 5;
+        app.verify_state.elapsed_ms = 1200;
+        let state = &mut app.verify_state;
+        state.layers[0].modules.push(crate::verify::state::ModuleState {
+            name: "kernel".into(),
+            cases: vec![
+                crate::verify::state::CaseState {
+                    name: "test_a".into(),
+                    status: crate::verify::state::CaseStatus::Passed,
+                    output: Vec::new(),
+                    duration_ms: 100,
+                },
+            ],
+            folded: false,
+            passed: 1,
+            failed: 0,
+            skipped: 0,
+            running: 0,
+        });
+        state.layers[0].passed = 1;
+        let snap = render_snapshot(&app);
+        insta::assert_snapshot!("verify_all_passed", snap);
+    }
+
+    #[test]
+    fn verify_with_failures() {
+        let mut app = TuiApp::new("m".into(), std::env::temp_dir());
+        app.verify_state.total_tests = 3;
+        app.verify_state.passed = 1;
+        app.verify_state.failed = 2;
+        app.verify_state.completed = 3;
+        app.verify_state.elapsed_ms = 800;
+        let state = &mut app.verify_state;
+        state.layers[0].modules.push(crate::verify::state::ModuleState {
+            name: "tools".into(),
+            cases: vec![
+                crate::verify::state::CaseState {
+                    name: "test_read".into(),
+                    status: crate::verify::state::CaseStatus::Passed,
+                    output: Vec::new(),
+                    duration_ms: 50,
+                },
+                crate::verify::state::CaseState {
+                    name: "test_write".into(),
+                    status: crate::verify::state::CaseStatus::Failed("permission denied".into()),
+                    output: vec!["Error: EACCES".into()],
+                    duration_ms: 30,
+                },
+            ],
+            folded: false,
+            passed: 1,
+            failed: 1,
+            skipped: 0,
+            running: 0,
+        });
+        state.layers[0].passed = 1;
+        state.layers[0].failed = 1;
+        let snap = render_snapshot(&app);
+        insta::assert_snapshot!("verify_with_failures", snap);
+    }
+
+    #[test]
+    fn popup_slash() {
+        let mut app = TuiApp::new("m".into(), std::env::temp_dir());
+        app.input = "/re".into();
+        app.refresh_popup();
+        let snap = render_snapshot(&app);
+        insta::assert_snapshot!("popup_slash", snap);
+    }
+
+    #[test]
+    fn popup_file() {
+        let dir = std::env::temp_dir().join(format!("cc_pop_test_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("notes.txt"), "x").unwrap();
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        std::fs::write(dir.join("src").join("main.rs"), "x").unwrap();
+
+        let mut app = TuiApp::new("m".into(), dir.clone());
+        app.input = "edit @not".into();
+        app.refresh_popup();
+        let snap = render_snapshot(&app);
+        insta::assert_snapshot!("popup_file", snap);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
 }
