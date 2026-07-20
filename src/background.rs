@@ -55,7 +55,6 @@ pub fn run_background(
     root: PathBuf,
     task: String,
 ) -> anyhow::Result<BgOutcome> {
-    use crate::workgraph::{NodeStatus, WorkGraph};
     const MAX_AUTO: usize = 3;
     let mut out = BgOutcome::default();
 
@@ -68,7 +67,7 @@ pub fn run_background(
     out.events.push(format!("task: {label}"));
 
     // Build the agent once; reuse across milestones.
-    let mut agent = AgentLoop::new_background(provider, model, max_tokens, temperature, root.clone());
+    let mut agent = AgentLoop::new_background(provider.clone(), model.clone(), max_tokens, temperature, root.clone());
 
     // Run the first turn (explicit task or first workgraph milestone).
     let (tx, rx) = channel::<AgentEvent>();
@@ -79,47 +78,20 @@ pub fn run_background(
     // If no explicit task was given, auto-advance through more workgraph milestones.
     if task.trim().is_empty() {
         for _ in 0..MAX_AUTO.saturating_sub(1) {
-            let milestone_id = {
-                let g = WorkGraph::read(&root);
-                match g.next_ready() {
-                    Some(n) => n.id,
-                    None => break,
+            match advance_one_milestone(
+                provider.clone(),
+                model.clone(),
+                max_tokens,
+                temperature,
+                root.clone(),
+            )? {
+                None => break,
+                Some(step_out) => {
+                    out.events.extend(step_out.events);
+                    // Note: we don't merge final_text/tool_calls/denied here
+                    // because run_background returns only the first turn's output
+                    // in those fields, preserving the existing behavior.
                 }
-            };
-            let (task_text, title) = {
-                let g = WorkGraph::read(&root);
-                let n = g.get(milestone_id).expect("just read");
-                let t = format!(
-                    "workgraph milestone #{}: {}\nacceptance: {}\n\n\
-                     Complete this milestone, then review your changes and report the \
-                     verdict (pass / needs_fix / rebuild).",
-                    n.id, n.title,
-                    if n.acceptance.is_empty() { "(none)" } else { &n.acceptance },
-                );
-                (t, n.title.clone())
-            };
-            out.events.push(format!("task: workgraph milestone #{} ({})", milestone_id, title));
-            let (tx, rx) = channel::<AgentEvent>();
-            agent.run_one_turn(task_text, &tx);
-            drop(tx);
-            drain_bg_events(rx, &mut out);
-
-            // Auto-writeback: parse verdict and update milestone.
-            let text = &out.final_text.clone();
-            let outcome = crate::review::parse_review(text);
-            if !outcome.unparsed {
-                let mut g = WorkGraph::read(&root);
-                let (status, vs) = match outcome.verdict {
-                    crate::review::Verdict::Pass => (NodeStatus::Done, "pass"),
-                    crate::review::Verdict::NeedsFix => (NodeStatus::NeedsFix, "needs_fix"),
-                    crate::review::Verdict::Rebuild => (NodeStatus::NeedsFix, "rebuild"),
-                };
-                g.set_status(milestone_id, status);
-                if let Some(n) = g.nodes.iter_mut().find(|n| n.id == milestone_id) {
-                    n.verdict = Some(vs.to_string());
-                }
-                let _ = g.save(&root);
-                out.events.push(format!("milestone #{} ({}) auto-updated: {}", milestone_id, title, vs));
             }
         }
     }
@@ -145,5 +117,101 @@ fn drain_bg_events(rx: std::sync::mpsc::Receiver<AgentEvent>, out: &mut BgOutcom
             AgentEvent::SubAgentMilestone(m) => out.events.push(format!("sub-agent: {m}")),
             _ => {}
         }
+    }
+}
+
+/// 推进 workgraph 的下一个就绪里程碑：跑一个 turn、解析 verdict、写回状态。
+/// 无就绪里程碑时返回 `Ok(None)`。daemon 与 background runner 共用此函数。
+pub fn advance_one_milestone(
+    provider: Arc<dyn Provider>,
+    model: String,
+    max_tokens: u32,
+    temperature: f32,
+    root: PathBuf,
+) -> anyhow::Result<Option<BgOutcome>> {
+    use crate::workgraph::{NodeStatus, WorkGraph};
+    let milestone_id = {
+        let g = WorkGraph::read(&root);
+        match g.next_ready() {
+            Some(n) => n.id,
+            None => return Ok(None),
+        }
+    };
+    let (task_text, title) = {
+        let g = WorkGraph::read(&root);
+        let n = g.get(milestone_id).expect("just read");
+        let t = format!(
+            "workgraph milestone #{}: {}\nacceptance: {}\n\n\
+             Complete this milestone, then review your changes and report the \
+             verdict (pass / needs_fix / rebuild).",
+            n.id, n.title,
+            if n.acceptance.is_empty() { "(none)" } else { &n.acceptance },
+        );
+        (t, n.title.clone())
+    };
+    let mut agent = AgentLoop::new_background(provider, model, max_tokens, temperature, root.clone());
+    let mut out = BgOutcome::default();
+    out.events.push(format!("task: workgraph milestone #{} ({})", milestone_id, title));
+    let (tx, rx) = channel::<AgentEvent>();
+    agent.run_one_turn(task_text, &tx);
+    drop(tx);
+    drain_bg_events(rx, &mut out);
+
+    // auto-writeback：解析 verdict 更新里程碑状态
+    let outcome = crate::review::parse_review(&out.final_text);
+    if !outcome.unparsed {
+        let mut g = WorkGraph::read(&root);
+        let (status, vs) = match outcome.verdict {
+            crate::review::Verdict::Pass => (NodeStatus::Done, "pass"),
+            crate::review::Verdict::NeedsFix => (NodeStatus::NeedsFix, "needs_fix"),
+            crate::review::Verdict::Rebuild => (NodeStatus::NeedsFix, "rebuild"),
+        };
+        g.set_status(milestone_id, status);
+        if let Some(n) = g.nodes.iter_mut().find(|n| n.id == milestone_id) {
+            n.verdict = Some(vs.to_string());
+        }
+        let _ = g.save(&root);
+        out.events.push(format!("milestone #{} ({}) auto-updated: {}", milestone_id, title, vs));
+    }
+    Ok(Some(out))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::provider::stub::StubClient;
+    use crate::workgraph::{NodeStatus, WorkGraph};
+    use std::sync::Arc;
+
+    fn root_with_one_milestone() -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("cc_bg_advance_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut g = WorkGraph::default();
+        g.add("do thing", "acceptance", vec![]).unwrap();
+        g.save(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn advance_one_milestone_returns_none_when_empty() {
+        let dir = std::env::temp_dir().join(format!("cc_bg_empty_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let out = advance_one_milestone(
+            Arc::new(StubClient), "gpt-4o".into(), 4096, 0.7, dir.clone(),
+        ).unwrap();
+        assert!(out.is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn advance_one_milestone_runs_a_turn() {
+        let dir = root_with_one_milestone();
+        let out = advance_one_milestone(
+            Arc::new(StubClient), "gpt-4o".into(), 4096, 0.7, dir.clone(),
+        ).unwrap();
+        assert!(out.is_some(), "should run a turn for the ready milestone");
+        let outcome = out.unwrap();
+        assert!(!outcome.final_text.is_empty(), "stub should produce some final text");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

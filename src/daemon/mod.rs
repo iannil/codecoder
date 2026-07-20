@@ -50,6 +50,28 @@ impl Daemon {
             })
         };
 
+        // workgraph 自动推进线程（first-class citizen #2 的 daemon 级形态）：空闲时推进。
+        // 用户 active turn 优先——通过 try_lock(mgr) 探测：拿不到锁说明有 turn 在跑，skip。
+        let shutdown_c2 = shutdown.clone();
+        let cfg_for_wg = self.cfg.clone();
+        let mgr_for_wg = mgr.clone();
+        let wg_handle = std::thread::spawn(move || {
+            while !shutdown_c2.load(Ordering::SeqCst) {
+                std::thread::sleep(std::time::Duration::from_secs(30));
+                // 仅当无 active turn（mgr 锁可立即取得）时推进
+                if mgr_for_wg.try_lock().is_err() { continue; }
+                // 释放锁后再跑（advance 内部自建 agent，不复用 mgr）
+                let provider = crate::select_provider(&cfg_for_wg);
+                let _ = crate::background::advance_one_milestone(
+                    provider,
+                    cfg_for_wg.model.clone(),
+                    cfg_for_wg.max_tokens,
+                    cfg_for_wg.temperature,
+                    cfg_for_wg.root.clone(),
+                );
+            }
+        });
+
         // 优雅退出：SIGINT/daemon 被 shutdown 请求后，退出时杀常驻 Capability（ADR 0021）。
         while !shutdown.load(Ordering::SeqCst) {
             let stream = match server.accept_one() {
@@ -69,6 +91,7 @@ impl Daemon {
             });
         }
         let _ = sup_handle.join();
+        let _ = wg_handle.join();
         crate::capability::shutdown_all();
         Ok(())
     }

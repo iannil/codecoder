@@ -1,6 +1,7 @@
 // Runtime configuration from CODECODER_* env vars (see README.md env table).
 use std::path::PathBuf;
 
+#[derive(Debug, Clone)]
 pub struct Config {
     pub api_key: Option<String>,
     pub model: String,
