@@ -87,10 +87,10 @@ pub fn run_background(
             )? {
                 None => break,
                 Some(step_out) => {
+                    out.final_text.push_str(&step_out.final_text);
+                    out.tool_calls.extend(step_out.tool_calls);
+                    out.denied.extend(step_out.denied);
                     out.events.extend(step_out.events);
-                    // Note: we don't merge final_text/tool_calls/denied here
-                    // because run_background returns only the first turn's output
-                    // in those fields, preserving the existing behavior.
                 }
             }
         }
