@@ -141,6 +141,7 @@ fn drain_bg_events(rx: std::sync::mpsc::Receiver<AgentEvent>, out: &mut BgOutcom
                 }
             }
             AgentEvent::Notice(m) => out.events.push(format!("notice: {m}")),
+            AgentEvent::Context { pct } => out.events.push(format!("context: {pct}%")),
             AgentEvent::SubAgentMilestone(m) => out.events.push(format!("sub-agent: {m}")),
             _ => {}
         }
