@@ -860,4 +860,90 @@ mod tests {
             panic!("expected confirmed=true");
         }
     }
+
+    #[test]
+    fn stream_delta_accumulates() {
+        let (mut app, _token) = app_with_token();
+        handle_agent(&mut app, AgentEvent::StreamDelta("Hello ".into()));
+        handle_agent(&mut app, AgentEvent::StreamDelta("world".into()));
+        handle_agent(&mut app, AgentEvent::StreamDelta("!".into()));
+
+        assert!(app.streaming);
+        assert_eq!(app.blocks.len(), 1);
+        let last = &app.blocks[0];
+        if let Block::Assistant(text) = last {
+            assert_eq!(text, "Hello world!");
+        } else {
+            panic!("expected Assistant block");
+        }
+    }
+
+    #[test]
+    fn tool_started_ends_stream() {
+        let (mut app, _token) = app_with_token();
+        handle_agent(&mut app, AgentEvent::StreamDelta("hello".into()));
+        assert!(app.streaming);
+
+        handle_agent(&mut app, AgentEvent::ToolStarted {
+            name: "read_file".into(),
+            preview: "src/main.rs".into(),
+        });
+
+        assert!(!app.streaming);
+        assert_eq!(app.blocks.len(), 2); // assistant + tool
+        if let Block::Tool { name, result, .. } = &app.blocks[1] {
+            assert_eq!(name, "read_file");
+            assert!(result.is_none());
+        } else {
+            panic!("expected Tool block");
+        }
+    }
+
+    #[test]
+    fn tool_finished_fills_result() {
+        let (mut app, _token) = app_with_token();
+        handle_agent(&mut app, AgentEvent::ToolStarted {
+            name: "read_file".into(),
+            preview: "src/main.rs".into(),
+        });
+        handle_agent(&mut app, AgentEvent::ToolFinished {
+            name: "read_file".into(),
+            is_error: false,
+            output: "fn main() {}".into(),
+        });
+
+        if let Block::Tool { result, folded, .. } = &app.blocks[0] {
+            assert!(result.is_some());
+            assert_eq!(result.as_ref().unwrap().text, "fn main() {}");
+            assert!(!folded, "short result should not be folded");
+        } else {
+            panic!("expected Tool block");
+        }
+    }
+
+    #[test]
+    fn permission_request_opens_dialog() {
+        let (mut app, _token) = app_with_token();
+        let (tx, _rx) = channel::<PermissionReply>();
+        handle_agent(&mut app, AgentEvent::PermissionRequest {
+            key: "write_file".into(),
+            preview: "write test".into(),
+            reply_tx: tx,
+        });
+
+        assert!(app.dialog.is_some());
+        assert!(matches!(app.dialog, Some(Dialog::ToolPermission(_))));
+    }
+
+    #[test]
+    fn turn_complete_clears_activity() {
+        let (mut app, _token) = app_with_token();
+        app.streaming = true;
+        app.activity = Some(Activity { label: "thinking".into(), started: std::time::Instant::now() });
+
+        handle_agent(&mut app, AgentEvent::TurnComplete);
+
+        assert!(!app.streaming);
+        assert!(app.activity.is_none());
+    }
 }
