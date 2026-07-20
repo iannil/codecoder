@@ -55,52 +55,69 @@ pub fn handle_connection(
 ) -> anyhow::Result<()> {
     use super::proto::{read_request, write_event, ClientRequest, ServerEvent};
     use std::io::BufWriter;
+    use std::sync::mpsc;
 
-    let mut reader = BufReader::new(stream.try_clone()?);
+    // 读半归 request-reader（本线程），写半归 writer 线程。
+    let read_stream = stream.try_clone()?;
+    let mut reader = BufReader::new(read_stream);
     let mut writer = BufWriter::new(stream);
 
-    // 简化：单连接只处理第一个请求（M1 足够；REPL 多请求在客户端循环驱动）。
-    let Some(req) = read_request(&mut reader)? else {
-        return Ok(());
-    };
-    let mut g = mgr.lock().unwrap();
-    match req {
-        ClientRequest::NewSession => {
-            let id = g.create();
-            write_event(&mut writer, &ServerEvent::SessionCreated { id })?;
+    // combined 通道：所有 ServerEvent（turn 事件 + 将来的 bus 事件）汇流到此，
+    // 由 writer 线程单一写出——写天然串行化。
+    let (combined_tx, combined_rx) = mpsc::channel::<ServerEvent>();
+    let writer_handle = std::thread::spawn(move || {
+        for ev in combined_rx.iter() {
+            if write_event(&mut writer, &ev).is_err() {
+                break; // 客户端断开
+            }
         }
-        ClientRequest::ListSessions => {
-            write_event(&mut writer, &ServerEvent::Sessions { ids: g.disk_sessions() })?;
-        }
-        ClientRequest::Resume { id } => {
-            let rx = g.resume(&id)?;
-            drop(g); // release the manager lock BEFORE draining so other clients can proceed
-            // 持有 turn_token 全程——workgraph tick 线程的 try_lock 探测到此即跳过推进。
-            let _turn_guard = turn_token.lock().unwrap();
-            drain_agent_events(rx, &mut reader, &mut writer)?;
-        }
-        ClientRequest::SendMessage { content } => {
-            // 没指定 session → 自动取第一个（或新建）。
-            let id = match g.list().first().cloned() {
-                Some(id) => id,
-                None => g.create(),
-            };
-            let rx = g.send_message(&id, content)?;
-            drop(g); // release the manager lock BEFORE draining so other clients can proceed
-            // 持有 turn_token 全程——workgraph tick 线程的 try_lock 探测到此即跳过推进。
-            let _turn_guard = turn_token.lock().unwrap();
-            drain_agent_events(rx, &mut reader, &mut writer)?;
-        }
-        ClientRequest::Shutdown => {
-            shutdown.store(true, std::sync::atomic::Ordering::SeqCst);
-            write_event(&mut writer, &ServerEvent::Notice { text: "shutting down".into() })?;
-        }
-        other => {
-            write_event(&mut writer, &ServerEvent::Error {
-                message: format!("unsupported: {other:?}"),
-            })?;
+    });
+
+    // 持久连接：循环读 ClientRequest，直到客户端关闭（EOF）。
+    while let Some(req) = read_request(&mut reader)? {
+        match req {
+            ClientRequest::SendMessage { content } => {
+                let mut g = mgr.lock().unwrap();
+                let id = match g.list().first().cloned() { Some(id) => id, None => g.create() };
+                let rx = g.send_message(&id, content)?;
+                drop(g); // 释放 mgr 锁，让其它客户端可 NewSession/ListSessions
+                let _turn_guard = turn_token.lock().unwrap();
+                drain_agent_events(rx, &mut reader, &combined_tx)?;
+            }
+            ClientRequest::Resume { id } => {
+                let mut g = mgr.lock().unwrap();
+                let rx = g.resume(&id)?;
+                drop(g);
+                let _turn_guard = turn_token.lock().unwrap();
+                drain_agent_events(rx, &mut reader, &combined_tx)?;
+            }
+            // PromptReply 只应在一个 turn 的 drain 中被内联消费；顶层收到说明协议误用。
+            ClientRequest::PromptReply { .. } => {
+                let _ = combined_tx.send(ServerEvent::Error {
+                    message: "unexpected PromptReply (no prompt pending)".into(),
+                });
+            }
+            ClientRequest::NewSession => {
+                let id = mgr.lock().unwrap().create();
+                let _ = combined_tx.send(ServerEvent::SessionCreated { id });
+            }
+            ClientRequest::ListSessions => {
+                let ids = mgr.lock().unwrap().disk_sessions();
+                let _ = combined_tx.send(ServerEvent::Sessions { ids });
+            }
+            ClientRequest::Shutdown => {
+                shutdown.store(true, std::sync::atomic::Ordering::SeqCst);
+                let _ = combined_tx.send(ServerEvent::Notice { text: "shutting down".into() });
+            }
+            ClientRequest::Status => {
+                let _ = combined_tx.send(ServerEvent::Notice { text: "ccd running".into() });
+            }
         }
     }
+
+    // 客户端关闭（EOF）：drop combined_tx → writer 线程退出。
+    drop(combined_tx);
+    let _ = writer_handle.join();
     Ok(())
 }
 
@@ -109,101 +126,96 @@ pub fn handle_connection(
 fn drain_agent_events(
     rx: std::sync::mpsc::Receiver<crate::agent::AgentEvent>,
     reader: &mut BufReader<UnixStream>,
-    writer: &mut std::io::BufWriter<UnixStream>,
+    combined_tx: &std::sync::mpsc::Sender<super::proto::ServerEvent>,
 ) -> anyhow::Result<()> {
     use crate::agent::AgentEvent;
-    use super::proto::{PromptBody, ServerEvent, write_event};
+    use super::proto::{PromptBody, ServerEvent};
 
     let mut prompt_id = 0u64;
     loop {
         match rx.recv_timeout(std::time::Duration::from_secs(120)) {
             Ok(AgentEvent::StreamDelta(text)) => {
-                write_event(writer, &ServerEvent::StreamDelta { text })?;
+                let _ = combined_tx.send(ServerEvent::StreamDelta { text });
             }
             Ok(AgentEvent::Notice(text)) => {
-                write_event(writer, &ServerEvent::Notice { text })?;
+                let _ = combined_tx.send(ServerEvent::Notice { text });
             }
             Ok(AgentEvent::Context { pct }) => {
-                write_event(writer, &ServerEvent::Context { pct })?;
+                let _ = combined_tx.send(ServerEvent::Context { pct });
             }
             Ok(AgentEvent::ToolStarted { name, preview }) => {
-                write_event(writer, &ServerEvent::ToolStarted { name, preview })?;
+                let _ = combined_tx.send(ServerEvent::ToolStarted { name, preview });
             }
             Ok(AgentEvent::ToolFinished { name, is_error, output }) => {
-                write_event(writer, &ServerEvent::ToolFinished { name, is_error, output })?;
+                let _ = combined_tx.send(ServerEvent::ToolFinished { name, is_error, output });
             }
             Ok(AgentEvent::TurnComplete) => {
-                write_event(writer, &ServerEvent::TurnComplete)?;
+                let _ = combined_tx.send(ServerEvent::TurnComplete);
                 break;
             }
             // ===== Task 9a: 5 种 prompt 事件的内联处理 =====
             Ok(AgentEvent::PermissionRequest { key, preview, reply_tx }) => {
                 prompt_id += 1;
-                write_event(writer, &ServerEvent::Prompt {
-                    id: prompt_id,
-                    body: PromptBody::Permission { key, preview },
-                })?;
+                let _ = combined_tx.send(ServerEvent::Prompt {
+                    id: prompt_id, body: PromptBody::Permission { key, preview },
+                });
                 let ans = read_prompt_reply(reader, prompt_id)?;
                 let _ = reply_tx.send(ans.to_permission_reply());
             }
             Ok(AgentEvent::AskUser { prompt, reply_tx }) => {
                 prompt_id += 1;
-                write_event(writer, &ServerEvent::Prompt {
-                    id: prompt_id,
-                    body: PromptBody::AskUser { prompt },
-                })?;
+                let _ = combined_tx.send(ServerEvent::Prompt {
+                    id: prompt_id, body: PromptBody::AskUser { prompt },
+                });
                 let ans = read_prompt_reply(reader, prompt_id)?;
                 let _ = reply_tx.send(ans.into_text());
             }
             Ok(AgentEvent::Confirm { prompt, reply_tx }) => {
                 prompt_id += 1;
-                write_event(writer, &ServerEvent::Prompt {
-                    id: prompt_id,
-                    body: PromptBody::Confirm { prompt },
-                })?;
+                let _ = combined_tx.send(ServerEvent::Prompt {
+                    id: prompt_id, body: PromptBody::Confirm { prompt },
+                });
                 let ans = read_prompt_reply(reader, prompt_id)?;
                 let _ = reply_tx.send(ans.yes());
             }
             Ok(AgentEvent::PlanApproval { plan, reply_tx }) => {
                 prompt_id += 1;
-                write_event(writer, &ServerEvent::Prompt {
-                    id: prompt_id,
-                    body: PromptBody::PlanApproval { plan },
-                })?;
+                let _ = combined_tx.send(ServerEvent::Prompt {
+                    id: prompt_id, body: PromptBody::PlanApproval { plan },
+                });
                 let ans = read_prompt_reply(reader, prompt_id)?;
                 let _ = reply_tx.send(ans.approved());
             }
             Ok(AgentEvent::TrustPrompt { root, reply_tx }) => {
                 prompt_id += 1;
                 let root_str = root.to_string_lossy().to_string();
-                write_event(writer, &ServerEvent::Prompt {
-                    id: prompt_id,
-                    body: PromptBody::Trust { root: root_str },
-                })?;
+                let _ = combined_tx.send(ServerEvent::Prompt {
+                    id: prompt_id, body: PromptBody::Trust { root: root_str },
+                });
                 let ans = read_prompt_reply(reader, prompt_id)?;
                 let _ = reply_tx.send(ans.to_trust_reply());
             }
             // Sub-agent 进度（agent/review 工具产出）——以 Notice 转发，保留可见性。
             Ok(AgentEvent::SubAgentMilestone(s)) => {
-                write_event(writer, &ServerEvent::Notice { text: format!("↳ {s}") })?;
+                let _ = combined_tx.send(ServerEvent::Notice { text: format!("↳ {s}") });
             }
             // Chain-of-thought——以 Notice 转发（无独立 wire 变体；ADR 0032 Negative 中记录）。
             Ok(AgentEvent::Reasoning(s)) => {
-                write_event(writer, &ServerEvent::Notice { text: format!("💭 {s}") })?;
+                let _ = combined_tx.send(ServerEvent::Notice { text: format!("💭 {s}") });
             }
             // 其他 AgentEvent 变体（Test*, L4*）仍丢弃：仅 L4 verify 场景产出，
             // 暂未在 wire 协议中暴露（见 ADR 0032 Negative consequences）。
             Ok(_) => { /* drop unserializable events */ }
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
-                write_event(writer, &ServerEvent::Error {
+                let _ = combined_tx.send(ServerEvent::Error {
                     message: "turn timed out (agent unresponsive)".into(),
-                })?;
+                });
                 break;
             }
             Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
-                write_event(writer, &ServerEvent::Error {
+                let _ = combined_tx.send(ServerEvent::Error {
                     message: "agent disconnected".into(),
-                })?;
+                });
                 break;
             }
         }
@@ -281,8 +293,82 @@ mod tests {
             events.push(ev);
             if is_done { break; }
         }
-        h.join().unwrap();
         assert!(events.iter().any(|e| matches!(e, ServerEvent::TurnComplete)));
+        // close the client connection so the server's persistent loop sees EOF and exits
+        drop(conn);
+        drop(reader);
+        h.join().unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn multi_turn_on_one_connection() {
+        // 回归：handle_connection 必须在单个连接上处理多个 SendMessage。
+        // 修复前（one-request-per-connection）第二个 turn 会挂死。
+        let dir = std::env::temp_dir().join(format!("cc_multi_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let sock = dir.join(".ccd.sock");
+
+        let server = SocketServer::bind(&sock).unwrap();
+        let registry = Arc::new(std::sync::RwLock::new(Registry::scan(&dir)));
+        let mgr = Mutex::new(DaemonSessionManager::new(
+            Arc::new(StubClient), "gpt-4o".into(), 4096, 0.7, dir.clone(), registry,
+        ));
+        let turn_token = mgr.lock().unwrap().turn_token();
+        let shutdown = Arc::new(AtomicBool::new(false));
+
+        // 服务端线程：accept 一次并处理（现在是持久循环）。
+        let shutdown_c = shutdown.clone();
+        let h = std::thread::spawn(move || {
+            let stream = server.accept_one().unwrap();
+            handle_connection(stream, &mgr, &shutdown_c, &turn_token).unwrap();
+        });
+
+        std::thread::sleep(Duration::from_millis(50));
+        let mut conn = UnixStream::connect(&sock).unwrap();
+        use std::io::Write;
+
+        // turn 1
+        let l1 = serde_json::to_string(&ClientRequest::SendMessage { content: "a".into() }).unwrap();
+        writeln!(conn, "{l1}").unwrap(); conn.flush().unwrap();
+
+        // drain turn 1 to TurnComplete
+        let mut r = BufReader::new(conn.try_clone().unwrap());
+        let mut got_complete = false;
+        let mut event_count = 0;
+        loop {
+            let mut buf = String::new();
+            let n = r.read_line(&mut buf).unwrap();
+            if n == 0 { break; } // EOF
+            event_count += 1;
+            if let Ok(ServerEvent::TurnComplete) = serde_json::from_str(buf.trim()) {
+                got_complete = true;
+                break;
+            }
+        }
+        assert!(got_complete, "turn 1 must complete (got {} events)", event_count);
+
+        // turn 2 (same connection) — this hangs pre-fix
+        let l2 = serde_json::to_string(&ClientRequest::SendMessage { content: "b".into() }).unwrap();
+        writeln!(conn, "{l2}").unwrap(); conn.flush().unwrap();
+
+        let mut got2 = false;
+        let mut event_count2 = 0;
+        loop {
+            let mut buf = String::new();
+            let n = r.read_line(&mut buf).unwrap();
+            if n == 0 { break; } // EOF
+            event_count2 += 1;
+            if let Ok(ServerEvent::TurnComplete) = serde_json::from_str(buf.trim()) {
+                got2 = true;
+                break;
+            }
+        }
+        assert!(got2, "turn 2 must complete on the same connection (REPL multi-turn fix, got {} events)", event_count2);
+
+        drop(conn); // close → server loop sees EOF, exits
+        drop(r);
+        h.join().unwrap();
         let _ = std::fs::remove_dir_all(&dir);
     }
 
