@@ -1,6 +1,6 @@
 # CodeCoder 架构
 
-自主 AI agent,Rust 编写,**事件驱动、文件系统即自我**。本文串起 28 个源模块 ↔ 21 个 ADR ↔ 25 个内置工具 ↔ 6 点自我进化诉求,供人与未来 agent 导航。术语以 `CONTEXT.md` 为准,决策依据见 `docs/adr/`。
+自主 AI agent,Rust 编写,**事件驱动、文件系统即自我**。本文串起 29 个源模块 ↔ 21 个 ADR ↔ 26 个内置工具 ↔ 6 点自我进化诉求,供人与未来 agent 导航。术语以 `CONTEXT.md` 为准,决策依据见 `docs/adr/`。
 
 ## 一句话
 
@@ -30,34 +30,36 @@
 | `config.rs` | `CODECODER_*` 环境变量 | — |
 | `message.rs` | `Message`/`MessageItem`/`MessageId`/`Role`(provider 中立) | 0015 0017 |
 | `provider/{mod,openai,stub}` | `Provider` trait;`OpenAiClient`(chat-completions)/`StubClient` | 0017 |
-| `agent.rs` | `AgentLoop`、turn 循环、工具分派、子 agent、ask_user、reload | 0016 0019 |
-| `background.rs` | Background Agent headless one-shot runner:`run_background` 驱动一个 turn 到结束,汇总为 `BgOutcome`(final_text/tool_calls/denied/events);无用户在场,未授权 Ask 工具自动拒绝 | 0026 |
+| `agent.rs` | `AgentLoop`、turn 循环、工具分派、子 agent、ask_user、reload、**workgraph 自动推进(`drive_workgraph`)** | 0016 0019 |
+| `background.rs` | Background Agent headless one-shot runner;`run_background` 驱动一个 turn 到结束,汇总为 `BgOutcome`;**无显式 task 时从 workgraph 取就绪里程碑推进** | 0026 |
 | `permission.rs` | `PermScope`/`Permission`/`PermissionKey`/`SessionAllowlist` | 0005 0018 |
 | `tool/mod.rs` | `Tool` trait、`Toolbox`(父/子 read-only)、wire schema | 0018 0019 |
-| `tool/builtin.rs` | 文件/执行/自我进化/委派工具 | 0018 0020 0022 |
-| `tool/{net,dev,search,wasm}.rs` | 联网 / 开发 / glob·grep(含 AST)/ wasm 运行器 | 0018 0021 |
-| `session.rs` | `Session`、自动落盘、前向迁移链、`/resume` | 0004 |
-| `compaction.rs` | 派生的 Context Working Set(不毁持久记录)。**tier-1 已实现(丢 Reasoning + 占位化旧 ToolResult 正文,保护 anchor 与近端 tail);tier-2 已实现(tier-1 后仍超阈值时,`AgentLoop::context_working_set` 用一次带缓存的 LLM 调用把最旧跨度摘要为合成 System 消息)** | 0023 |
+| `tool/builtin.rs` | 文件/执行/自我进化/委派/验收工具 | 0018 0020 0022 |
+| `tool/{net,dev,reason,search,wasm}.rs` | 联网 / 开发 / **推理树(reason 工具)** / glob·grep(含 AST)/ wasm 运行器 | 0018 0021 |
+| `session.rs` | `Session`、自动落盘、前向迁移链、`/resume`、**树状会话(Phase A:parent 指针 + leaf)** | 0004 |
+| `compaction.rs` | 派生的 Context Working Set(不毁持久记录)。**tier-1 + tier-2 已实现** | 0023 |
 | `tokenizer.rs` | tiktoken 精确计数 + 模型→窗口表 | 0023 |
-| `registry.rs` | 扫 `skills/`+`prompts/`+`capabilities/` → 常驻目录(prompts 标 `[draft]`) | 0020 0025 |
+| `registry.rs` | 扫 `skills/`+`prompts/`+`capabilities/` → 常驻目录(prompts 标 `[draft]`);**每个条目带 `SourceInfo` 溯源元数据** | 0020 0025 |
 | `capability.rs` | `Environment`/`Lifecycle`/manifest/`RunningServiceTable` | 0021 |
 | `memory.rs` | `memory/<key>` 文件级 KV + 数据索引 | — |
+| `workgraph.rs` | **Work Graph(一等公民 #2)**:持久化、依赖有序的里程碑图,`Milestone` 节点含 `NodeStatus`(含 `Hypothesis`/`Locked`)、`next_ready()` 调度、`render_for_prompt()` 摘要 | 设计文档 |
+| `review.rs` | **结构化验收裁决(一等公民 #4)**:`Verdict`(pass/needs_fix/rebuild)+ 四信号(`foundation`/`over_engineering`/`volume`/`terminology`),纯函数解析 | 设计文档 |
 | `tui/{mod,render,run}` | `TuiApp`/派生 `Mode`/`Theme`/`Dialog`/`Popup`、渲染、主循环 | 0001 0003 0024 |
 
 ## 一个 turn 的生命周期
 
 1. 用户在 TUI 输入 → `cmd_tx` 送 `AgentCommand::ProcessMessage`。
 2. `AgentLoop::process_turn`:追加 user `Message` → Session **自动落盘**(0004)。
-3. 取 **Context Working Set**(0023,派生自全量 messages)+ 前置 **System prompt**(AGENTS.md + 目录,0020)。
+3. 取 **Context Working Set**(0023,派生自全量 messages)+ 前置 **System prompt**(AGENTS.md + 目录 + **workgraph 状态摘要**,0020)。
 4. `tokenizer` 精确计 token → `AgentEvent::Context{pct}` 驱动状态栏 `ctx%`。
 5. `Provider::complete`:中立消息 ↔ OpenAI 线格式翻译(0017);`Reasoning` 不回灌(0004)。
 6. 回复含 `ToolCall` → 逐个**串行**分派(0016):
    - 权限闸门(0018):`None` 直跑;`Ask{key}` 查 allowlist,否则发 `PermissionRequest` **阻塞等 oneshot**。
    - `agent`/`review`/`ask_user` 被 `AgentLoop` **拦截**(需 provider/事件通道)。
    - 执行 → `ToolResult` 回灌 → 再问 LLM,直到无工具调用或触及 `MAX_TOOL_ITERATIONS`。
-7. 无工具调用 → `TurnComplete`。
+7. 无工具调用 → `TurnComplete` → `run()` 循环自动调用 `drive_workgraph()` 推进 workgraph 就绪里程碑(**Plan #2 自动驱动**)。
 
-## 工具体系(25 内置)
+## 工具体系(26 内置)
 
 `Tool` 自报 `Permission`(0018):`None`(只读免问)/ `Ask{key}`(细粒度 key,命令类/前缀甜点区)。**子 agent 只能用 `Permission::None` 的一个只读子集(9 个),且无 `agent`——深度锁 1(0019)。**
 
@@ -75,6 +77,7 @@
 | 开发 | diff | None | ✓ |
 | | commit | Ask(`commit`) | |
 | | plan · milestone(工作图,`workgraph.rs`)· memory | None(本地 scratch) | |
+| 推理 | reason(推理树,`reason.rs` · `causal_tree.json`) | None(本地 scratch) | |
 
 ## 自我进化闭环
 
@@ -100,6 +103,23 @@ agent 深思 → generate_skill / generate_prompt / generate_capability
 
 **6 点诉求映射:** ①`generate_skill`+`use_skill` ②`generate_capability`+`run_capability` ③联网工具+`memory` 数据索引持久化 ④`search_github`+`Shell`/`Docker` Capability ⑤三 Environment ⑥三 Lifecycle。
 
+## 一等公民清单
+
+codecoder 的「文件系统即自我」覆盖了三层身份与工作/推理层:
+
+```
+身份层「agent 是谁」(已落地):
+  - AGENTS.md / CONTEXT.md / skills/ / prompts/ / capabilities/
+  - memory/ 持久 KV · sessions/ 事后记录树(树状,Phase A)
+  - trust 门禁(0028) · SourceInfo 溯源(#6)
+
+工作/推理层「在做什么 / 在想什么」(已落地):
+  - Work Graph(事前构造之图,Plan #2):workgraph.json + milestone 工具 + drive_workgraph 自动驱动
+  - 推理树(事后诊断之树,#3):causal_tree.json + reason 工具 + debug-causal skill
+  - 验收裁决(Review Verdict, #4):review.rs 结构化裁决 + 四信号 rubric
+  - 统一节点模型(NodeStatus: Hypothesis/Locked)
+```
+
 ## 权限与安全
 
 - **PermissionKey** 细到命令类/环境(`run_command:git`、`run_capability:foo@shell`),而非整工具名。
@@ -121,7 +141,7 @@ agent 深思 → generate_skill / generate_prompt / generate_capability
 
 ## 测试与验证边界
 
-- **156 个离线单元/集成测试**(默认套件,hermetic)+ **4 个 `#[ignore]`**(2 Docker e2e + L2 pty 冒烟 + L3 真实 LLM 冒烟;`cargo test -- --ignored`,部分另需门控 env)。Wasm e2e 在默认套件内(纯进程内)。
+- **167 个离线单元/集成测试**(默认套件,hermetic)+ **4 个 `#[ignore]`**(2 Docker e2e + L2 pty 冒烟 + L3 真实 LLM 冒烟;`cargo test -- --ignored`,部分另需门控 env)。Wasm e2e 在默认套件内(纯进程内)。
 - `tests/` 下为**黑盒行为验证分层**:只编译于 `src/lib.rs` 公共 API,驱动真实 `AgentLoop`+真实工具,断言只落三面(`AgentEvent` 流 / 文件系统+git / `ScriptedProvider` 记录的 `CompletionRequest`)。分层与门控开关见 `docs/testing/behavioral-validation.md`。
 - **无法在无 TTY 环境验证 TUI 交互**——需真终端。TUI 观感由人工真机验收。
 - token 计数用 tiktoken(准确);`run_command`/`commit` 走真实 `git`/shell(运行期生效)。

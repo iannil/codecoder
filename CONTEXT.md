@@ -77,7 +77,7 @@ The durable, dependency-ordered graph of **Milestone** nodes, persisted to `work
 _Avoid_: todo list, backlog, plan (plan is the one-shot approval gesture), roadmap.
 
 **Milestone**:
-One node of the Work Graph: `id · title · acceptance · deps · status · verdict? · touched`. `acceptance` is the contract written *before* coding. `status` is `pending / in_progress / blocked / needs_fix / done` — where **`blocked` is DERIVED** from unmet dependencies (recomputed, never the authoritative record of intent), the others set explicitly by an action. `verdict` attaches a **Review Verdict** (from the `review` tool, #4) on acceptance; a non-`pass` verdict lands `needs_fix`, not `done`.
+One node of the Work Graph: `id · title · acceptance · deps · status · verdict? · touched`. `acceptance` is the contract written *before* coding. `status` is `pending / in_progress / blocked / needs_fix / done / hypothesis / locked` — where **`blocked` is DERIVED** from unmet dependencies (recomputed, never the authoritative record of intent), the others set explicitly by an action. `hypothesis` and `locked` are diagnostic-side variants (P2, for future inference-tree use in the workgraph context). `verdict` attaches a **Review Verdict** (from the `review` tool, #4) on acceptance; a non-`pass` verdict lands `needs_fix`, not `done`.
 _Avoid_: task (that word is reserved — see Background Agent / sub-agent), step, ticket, issue.
 
 ## Extensibility & Self-Evolution
@@ -85,7 +85,7 @@ _Avoid_: task (that word is reserved — see Background Agent / sub-agent), step
 These three are the load-bearing distinction of the whole system: **Tool is innate, Skill is a learned idea, Capability is a grown limb.** A Skill only changes *how the agent thinks*; a Capability grows *a new hand that acts*. Confusing them is the single most damaging naming error in the codebase.
 
 **Tool**:
-A primitive compiled into the binary and shipped with the release (25 of them: `read_file`, `run_command`, `agent`, `generate_skill`, `generate_capability`, `promote_prompt`, …). The uniform thing an LLM invokes as a `tool_call` within a turn (see `Tool` trait, [[0018-tool-trait-and-permission-keys]]). Fixed at build time — a runtime-authored executable is **not** a Tool, it is a Capability.
+A primitive compiled into the binary and shipped with the release (26 of them: `read_file`, `run_command`, `agent`, `reason`, `generate_skill`, `generate_capability`, `promote_prompt`, …). The uniform thing an LLM invokes as a `tool_call` within a turn (see `Tool` trait, [[0018-tool-trait-and-permission-keys]]). Fixed at build time — a runtime-authored executable is **not** a Tool, it is a Capability.
 _Avoid_: capability, skill, function, command.
 
 **Skill**:
@@ -141,8 +141,11 @@ One of the four architecture-drift axes a Review Verdict reports, each `ok` / `w
 _Avoid_: check, lint, rule, metric.
 
 **Background Agent**:
-A full agent (its own LLM loop) that runs **autonomously on a schedule with no user present**. Two axes separate the three "runs-in-the-background" concepts: **has an LLM loop?** and **is a user present?** A Background Agent has a loop and no user present; a **Sub-agent** has a loop but a user present (synchronously awaited, read-only); a **Persistent Capability** has *no* LLM loop (it is a long-running service — a limb, not a thinker). **v1 ships a headless one-shot runner** (`CODECODER_BG_TASK=<task>`, see [[0026-background-agent-headless-runner]]): a full-loop agent runs one task with no user present, using pre-authorized `codecoder.json` permissions (any un-authorized Ask-tool is auto-denied, never prompted). Scheduling is external; SIGINT/scheduler/multi-runner limits remain deferred. See [[0019-sub-agent-capability-boundary]].
-_Avoid_: sub-agent (user-present, read-only, synchronously awaited), persistent capability (a service with no LLM loop), daemon, cron, worker.
+A full agent (its own LLM loop) that runs **autonomously on a schedule with no user present**. Two axes separate the three "runs-in-the-background" concepts: **has an LLM loop?** and **is a user present?** A Background Agent has a loop and no user present; a **Sub-agent** has a loop but a user present (synchronously awaited, read-only); a **Persistent Capability** has *no* LLM loop (it is a long-running service — a limb, not a thinker). **v1 ships a headless one-shot runner** (`CODECODER_BG_TASK=<task>`, see [[0026-background-agent-headless-runner]]): a full-loop agent runs one task with no user present, using pre-authorized `codecoder.json` permissions (any un-authorized Ask-tool is auto-denied, never prompted). When `CODECODER_BG_TASK` is unset, the runner falls back to the Work Graph's next ready milestone and auto-advances through up to 3 milestones. Scheduling is external; SIGINT/scheduler/multi-runner limits remain deferred. See [[0019-sub-agent-capability-boundary]].
+
+**Inference Tree** (Causal Tree):
+A persistent, dependency-ordered tree of causal-reasoning nodes for root-cause analysis, stored in `causal_tree.json` (independent from `session.json` and `workgraph.json`). Each node has a `question`, `status` (hypothesis / locked), and optional `margin` / `leverage` / `terminal` metadata. Managed by the `reason` tool (actions: add / status / margin / list / trace). The methodology for using it is in `skills/debug-causal.md`. Forms the "事后诊断之树" half of the diagnostic→construction closed loop, where inference-tree findings (high-margin, high-leverage nodes) are converted into Work Graph milestones via `milestone add`. See `docs/superpowers/specs/2026-07-20-inference-tree-spec.md`.
+_Avoid_: debug tree, trace tree, root-cause tree (use "inference tree" or "causal tree"), reason tree.
 
 ## Code Conventions
 
