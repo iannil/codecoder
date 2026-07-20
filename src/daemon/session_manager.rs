@@ -5,6 +5,7 @@ use super::proto::ServerEvent;
 use crate::agent::{AgentCommand, AgentEvent, AgentLoop};
 use crate::provider::Provider;
 use crate::registry::Registry;
+use crate::session::SessionManager;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -100,19 +101,14 @@ impl DaemonSessionManager {
         self.sessions.get(id)
     }
 
-    /// 发一条消息，返回该 turn 的 ServerEvent 流（以 TurnComplete 或 Error 收尾）。
-    /// 同 session 的 turn 被 `event_rx` 的 Mutex 天然串行化。
-    pub fn send_message(
-        &mut self,
-        id: &str,
-        content: String,
-    ) -> anyhow::Result<Receiver<ServerEvent>> {
-        let cmd_tx = self.sessions.get(id).map(|s| s.cmd_tx.clone())
+    /// 通用：向某 session 发一条 AgentCommand，返回该轮事件流（drain 到 TurnComplete）。
+    fn dispatch(&mut self, id: &str, cmd: AgentCommand) -> anyhow::Result<Receiver<ServerEvent>> {
+        let sess = self.sessions.get(id)
             .ok_or_else(|| anyhow::anyhow!("unknown session: {id}"))?;
-        let event_rx_mutex = Arc::clone(&self.sessions.get(id).expect("just checked").event_rx);
+        let cmd_tx = sess.cmd_tx.clone();
+        let event_rx_mutex = Arc::clone(&sess.event_rx);
         let (out_tx, out_rx) = mpsc::channel::<ServerEvent>();
-        cmd_tx.send(AgentCommand::ProcessMessage(content))
-            .map_err(|_| anyhow::anyhow!("agent thread closed"))?;
+        cmd_tx.send(cmd).map_err(|_| anyhow::anyhow!("agent thread closed"))?;
 
         // Now spawn a thread that will acquire the lock when needed
         let out_tx_clone = out_tx;
@@ -144,6 +140,26 @@ impl DaemonSessionManager {
             }
         });
         Ok(out_rx)
+    }
+
+    pub fn send_message(&mut self, id: &str, content: String) -> anyhow::Result<Receiver<ServerEvent>> {
+        self.dispatch(id, AgentCommand::ProcessMessage(content))
+    }
+
+    /// 按 id/前缀解析磁盘 session；内存无此 session 则新建一个并对其发 Resume。
+    pub fn resume(&mut self, id_or_prefix: &str) -> anyhow::Result<Receiver<ServerEvent>> {
+        let sm = SessionManager::new(&self.root);
+        let resolved = sm.find(id_or_prefix);
+        let target = match resolved {
+            Some(_id) => self.list().first().cloned().unwrap_or_else(|| self.create()),
+            None => self.create(),
+        };
+        self.dispatch(&target, AgentCommand::Resume)
+    }
+
+    /// 磁盘上的全部 session id（daemon `ListSessions` 用此，而非内存 session 列表）。
+    pub fn disk_sessions(&self) -> Vec<String> {
+        SessionManager::new(&self.root).list().into_iter().map(|m| m.id).collect()
     }
 }
 

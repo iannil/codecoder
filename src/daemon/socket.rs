@@ -68,7 +68,15 @@ pub fn handle_connection(
             write_event(&mut writer, &ServerEvent::SessionCreated { id })?;
         }
         ClientRequest::ListSessions => {
-            write_event(&mut writer, &ServerEvent::Sessions { ids: g.list() })?;
+            write_event(&mut writer, &ServerEvent::Sessions { ids: g.disk_sessions() })?;
+        }
+        ClientRequest::Resume { id } => {
+            let rx = g.resume(&id)?;
+            drop(g);
+            for ev in rx.iter() {
+                write_event(&mut writer, &ev)?;
+                if matches!(ev, ServerEvent::TurnComplete) { break; }
+            }
         }
         ClientRequest::SendMessage { content } => {
             // 没指定 session → 自动取第一个（或新建）。

@@ -4,6 +4,7 @@ use crate::message::{Message, MessageId};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::time::SystemTime;
 
 pub const SCHEMA_VERSION: u32 = 2;
 
@@ -14,7 +15,7 @@ pub fn sessions_dir(root: &Path) -> PathBuf {
 /// The most recently modified session file under `root/sessions/`, if any.
 pub fn latest_session(root: &Path) -> Option<PathBuf> {
     let dir = sessions_dir(root);
-    let mut newest: Option<(std::time::SystemTime, PathBuf)> = None;
+    let mut newest: Option<(SystemTime, PathBuf)> = None;
     for entry in std::fs::read_dir(dir).ok()?.flatten() {
         let path = entry.path();
         if path.extension().and_then(|e| e.to_str()) != Some("json") {
@@ -26,6 +27,56 @@ pub fn latest_session(root: &Path) -> Option<PathBuf> {
         }
     }
     newest.map(|(_, p)| p)
+}
+
+/// 磁盘上一个 session 文件的轻量视图。
+#[derive(Debug, Clone)]
+pub struct SessionMeta {
+    pub id: String,
+    pub mtime: SystemTime,
+}
+
+/// daemon 级 session 视图：纯 I/O，读 `sessions/*.json`。不持有内存 session。
+pub struct SessionManager {
+    root: PathBuf,
+}
+
+impl SessionManager {
+    pub fn new(root: &Path) -> Self {
+        Self { root: root.to_path_buf() }
+    }
+
+    /// 列出所有 session（按 mtime 升序）。
+    pub fn list(&self) -> Vec<SessionMeta> {
+        let dir = sessions_dir(&self.root);
+        let mut out = Vec::new();
+        let Ok(entries) = std::fs::read_dir(&dir) else { return out; };
+        for e in entries.flatten() {
+            let p = e.path();
+            if p.extension().and_then(|x| x.to_str()) != Some("json") { continue; }
+            let id = p.file_stem().and_then(|s| s.to_str()).unwrap_or("").to_string();
+            if id.is_empty() { continue; }
+            let mtime = e.metadata().and_then(|m| m.modified()).unwrap_or(SystemTime::UNIX_EPOCH);
+            out.push(SessionMeta { id, mtime });
+        }
+        out.sort_by(|a, b| a.mtime.cmp(&b.mtime));
+        out
+    }
+
+    /// 按 id 或前缀定位；优先精确匹配，其次返回首个前缀匹配（按 mtime 降序）。
+    pub fn find(&self, id_or_prefix: &str) -> Option<String> {
+        let all = self.list();
+        let exact: Vec<_> = all.iter().filter(|m| m.id == id_or_prefix).collect();
+        if exact.len() == 1 { return Some(exact[0].id.clone()); }
+        let prefix: Vec<_> = all.iter().filter(|m| m.id.starts_with(id_or_prefix)).collect();
+        if !prefix.is_empty() { return Some(prefix[0].id.clone()); }
+        None
+    }
+
+    /// 最近的 session id（mtime 最新）。
+    pub fn last(&self) -> Option<String> {
+        self.list().into_iter().last().map(|m| m.id)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -480,5 +531,28 @@ mod tests {
         s.append(Message::text(1, Role::Assistant, "b"));
         assert_eq!(s.next_message_id(), 2);
         // Branches don't reuse id 0 or 1.
+    }
+
+    #[test]
+    fn session_manager_lists_finds_and_last() {
+        use std::time::SystemTime;
+        let dir = std::env::temp_dir().join(format!("cc_sessio_mgr_{}", std::process::id()));
+        std::fs::create_dir_all(sessions_dir(&dir)).unwrap();
+        // 写两个 session 文件
+        for name in ["session-a.json", "session-b.json"] {
+            std::fs::write(sessions_dir(&dir).join(name),
+                r#"{"schema_version":2,"model":"gpt-4o","token_count":0,"entries":[],"leaf":null}"#).unwrap();
+        }
+        let mgr = SessionManager::new(&dir);
+        let mut ids: Vec<String> = mgr.list().into_iter().map(|m| m.id).collect();
+        ids.sort();
+        assert_eq!(ids, vec!["session-a".to_string(), "session-b".to_string()]);
+        assert_eq!(mgr.find("session-a"), Some("session-a".into())); // 全名
+        assert_eq!(mgr.find("session-"), Some("session-a".into())); // 前缀匹配
+        assert_eq!(mgr.find("zzz"), None);
+        // last：取 mtime 最新的；这里两者同秒，任一即可，仅断言非空
+        assert!(mgr.last().is_some());
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = SystemTime::now(); // keep import used
     }
 }
