@@ -159,6 +159,17 @@ impl DaemonSessionManager {
     pub fn disk_sessions(&self) -> Vec<String> {
         SessionManager::new(&self.root).list().into_iter().map(|m| m.id).collect()
     }
+
+    /// 导航活动 session 的 leaf 到 target（`cc fork <id>`）。复用 `AgentCommand::Navigate`：
+    /// agent 改 leaf + Phase C 摘要废弃分支 + 自动落盘，发 Notice + TurnComplete。
+    pub fn navigate(&mut self, session_id: &str, target: u64) -> anyhow::Result<Receiver<AgentEvent>> {
+        self.dispatch(session_id, AgentCommand::Navigate(target))
+    }
+
+    /// 暴露 daemon root 路径（供 socket 层读 session 文件）。
+    pub fn root(&self) -> &std::path::Path {
+        &self.root
+    }
 }
 
 // 上面用到了 std::thread；显式引入避免与 crate 内部歧义。
