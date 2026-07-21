@@ -180,7 +180,9 @@ impl Reason {
     }
 
     fn link(&self, args: Value, ctx: &mut ToolCtx) -> anyhow::Result<ToolOutput> {
-        let id = args.get("id").and_then(Value::as_u64).unwrap_or(0);
+        let Some(id) = args.get("id").and_then(Value::as_u64) else {
+            return Ok(ToolOutput::err("missing required arg: id"));
+        };
         let tree = CausalTree::load(ctx.root);
         if !tree.nodes.iter().any(|n| n.id == id) {
             return Ok(ToolOutput::err(format!("unknown causal node #{id}")));
