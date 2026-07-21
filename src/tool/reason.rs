@@ -17,13 +17,14 @@ impl Tool for Reason {
     }
     fn description(&self) -> &str {
         "Manage inference-tree nodes for root-cause analysis: \
-         action = add | status | margin | list | trace | to_milestone. \
+         action = add | status | margin | list | trace | to_milestone | link. \
          `add <question>` creates a causal node. \
          `status <id> <hypothesis|locked>` sets verification state. \
          `margin <id> [margin] [leverage] [terminal]` sets metadata. \
          `list` renders the causal tree. \
          `trace <id>` walks from a node up to the root. \
-         `to_milestone <id>` converts a locked node into a workgraph milestone."
+         `to_milestone <id>` converts a locked node into a workgraph milestone. \
+         `link <id>` links the current session leaf to a causal node (for hypothesis tracking)."
     }
     fn schema(&self) -> Value {
         json!({
@@ -31,7 +32,7 @@ impl Tool for Reason {
             "properties": {
                 "action": {
                     "type": "string",
-                    "enum": ["add", "status", "margin", "list", "trace", "to_milestone"]
+                    "enum": ["add", "status", "margin", "list", "trace", "to_milestone", "link"]
                 },
                 "id": { "type": "integer" },
                 "question": { "type": "string", "description": "The causal question for `add`" },
@@ -56,6 +57,7 @@ impl Tool for Reason {
             "list" => self.list(ctx),
             "trace" => self.trace(args, ctx),
             "to_milestone" => self.to_milestone(args, ctx),
+            "link" => self.link(args, ctx),
             other => Ok(ToolOutput::err(format!("unknown action: {other}"))),
         }
     }
@@ -176,6 +178,16 @@ impl Reason {
             Err(e) => Ok(ToolOutput::err(e.to_string())),
         }
     }
+
+    fn link(&self, args: Value, ctx: &mut ToolCtx) -> anyhow::Result<ToolOutput> {
+        let id = args.get("id").and_then(Value::as_u64).unwrap_or(0);
+        let tree = CausalTree::load(ctx.root);
+        if !tree.nodes.iter().any(|n| n.id == id) {
+            return Ok(ToolOutput::err(format!("unknown causal node #{id}")));
+        }
+        Ok(ToolOutput::ok(format!("session leaf linked to causal node #{id} (status: hypothesis)"))
+            .with_session_meta_mark(json!({"causal_node": id, "status": "hypothesis"})))
+    }
 }
 
 // ── CausalTree: lightweight persistent tree for inference nodes ────────────
@@ -194,6 +206,8 @@ struct CausalNode {
     leverage: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     terminal: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    ruling: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -236,6 +250,7 @@ impl CausalTree {
             margin: None,
             leverage: None,
             terminal: None,
+            ruling: None,
         });
         id
     }
@@ -317,7 +332,11 @@ impl CausalTree {
                 _ => "?",
             };
             let target = if i == path.len() - 1 { "◀" } else { "↑" };
-            lines.push(format!("{tag} #{} {}  {}", n.id, n.question, target));
+            let mut line = format!("{tag} #{} {}  {}", n.id, n.question, target);
+            if let Some(r) = &n.ruling {
+                line.push_str(&format!(" [ruled out: {r}]"));
+            }
+            lines.push(line);
         }
         lines.join("\n")
     }
@@ -349,6 +368,9 @@ fn write_node(
     if !meta_parts.is_empty() {
         line.push_str(&format!("  [{}]", meta_parts.join(", ")));
     }
+    if let Some(r) = &n.ruling {
+        line.push_str(&format!(" [ruled out: {r}]"));
+    }
     out.push(line);
     // Sort children by id for deterministic rendering.
     let mut sorted = children.get(&Some(n.id)).into_iter().flatten().copied().collect::<Vec<_>>();
@@ -356,6 +378,16 @@ fn write_node(
     for child in sorted {
         write_node(child, depth + 1, children, out);
     }
+}
+
+/// Phase E: record a ruling on a causal node when a session branch exploring it
+/// is abandoned. Loads `causal_tree.json`, sets the node's `ruling`, saves.
+pub fn record_ruling(root: &Path, causal_node_id: u64, ruling: &str) -> anyhow::Result<()> {
+    let mut tree = CausalTree::load(root);
+    let node = tree.nodes.iter_mut().find(|n| n.id == causal_node_id)
+        .ok_or_else(|| anyhow::anyhow!("unknown causal node #{causal_node_id}"))?;
+    node.ruling = Some(ruling.to_string());
+    tree.save(root)
 }
 
 // ── Cross-Session Inference Tree Collection ─────────────────────────────
@@ -636,6 +668,62 @@ mod tests {
         let wg = crate::workgraph::WorkGraph::read(&dir);
         assert_eq!(wg.nodes.len(), 1);
         assert_eq!(wg.nodes[0].title, "root cause X");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn link_returns_session_meta_mark_for_known_node() {
+        let dir = std::env::temp_dir().join(format!("cc_reasonlink_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut ctx = ToolCtx::new(&dir);
+        // create a causal node first
+        let _ = Reason.run(json!({"action":"add","question":"why?"}), &mut ctx).unwrap();
+        // link node 0
+        let out = Reason.run(json!({"action":"link","id":0}), &mut ctx).unwrap();
+        assert!(!out.is_error, "link on known node should succeed");
+        assert_eq!(
+            out.session_meta_mark,
+            Some(json!({"causal_node": 0, "status": "hypothesis"})),
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn link_unknown_node_errors_without_mark() {
+        let dir = std::env::temp_dir().join(format!("cc_reasonlink2_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut ctx = ToolCtx::new(&dir);
+        let out = Reason.run(json!({"action":"link","id":99}), &mut ctx).unwrap();
+        assert!(out.is_error, "link on unknown node should error");
+        assert!(out.session_meta_mark.is_none(), "no mark on error");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn record_ruling_writes_to_causal_node() {
+        let dir = std::env::temp_dir().join(format!("cc_recordruling_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut ctx = ToolCtx::new(&dir);
+        let _ = Reason.run(json!({"action":"add","question":"why?"}), &mut ctx).unwrap();
+        record_ruling(&dir, 0, "ruled out: too slow").unwrap();
+        let tree = CausalTree::load(&dir);
+        let node = tree.nodes.iter().find(|n| n.id == 0).unwrap();
+        assert_eq!(node.ruling.as_deref(), Some("ruled out: too slow"));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn causal_tree_loads_old_file_without_ruling() {
+        // an old causal_tree.json with no `ruling` fields still loads
+        let dir = std::env::temp_dir().join(format!("cc_oldruling_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("causal_tree.json"),
+            r#"{"nodes":[{"id":1,"question":"q","status":"hypothesis"}],"next_id":2}"#,
+        ).unwrap();
+        let tree = CausalTree::load(&dir);
+        assert_eq!(tree.nodes.len(), 1);
+        assert!(tree.nodes[0].ruling.is_none(), "old file: ruling defaults to None");
         std::fs::remove_dir_all(&dir).ok();
     }
 }
