@@ -31,7 +31,7 @@ CODECODER_DAEMON=1 cargo run  # 启动 daemon
 cargo run --bin cc            # 连接 (cc 客户端)
 ```
 
-## 内置工具（25 个）
+## 内置工具（26 个）
 
 > **Tool / Skill / Capability 三分**:**Tool** 是编译进二进制的原生原语(下表);**Skill** 是 agent 自撰的 `.md` 程序性知识(改变怎么想);**Capability** 是 agent 自撰的可执行产物(长出新手脚)。**Skill** 另有一个草稿前身 **Prompt**(`prompts/`,经 `promote_prompt` 转正,见 `docs/adr/0025`)。详见 `CONTEXT.md` 与 `docs/adr/0020`–`0022`、`0025`。
 

@@ -1,6 +1,6 @@
 # CodeCoder 架构
 
-自主 AI agent,Rust 编写,**事件驱动、文件系统即自我**。本文串起 27 个源模块 ↔ 21 个 ADR ↔ 25 个内置工具 ↔ 6 点自我进化诉求,供人与未来 agent 导航。术语以 `CONTEXT.md` 为准,决策依据见 `docs/adr/`。
+自主 AI agent,Rust 编写,**事件驱动、文件系统即自我**。本文串起 41 个源文件 ↔ 23 个 ADR ↔ 26 个内置工具 ↔ 6 点自我进化诉求,供人与未来 agent 导航。术语以 `CONTEXT.md` 为准,决策依据见 `docs/adr/`。
 
 ## 一句话
 
@@ -42,12 +42,12 @@
 | `compaction.rs` | 派生的 Context Working Set(不毁持久记录)。**tier-1 + tier-2 已实现** | 0023 |
 | `tokenizer.rs` | tiktoken 精确计数 + 模型→窗口表 | 0023 |
 | `registry.rs` | 扫 `skills/`+`prompts/`+`capabilities/` → 常驻目录(prompts 标 `[draft]`);**每个条目带 `SourceInfo` 溯源元数据** | 0020 0025 |
-| `capability.rs` | `Environment`/`Lifecycle`/manifest/`RunningServiceTable` | 0021 |
+| `capability.rs` | `Environment`/`Lifecycle`/manifest/`RunningServiceTable`、`Supervisor`(Persistent 服务崩溃→标记 Failed 可见,**不自动重启**,0021) | 0021 |
 | `memory.rs` | `memory/<key>` 文件级 KV + 数据索引(**跨 session 共享**) | — |
 | `workgraph.rs` | **Work Graph(一等公民 #2)**:持久化、依赖有序的里程碑图,`Milestone` 节点含 `NodeStatus`(含 `Hypothesis`/`Locked`)、`next_ready()` 调度、`render_for_prompt()` 摘要 | 设计文档 |
 | `review.rs` | **结构化验收裁决(一等公民 #4)**:`Verdict`(pass/needs_fix/rebuild)+ 四信号(`foundation`/`over_engineering`/`volume`/`terminology`),纯函数解析 | 设计文档 |
-| `daemon.rs` | **Daemon(长驻服务)**:Unix socket 监听、多 client 复用、session 管理、permission/ask/confirm/plan/trust 往返 wire protocol | 0032 |
-| `client.rs` | **cc 客户端**:daemon 连接、stdin→消息、消息→stdout 格式化、permission 弹窗行内 `y/n` | 0032 |
+| `daemon/{mod,bus,proto,session_manager,socket}` | **Daemon(长驻服务)**:Unix socket 监听、多 client 复用、session 管理、permission/ask/confirm/plan/trust 往返 wire protocol | 0032 |
+| `client/mod.rs` | **cc 客户端**:daemon 连接、stdin→消息、消息→stdout 格式化、permission 弹窗行内 `y/n` | 0032 |
 
 ## 一个 turn 的生命周期
 

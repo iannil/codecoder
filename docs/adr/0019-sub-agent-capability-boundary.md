@@ -1,6 +1,17 @@
-# Sub-agent capability boundary = the Permission::None tool set
+# Sub-agent capability boundary = a curated side-effect-free tool set
 
-A sub-agent's "read-only by contract" is given a precise, enforced meaning: **its tool set is exactly the tools returning `Permission::None`** (`read_file`, `glob`, `grep`, `list_directory`, `search_web`, `search_github`, `reverse_api`), plus no `ask_user`. This falls out of a structural fact rather than a policy choice.
+A sub-agent's "read-only by contract" is given a precise, enforced meaning: **its tool set is a curated subset of the tools returning `Permission::None`** — the side-effect-free ones (`read_file`, `list_directory`, `glob`, `grep`, `search_web`, `search_github`, `reverse_api`, `use_skill`, `diff`), plus no `ask_user`. This falls out of a structural fact rather than a policy choice: a sub-agent has no user to answer a permission prompt, so any tool that would prompt is simply absent.
+
+## Why "curated subset" and not "all Permission::None"
+
+`Permission::None` gates **prompting**; it is not a guarantee of no side effects. A few tools never prompt yet **persist state to disk**, which would violate the read-only intent of delegation and are therefore deliberately excluded from `Toolbox::read_only_child()`:
+
+- `reason` writes `causal_tree.json`,
+- `milestone` writes `workgraph.json`,
+- `memory` writes the persistent key-value store,
+- and any write/execute tool (which prompts anyway).
+
+The boundary the sub-agent enforces is "no prompt AND no persistent side effect," not merely "no prompt."
 
 ## Why it's forced, not chosen
 
