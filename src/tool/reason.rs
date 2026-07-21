@@ -17,14 +17,15 @@ impl Tool for Reason {
     }
     fn description(&self) -> &str {
         "Manage inference-tree nodes for root-cause analysis: \
-         action = add | status | margin | list | trace | to_milestone | link. \
+         action = add | status | margin | list | trace | to_milestone | link | cross. \
          `add <question>` creates a causal node. \
          `status <id> <hypothesis|locked>` sets verification state. \
          `margin <id> [margin] [leverage] [terminal]` sets metadata. \
          `list` renders the causal tree. \
          `trace <id>` walks from a node up to the root. \
          `to_milestone <id>` converts a locked node into a workgraph milestone. \
-         `link <id>` links the current session leaf to a causal node (for hypothesis tracking)."
+         `link <id>` links the current session leaf to a causal node (for hypothesis tracking). \
+         `cross` collects open hypotheses across ALL sessions (cross-session convergence)."
     }
     fn schema(&self) -> Value {
         json!({
@@ -32,7 +33,7 @@ impl Tool for Reason {
             "properties": {
                 "action": {
                     "type": "string",
-                    "enum": ["add", "status", "margin", "list", "trace", "to_milestone", "link"]
+                    "enum": ["add", "status", "margin", "list", "trace", "to_milestone", "link", "cross"]
                 },
                 "id": { "type": "integer" },
                 "question": { "type": "string", "description": "The causal question for `add`" },
@@ -58,6 +59,7 @@ impl Tool for Reason {
             "trace" => self.trace(args, ctx),
             "to_milestone" => self.to_milestone(args, ctx),
             "link" => self.link(args, ctx),
+            "cross" => self.cross(ctx),
             other => Ok(ToolOutput::err(format!("unknown action: {other}"))),
         }
     }
@@ -189,6 +191,25 @@ impl Reason {
         }
         Ok(ToolOutput::ok(format!("session leaf linked to causal node #{id} (status: hypothesis)"))
             .with_session_meta_mark(json!({"causal_node": id, "status": "hypothesis"})))
+    }
+
+    /// Collect open (status == hypothesis) causal nodes across ALL session files
+    /// under root — surfaces hypotheses raised in other sessions so converging
+    /// investigations can find each other (ADR: cross-session meta-node retrieval).
+    fn cross(&self, ctx: &mut ToolCtx) -> anyhow::Result<ToolOutput> {
+        let nodes = collect_cross_session_hypotheses(ctx.root);
+        if nodes.is_empty() {
+            return Ok(ToolOutput::ok("(no open hypotheses found in other sessions)".to_string()));
+        }
+        let mut lines = Vec::with_capacity(nodes.len());
+        for n in &nodes {
+            lines.push(format!("• {}#{}: {}", n.session_id, n.message_id, n.preview));
+        }
+        Ok(ToolOutput::ok(format!(
+            "{} open hypothesis node(s) across sessions:\n{}",
+            nodes.len(),
+            lines.join("\n")
+        )))
     }
 }
 
@@ -459,8 +480,15 @@ fn extract_preview(msg: &crate::message::Message) -> String {
     use crate::message::MessageItem;
     for item in &msg.items {
         if let MessageItem::Text { text } = item {
-            let truncated = if text.len() > 60 {
-                format!("{}…", &text[..60])
+            // CJK-safe truncation: slice at the byte offset of the 61st char so
+            // we never split a multi-byte char (which would panic).
+            let truncated = if text.chars().count() > 60 {
+                let end = text
+                    .char_indices()
+                    .nth(60)
+                    .map(|(i, _)| i)
+                    .unwrap_or(text.len());
+                format!("{}…", &text[..end])
             } else {
                 text.clone()
             };
@@ -561,6 +589,42 @@ mod tests {
         assert!(h2.is_some(), "should find hypothesis from session-bbb message 10");
         assert!(h2.unwrap().preview.contains("timeout"), "preview should contain 'timeout': {}", h2.unwrap().preview);
 
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn cross_action_renders_cross_session_hypotheses() {
+        // Wiring test: the `cross` action (previously an orphan with no caller)
+        // surfaces open hypotheses from other sessions via the tool surface.
+        let dir = std::env::temp_dir().join(format!("cc_cross_action_{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("sessions")).unwrap();
+
+        let mut session = Session::new("gpt-4o");
+        session.entries.push(SessionEntry {
+            message: Message { id: 0, role: Role::User, items: vec![MessageItem::Text { text: "Why is login failing?".into() }] },
+            parent: None,
+            meta: Some(serde_json::json!({"status": "hypothesis"})),
+        });
+        session.leaf = Some(0);
+        session.save(&dir.join("sessions").join("session-xyz.json")).unwrap();
+
+        let mut ctx = ToolCtx::new(&dir);
+        let out = Reason.run(json!({ "action": "cross" }), &mut ctx).unwrap();
+        assert!(!out.is_error, "{}", out.content);
+        assert!(out.content.contains("session-xyz"), "should name the source session: {}", out.content);
+        assert!(out.content.contains("login failing"), "should include the preview: {}", out.content);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn cross_action_empty_when_no_hypotheses() {
+        let dir = std::env::temp_dir().join(format!("cc_cross_empty_{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("sessions")).unwrap();
+        let mut ctx = ToolCtx::new(&dir);
+        let out = Reason.run(json!({ "action": "cross" }), &mut ctx).unwrap();
+        assert!(!out.is_error);
+        assert!(out.content.contains("no open hypotheses"), "{}", out.content);
         std::fs::remove_dir_all(&dir).ok();
     }
 
