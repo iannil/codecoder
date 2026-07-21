@@ -61,6 +61,12 @@ pub struct TreeNode {
     pub is_leaf: bool,
     /// true iff this entry is on the leaf→root active thread.
     pub on_active_path: bool,
+    /// Causal node ID (if linked to inference tree).
+    #[serde(default)]
+    pub causal_node: Option<u64>,
+    /// Causal link status ("hypothesis" | "ruled_out" | "locked").
+    #[serde(default)]
+    pub status: Option<String>,
 }
 
 /// 客户端 → daemon 的请求。
@@ -324,7 +330,7 @@ mod tests {
     fn tree_node_and_variants_serde_roundtrip() {
         let n = TreeNode {
             id: 5, parent: Some(2), role: "assistant".into(), preview: "hi".into(),
-            is_leaf: true, on_active_path: true,
+            is_leaf: true, on_active_path: true, causal_node: None, status: None,
         };
         let j = serde_json::to_string(&n).unwrap();
         let back: TreeNode = serde_json::from_str(&j).unwrap();
@@ -344,5 +350,30 @@ mod tests {
         let back: ServerEvent = serde_json::from_str(&j).unwrap();
         assert_eq!(ev, back);
         assert!(j.contains("\"type\":\"tree\""));
+    }
+
+    #[test]
+    fn tree_node_causal_fields_serde_roundtrip() {
+        // Test that new causal fields serialize correctly
+        let n = TreeNode {
+            id: 5, parent: Some(2), role: "assistant".into(), preview: "hi".into(),
+            is_leaf: true, on_active_path: true,
+            causal_node: Some(3), status: Some("hypothesis".into()),
+        };
+        let j = serde_json::to_string(&n).unwrap();
+        let back: TreeNode = serde_json::from_str(&j).unwrap();
+        assert_eq!(n.causal_node, back.causal_node);
+        assert_eq!(n.status, back.status);
+    }
+
+    #[test]
+    fn tree_node_backward_compat_without_new_fields() {
+        // Ensure that old JSON without causal fields still parses (backward compatibility)
+        let old_json = r#"{"id":5,"parent":2,"role":"assistant","preview":"hi","is_leaf":true,"on_active_path":true}"#;
+        let n: TreeNode = serde_json::from_str(old_json).unwrap();
+        assert_eq!(n.id, 5);
+        assert_eq!(n.parent, Some(2));
+        assert!(n.causal_node.is_none()); // should default to None
+        assert!(n.status.is_none()); // should default to None
     }
 }

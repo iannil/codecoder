@@ -120,7 +120,14 @@ pub fn print_tree(nodes: &[crate::daemon::proto::TreeNode]) -> String {
             else if n.on_active_path { "►" }
             else { " " };
         let indent = "  ".repeat(depth);
-        out.push_str(&format!("{indent}{prefix} [{}] {}: {}\n", n.id, n.role, n.preview));
+        // Append causal marker when present
+        let causal = match (n.causal_node, n.status.as_deref()) {
+            (Some(cn), Some("ruled_out")) => format!(" (✗H#{cn} ruled_out)"),
+            (Some(cn), Some(st)) => format!(" (→H#{cn} {st})"),
+            (Some(cn), None) => format!(" (→H#{cn})"),
+            _ => String::new(),
+        };
+        out.push_str(&format!("{indent}{prefix} [{}] {}: {}{causal}\n", n.id, n.role, n.preview));
         if let Some(kids) = children.get(&id) {
             for c in kids { rec(*c, depth + 1, by_id, children, out); }
         }
@@ -299,10 +306,10 @@ mod tests {
         // root(0) → A(1) → leaf(3)   [active]
         //        → B(2)               [abandoned]
         let nodes = vec![
-            TreeNode { id: 0, parent: None,      role: "user".into(),      preview: "root".into(),      is_leaf: false, on_active_path: true },
-            TreeNode { id: 1, parent: Some(0),   role: "assistant".into(), preview: "A".into(),         is_leaf: false, on_active_path: true },
-            TreeNode { id: 2, parent: Some(0),   role: "assistant".into(), preview: "B".into(),         is_leaf: false, on_active_path: false },
-            TreeNode { id: 3, parent: Some(1),   role: "user".into(),      preview: "leaf".into(),      is_leaf: true,  on_active_path: true },
+            TreeNode { id: 0, parent: None,      role: "user".into(),      preview: "root".into(),      is_leaf: false, on_active_path: true, causal_node: None, status: None },
+            TreeNode { id: 1, parent: Some(0),   role: "assistant".into(), preview: "A".into(),         is_leaf: false, on_active_path: true, causal_node: None, status: None },
+            TreeNode { id: 2, parent: Some(0),   role: "assistant".into(), preview: "B".into(),         is_leaf: false, on_active_path: false, causal_node: None, status: None },
+            TreeNode { id: 3, parent: Some(1),   role: "user".into(),      preview: "leaf".into(),      is_leaf: true,  on_active_path: true, causal_node: None, status: None },
         ];
         let rendered = print_tree(&nodes);
         // active path nodes (0,1,3) get ► or ●; abandoned (2) gets a space prefix
@@ -312,5 +319,21 @@ mod tests {
         assert!(rendered.contains("  [2]")); // abandoned: leading space, no marker
         // indentation depth: leaf at depth 2 (4 spaces: 2 per depth)
         assert!(rendered.contains("    ● [3]"));
+    }
+
+    #[test]
+    fn print_tree_renders_causal_markers() {
+        use crate::daemon::proto::TreeNode;
+        // Test causal link markers
+        let nodes = vec![
+            TreeNode { id: 0, parent: None,      role: "user".into(),      preview: "root".into(),      is_leaf: false, on_active_path: true, causal_node: None, status: None },
+            TreeNode { id: 1, parent: Some(0),   role: "assistant".into(), preview: "A".into(),         is_leaf: false, on_active_path: true, causal_node: Some(5), status: Some("hypothesis".into()) },
+            TreeNode { id: 2, parent: Some(0),   role: "assistant".into(), preview: "B".into(),         is_leaf: false, on_active_path: false, causal_node: Some(7), status: Some("ruled_out".into()) },
+        ];
+        let rendered = print_tree(&nodes);
+        // hypothesis status should show →H#5 (hypothesis)
+        assert!(rendered.contains("→H#5"), "hypothesis marker should show");
+        // ruled_out status should show ✗H#7 ruled_out
+        assert!(rendered.contains("✗H#7 ruled_out"), "ruled_out marker should show");
     }
 }

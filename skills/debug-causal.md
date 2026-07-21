@@ -11,10 +11,11 @@ Use the `reason` tool to build a causal tree when debugging a persistent problem
 
 1. **锚定初始问题**: `reason add question="Why is <problem> happening?"`
 2. **逐节点展开**: For each candidate direct cause, `reason add question="<direct cause>?" parent=<parent_id>`
-3. **验证后锁定**: `reason status id=<id> status=locked` (only after you have evidence from `reason list`)
-4. **标注余量/杠杆**: `reason margin id=<id> margin="<description>" leverage=high|medium|low terminal=excluded|natural_law|boundary`
-5. **追溯路径**: `reason trace id=<id>` 查看从根到该节点的完整链
-6. **收敛到行动**: 找到高余量×高杠杆的关键节点后，用 `milestone add title="<行动>"` 把诊断转为 Plan 里程碑
+3. **链接会话分支**: 当你在一个 session 分支里探一个假设时，`reason link id=<causal_node>` 把当前分支标记为「探索该 causal 节点」。离开该分支时（`cc fork <祖先>`）会自动记录排除裁决。
+4. **验证后锁定**: `reason status id=<id> status=locked` (only after you have evidence from `reason list`)
+5. **标注余量/杠杆**: `reason margin id=<id> margin="<description>" leverage=high|medium|low terminal=excluded|natural_law|boundary`
+6. **追溯路径**: `reason trace id=<id>` 查看从根到该节点的完整链
+7. **收敛到行动**: 找到高余量×高杠杆的关键节点后，用 `milestone add title="<行动>"` 把诊断转为 Plan 里程碑
 
 ## Principles
 

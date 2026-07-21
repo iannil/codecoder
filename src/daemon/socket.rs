@@ -361,6 +361,14 @@ fn build_tree_nodes(session: &crate::session::Session) -> Vec<super::proto::Tree
     };
     session.entries.iter().map(|e| {
         let id = e.message.id;
+        // Extract causal_node and status from entry meta
+        let (causal_node, status) = match &e.meta {
+            Some(m) => (
+                m.get("causal_node").and_then(|v| v.as_u64()),
+                m.get("status").and_then(|v| v.as_str()).map(String::from),
+            ),
+            None => (None, None),
+        };
         super::proto::TreeNode {
             id,
             parent: e.parent,
@@ -368,6 +376,8 @@ fn build_tree_nodes(session: &crate::session::Session) -> Vec<super::proto::Tree
             preview: preview_of(&e.message),
             is_leaf: leaf == Some(id),
             on_active_path: active.contains(&id),
+            causal_node,
+            status,
         }
     }).collect()
 }
@@ -746,6 +756,74 @@ mod tests {
         assert!(by_id[&2].on_active_path);
         assert!(by_id[&0].on_active_path);
         assert!(!by_id[&1].on_active_path, "id 1 is the abandoned branch");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn treeshow_extracts_causal_link_from_meta() {
+        use crate::message::{Message, Role};
+        use crate::session::{sessions_dir, Session};
+        let dir = std::env::temp_dir().join(format!("cc_causal_meta_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let sock = dir.join(".ccd.sock");
+
+        // Create a session with causal metadata
+        std::fs::create_dir_all(sessions_dir(&dir)).unwrap();
+        let mut s = Session::new("gpt-4o");
+        s.append(Message::text(0, Role::User, "fix bug"));
+        s.append(Message::text(1, Role::Assistant, "check X"));
+        // Add causal link metadata to entry 1
+        let entry = s.entries.last_mut().unwrap();
+        entry.meta = Some(serde_json::json!({"causal_node": 3, "status": "hypothesis"}));
+
+        let path = sessions_dir(&dir).join("session-causal.json");
+        s.save(&path).unwrap();
+
+        let server = SocketServer::bind(&sock).unwrap();
+        let registry = Arc::new(std::sync::RwLock::new(Registry::scan(&dir)));
+        let mgr = Mutex::new(DaemonSessionManager::new(
+            Arc::new(StubClient), "gpt-4o".into(), 4096, 0.7, dir.clone(), registry,
+        ));
+        let turn_token = mgr.lock().unwrap().turn_token();
+        let bus = Arc::new(crate::daemon::bus::EventBus::new());
+        let shutdown = Arc::new(AtomicBool::new(false));
+
+        let bus_c = Arc::clone(&bus);
+        let shutdown_c = shutdown.clone();
+        let h = std::thread::spawn(move || {
+            let s = server.accept_one().unwrap();
+            handle_connection(s, &mgr, &shutdown_c, &turn_token, &bus_c).unwrap();
+        });
+        std::thread::sleep(Duration::from_millis(50));
+
+        let mut conn = UnixStream::connect(&sock).unwrap();
+        use std::io::Write;
+        writeln!(conn, "{}", serde_json::to_string(&ClientRequest::TreeShow).unwrap()).unwrap();
+        conn.flush().unwrap();
+
+        let mut r = BufReader::new(conn.try_clone().unwrap());
+        let mut tree_nodes: Option<Vec<crate::daemon::proto::TreeNode>> = None;
+        loop {
+            let mut buf = String::new();
+            if r.read_line(&mut buf).unwrap() == 0 { break; }
+            if let Ok(ServerEvent::Tree { nodes }) = serde_json::from_str(buf.trim()) { tree_nodes = Some(nodes); }
+            if let Ok(ServerEvent::TurnComplete) = serde_json::from_str(buf.trim()) { break; }
+        }
+        drop(conn);
+        drop(r);
+        h.join().unwrap();
+
+        let nodes = tree_nodes.expect("TreeShow must return Tree");
+        let by_id: std::collections::HashMap<u64, &crate::daemon::proto::TreeNode> =
+            nodes.iter().map(|n| (n.id, n)).collect();
+
+        // Entry 1 should have causal metadata
+        assert_eq!(by_id[&1].causal_node, Some(3), "entry 1 should have causal_node=3");
+        assert_eq!(by_id[&1].status.as_deref(), Some("hypothesis"), "entry 1 should have status=hypothesis");
+        // Entry 0 should not have causal metadata
+        assert!(by_id[&0].causal_node.is_none(), "entry 0 should not have causal_node");
+        assert!(by_id[&0].status.is_none(), "entry 0 should not have status");
+
         let _ = std::fs::remove_dir_all(&dir);
     }
 
