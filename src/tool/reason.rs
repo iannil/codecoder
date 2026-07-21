@@ -199,14 +199,22 @@ impl Reason {
     fn cross(&self, ctx: &mut ToolCtx) -> anyhow::Result<ToolOutput> {
         let nodes = collect_cross_session_hypotheses(ctx.root);
         if nodes.is_empty() {
-            return Ok(ToolOutput::ok("(no open hypotheses found in other sessions)".to_string()));
+            return Ok(ToolOutput::ok("(no causal nodes found across sessions)".to_string()));
         }
         let mut lines = Vec::with_capacity(nodes.len());
         for n in &nodes {
-            lines.push(format!("• {}#{}: {}", n.session_id, n.message_id, n.preview));
+            let tag = match n.status.as_str() {
+                "ruled_out" => "✗",
+                "locked" => "🔒",
+                _ => "?", // hypothesis — still open
+            };
+            lines.push(format!(
+                "{tag} {}#{} [{}]: {}",
+                n.session_id, n.message_id, n.status, n.preview
+            ));
         }
         Ok(ToolOutput::ok(format!(
-            "{} open hypothesis node(s) across sessions:\n{}",
+            "{} causal node(s) across sessions (most recent first):\n{}",
             nodes.len(),
             lines.join("\n")
         )))
@@ -233,9 +241,20 @@ struct CausalNode {
     ruling: Option<String>,
 }
 
+/// Current on-disk schema for `causal_tree.json`. Bumped when the serialized
+/// shape changes incompatibly; `load` migrates older files forward (mirrors
+/// `workgraph.json`, ADR 0004-style forward migration). Previously the tree had
+/// no version field at all — new fields relied on `#[serde(default)]` with no
+/// migration path for breaking changes.
+const CAUSAL_TREE_SCHEMA_VERSION: u64 = 1;
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 struct CausalTree {
+    #[serde(default)]
+    schema_version: u64,
+    #[serde(default)]
     nodes: Vec<CausalNode>,
+    #[serde(default)]
     next_id: u64,
 }
 
@@ -246,15 +265,32 @@ impl CausalTree {
 
     fn load(root: &Path) -> Self {
         let path = Self::path(root);
-        std::fs::read_to_string(&path)
+        let mut tree: CausalTree = std::fs::read_to_string(&path)
             .ok()
             .and_then(|raw| serde_json::from_str(&raw).ok())
-            .unwrap_or_default()
+            .unwrap_or_default();
+        tree.migrate();
+        tree
+    }
+
+    /// Forward-only migration. Old files (no `schema_version`, deserialized as
+    /// 0) are brought up to `CAUSAL_TREE_SCHEMA_VERSION`. No v1→vN transforms
+    /// exist yet (v1 is the first versioned shape); add them here when bumped.
+    /// Files claiming a newer schema than we understand are left as-is rather
+    /// than risk corrupting them — serde already dropped their unknown fields.
+    fn migrate(&mut self) {
+        if self.schema_version < CAUSAL_TREE_SCHEMA_VERSION {
+            self.schema_version = CAUSAL_TREE_SCHEMA_VERSION;
+        }
     }
 
     fn save(&self, root: &Path) -> anyhow::Result<()> {
         let path = Self::path(root);
-        let raw = serde_json::to_string_pretty(self)?;
+        // Stamp the current schema version on every write (a freshly-Default
+        // tree in memory has version 0 until saved).
+        let mut copy = self.clone();
+        copy.schema_version = CAUSAL_TREE_SCHEMA_VERSION;
+        let raw = serde_json::to_string_pretty(&copy)?;
         // Atomic write: temp + rename (mirrors session.rs / workgraph.rs).
         let tmp = path.with_extension("tmp");
         std::fs::write(&tmp, &raw)?;
@@ -422,19 +458,27 @@ pub struct CrossSessionNode {
     pub session_id: String,
     /// The message id within the session
     pub message_id: crate::message::MessageId,
+    /// The causal status on this entry's meta: `hypothesis` / `ruled_out` / `locked`.
+    pub status: String,
     /// A brief preview of the message content (first ~60 chars)
     pub preview: String,
 }
 
-/// Collects all inference-tree hypothesis nodes across all session files.
-/// Scans `sessions/*.json` under `root`, filters entries where `meta.status == "hypothesis"`,
-/// and returns them as `CrossSessionNode` entries with a preview of the message content.
+/// Collects causal nodes across all session files. Scans `sessions/*.json` under
+/// `root`, keeping entries whose `meta.status` is `hypothesis`, `ruled_out`, or
+/// `locked` — open hypotheses are the primary signal, but ruled_out/locked nodes
+/// carry rulings and verdicts worth surfacing for convergence.
 ///
-/// This enables cross-session causal reasoning: an agent can see what hypotheses
-/// were raised in other sessions, enabling follow-up investigation or convergence
-/// of related debugging efforts.
+/// This enables cross-session causal reasoning: an agent can see what was
+/// investigated (and concluded) in other sessions. The result is bounded
+/// (`MAX_CROSS_SESSION_NODES`, most-recent sessions first) so a large session
+/// history does not make every call scan unboundedly.
 pub fn collect_cross_session_hypotheses(root: &Path) -> Vec<CrossSessionNode> {
     use crate::session::{SessionManager, Session, sessions_dir};
+
+    // Session ids are `session-<epoch_millis>`, so descending sort keeps the
+    // most recent investigations and the cap drops the long tail.
+    const MAX_CROSS_SESSION_NODES: usize = 200;
 
     let mut out = Vec::new();
     let mgr = SessionManager::new(root);
@@ -452,26 +496,29 @@ pub fn collect_cross_session_hypotheses(root: &Path) -> Vec<CrossSessionNode> {
             Err(_) => continue,
         };
 
-        // Collect entries with meta.status == "hypothesis"
         for entry in &session.entries {
-            let is_hypothesis = entry.meta
+            let status = entry
+                .meta
                 .as_ref()
                 .and_then(|m| m.get("status"))
                 .and_then(|s| s.as_str())
-                .map(|s| s == "hypothesis")
-                .unwrap_or(false);
-
-            if is_hypothesis {
-                let preview = extract_preview(&entry.message);
-                out.push(CrossSessionNode {
-                    session_id: meta.id.clone(),
-                    message_id: entry.message.id,
-                    preview,
-                });
+                .map(|s| s.to_string());
+            let Some(status) = status else { continue };
+            if !matches!(status.as_str(), "hypothesis" | "ruled_out" | "locked") {
+                continue;
             }
+            out.push(CrossSessionNode {
+                session_id: meta.id.clone(),
+                message_id: entry.message.id,
+                status,
+                preview: extract_preview(&entry.message),
+            });
         }
     }
 
+    // Most-recent sessions first; bound the result.
+    out.sort_by(|a, b| b.session_id.cmp(&a.session_id));
+    out.truncate(MAX_CROSS_SESSION_NODES);
     out
 }
 
@@ -624,7 +671,7 @@ mod tests {
         let mut ctx = ToolCtx::new(&dir);
         let out = Reason.run(json!({ "action": "cross" }), &mut ctx).unwrap();
         assert!(!out.is_error);
-        assert!(out.content.contains("no open hypotheses"), "{}", out.content);
+        assert!(out.content.contains("no causal nodes"), "{}", out.content);
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -790,6 +837,58 @@ mod tests {
         let tree = CausalTree::load(&dir);
         assert_eq!(tree.nodes.len(), 1);
         assert!(tree.nodes[0].ruling.is_none(), "old file: ruling defaults to None");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn causal_tree_migrates_old_file_to_current_schema() {
+        let dir = std::env::temp_dir().join(format!("cc_causal_schema_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        // Old format: no schema_version field at all.
+        std::fs::write(
+            CausalTree::path(&dir),
+            r#"{"nodes":[{"id":0,"question":"why?","status":"hypothesis"}],"next_id":1}"#,
+        ).unwrap();
+        let tree = CausalTree::load(&dir);
+        assert_eq!(tree.schema_version, CAUSAL_TREE_SCHEMA_VERSION, "old file migrates forward");
+        assert_eq!(tree.nodes.len(), 1);
+        // Saving stamps the version on disk.
+        tree.save(&dir).unwrap();
+        let raw = std::fs::read_to_string(CausalTree::path(&dir)).unwrap();
+        assert!(raw.contains("\"schema_version\""), "saved file includes schema_version: {raw}");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn collect_cross_session_includes_ruled_out_and_locked() {
+        let dir = std::env::temp_dir().join(format!("cc_cross_broaden_{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("sessions")).unwrap();
+
+        let mut session = Session::new("gpt-4o");
+        session.entries.push(SessionEntry {
+            message: Message { id: 0, role: Role::User, items: vec![MessageItem::Text { text: "ruled out cause".into() }] },
+            parent: None,
+            meta: Some(serde_json::json!({"status": "ruled_out", "ruling": "was wrong"})),
+        });
+        session.entries.push(SessionEntry {
+            message: Message { id: 1, role: Role::Assistant, items: vec![MessageItem::Text { text: "locked cause".into() }] },
+            parent: Some(0),
+            meta: Some(serde_json::json!({"status": "locked"})),
+        });
+        // Non-causal entry (no status) — must be excluded.
+        session.entries.push(SessionEntry {
+            message: Message { id: 2, role: Role::Assistant, items: vec![MessageItem::Text { text: "chatter".into() }] },
+            parent: Some(1),
+            meta: None,
+        });
+        session.leaf = Some(2);
+        session.save(&dir.join("sessions").join("session-broad.json")).unwrap();
+
+        let nodes = collect_cross_session_hypotheses(&dir);
+        let statuses: Vec<&str> = nodes.iter().map(|n| n.status.as_str()).collect();
+        assert!(statuses.contains(&"ruled_out"), "ruled_out should be collected: {:?}", statuses);
+        assert!(statuses.contains(&"locked"), "locked should be collected: {:?}", statuses);
+        assert_eq!(nodes.len(), 2, "non-causal entry must be excluded: {:?}", nodes);
         std::fs::remove_dir_all(&dir).ok();
     }
 }
