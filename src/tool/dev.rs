@@ -62,7 +62,7 @@ impl Tool for Commit {
             return Ok(ToolOutput::err(format!("git add failed: {add_out}")));
         }
         let (out, err) = combined(&git(ctx.root, &["commit", "-m", message])?);
-        Ok(ToolOutput { content: out, is_error: err })
+        Ok(ToolOutput { content: out, is_error: err, session_meta_mark: None })
     }
 }
 

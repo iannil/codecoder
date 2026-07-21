@@ -131,7 +131,7 @@ fn run_shell_cancellable(mut command: Command, ctx: &ToolCtx) -> anyhow::Result<
     if is_error {
         buf = format!("exit {}: {buf}", status.code().unwrap_or(-1));
     }
-    Ok(ToolOutput { content: buf, is_error })
+    Ok(ToolOutput { content: buf, is_error, session_meta_mark: None })
 }
 
 pub struct ListDirectory;
@@ -379,7 +379,7 @@ impl Tool for RunCapability {
                         if is_error {
                             buf = format!("exit {}: {buf}", out.status.code().unwrap_or(-1));
                         }
-                        Ok(ToolOutput { content: buf, is_error })
+                        Ok(ToolOutput { content: buf, is_error, session_meta_mark: None })
                     }
                     // No silent downgrade to host (ADR 0021): Docker absent → explicit error.
                     Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
@@ -395,7 +395,7 @@ impl Tool for RunCapability {
                 let dir = ctx.root.join("capabilities").join(name);
                 let cap_args = args.get("args").cloned().unwrap_or(json!({}));
                 match crate::tool::wasm::run_wasm(&dir, &m.entry, &cap_args.to_string()) {
-                    Ok((out, is_error)) => Ok(ToolOutput { content: out, is_error }),
+                    Ok((out, is_error)) => Ok(ToolOutput { content: out, is_error, session_meta_mark: None }),
                     Err(e) => Ok(ToolOutput::err(format!("wasm run failed: {e}"))),
                 }
             }
@@ -578,7 +578,7 @@ fn run_ondemand(name: &str, m: &CapabilityManifest, root: &Path) -> anyhow::Resu
         Environment::Wasm => {
             let cap_args = json!({});
             match crate::tool::wasm::run_wasm(&dir, &m.entry, &cap_args.to_string()) {
-                Ok((out, is_error)) => Ok(ToolOutput { content: out, is_error }),
+                Ok((out, is_error)) => Ok(ToolOutput { content: out, is_error, session_meta_mark: None }),
                 Err(e) => Ok(ToolOutput::err(format!("wasm run failed: {e}"))),
             }
         }

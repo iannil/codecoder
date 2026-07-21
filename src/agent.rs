@@ -378,6 +378,19 @@ impl AgentLoop {
         id
     }
 
+    /// Apply a session-leaf meta mark from a tool's `ToolOutput.session_meta_mark`
+    /// (Phase E side-channel — tools can't write the session directly). Writes the
+    /// mark onto the current leaf's `SessionEntry.meta` and autosaves. No-op if
+    /// there is no current leaf.
+    fn apply_session_meta_mark(&mut self, mark: serde_json::Value) {
+        if let Some(leaf) = self.session.leaf {
+            self.session.update_meta(leaf, |m| *m = Some(mark));
+            if self.persist {
+                let _ = self.session.save(&self.session_path);
+            }
+        }
+    }
+
     /// Load the most recent session on disk, continuing its file and id sequence.
     fn resume_latest(&mut self, event_tx: &Sender<AgentEvent>) {
         let Some(path) = session::latest_session(&self.root) else {
@@ -1036,10 +1049,13 @@ impl AgentLoop {
             preview: preview_args(&args),
         });
         let mut ctx = ToolCtx::with_cancel(&self.root, &self.cancel);
-        let output = match self.toolbox.get(name).unwrap().run(args, &mut ctx) {
+        let mut output = match self.toolbox.get(name).unwrap().run(args, &mut ctx) {
             Ok(o) => o,
             Err(e) => crate::tool::ToolOutput::err(format!("tool error: {e}")),
         };
+        if let Some(mark) = output.session_meta_mark.take() {
+            self.apply_session_meta_mark(mark);
+        }
         let _ = event_tx.send(AgentEvent::ToolFinished {
             name: name.to_string(),
             is_error: output.is_error,
@@ -2122,6 +2138,27 @@ mod tests {
         reg.write().unwrap().reload(&dir);
         agent.refresh_system_prompt_if_shared();
         assert!(agent.system_prompt.contains("new"), "refresh must pick up the new skill");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn apply_session_meta_mark_writes_current_leaf_meta() {
+        use crate::message::{Message, Role};
+        let dir = std::env::temp_dir().join(format!("cc_metamark_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut agent = AgentLoop::new(
+            std::sync::Arc::new(crate::provider::stub::StubClient),
+            "gpt-4o", 4096, 0.7, dir.clone(),
+        );
+        // give the session a leaf entry (id 0)
+        agent.session.append(Message::text(0, Role::User, "hi"));
+        assert_eq!(agent.session.leaf, Some(0));
+
+        let mark = serde_json::json!({"causal_node": 5, "status": "hypothesis"});
+        agent.apply_session_meta_mark(mark.clone());
+
+        let meta = agent.session.entry_by_id(0).unwrap().meta.clone();
+        assert_eq!(meta, Some(mark), "leaf meta must equal the applied mark");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

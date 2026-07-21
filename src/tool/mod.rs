@@ -40,14 +40,24 @@ impl<'a> ToolCtx<'a> {
 pub struct ToolOutput {
     pub content: String,
     pub is_error: bool,
+    /// Optional meta to write onto the current session leaf's `SessionEntry.meta`.
+    /// Applied by `AgentLoop::dispatch_tool` after the tool runs — tools can't touch
+    /// the in-memory session directly (`ToolCtx` has no session access), so this is
+    /// the side-channel (Phase E: `reason link` uses it).
+    pub session_meta_mark: Option<serde_json::Value>,
 }
 
 impl ToolOutput {
     pub fn ok(content: impl Into<String>) -> Self {
-        Self { content: content.into(), is_error: false }
+        Self { content: content.into(), is_error: false, session_meta_mark: None }
     }
     pub fn err(content: impl Into<String>) -> Self {
-        Self { content: content.into(), is_error: true }
+        Self { content: content.into(), is_error: true, session_meta_mark: None }
+    }
+    /// Attach a session-leaf meta mark (Phase E side-channel). Builder-style.
+    pub fn with_session_meta_mark(mut self, mark: serde_json::Value) -> Self {
+        self.session_meta_mark = Some(mark);
+        self
     }
 }
 
@@ -141,5 +151,20 @@ impl Toolbox {
                 })
             })
             .collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn session_meta_mark_defaults_none_and_builder_sets_it() {
+        assert!(ToolOutput::ok("x").session_meta_mark.is_none());
+        assert!(ToolOutput::err("x").session_meta_mark.is_none());
+        let m = serde_json::json!({"causal_node": 5, "status": "hypothesis"});
+        let o = ToolOutput::ok("linked").with_session_meta_mark(m.clone());
+        assert_eq!(o.session_meta_mark, Some(m));
+        assert!(!o.is_error);
     }
 }
