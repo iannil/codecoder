@@ -36,6 +36,44 @@ impl Connection {
         let ev: ServerEvent = serde_json::from_str(buf.trim())?;
         Ok(Some(ev))
     }
+
+    /// 拆成写半 + 读半，供 main 线程与 reader 线程并发使用。
+    pub fn split(self) -> anyhow::Result<(ConnectionWriter, ConnectionReader)> {
+        let writer = self.writer;             // UnixStream
+        let reader = BufReader::new(self.reader.into_inner().try_clone()?);
+        Ok((ConnectionWriter { writer }, ConnectionReader { reader }))
+    }
+}
+
+/// 连接的写半（供 main 线程 send）。
+pub struct ConnectionWriter {
+    writer: UnixStream,
+}
+
+impl ConnectionWriter {
+    pub fn send(&mut self, req: &ClientRequest) -> anyhow::Result<()> {
+        use std::io::Write;
+        let line = serde_json::to_string(req)?;
+        writeln!(self.writer, "{line}")?;
+        self.writer.flush()?;
+        Ok(())
+    }
+}
+
+/// 连接的读半（供 reader 线程 next_event）。
+pub struct ConnectionReader {
+    reader: BufReader<UnixStream>,
+}
+
+impl ConnectionReader {
+    pub fn next_event(&mut self) -> anyhow::Result<Option<ServerEvent>> {
+        let mut buf = String::new();
+        if self.reader.read_line(&mut buf)? == 0 {
+            return Ok(None);
+        }
+        let ev: ServerEvent = serde_json::from_str(buf.trim())?;
+        Ok(Some(ev))
+    }
 }
 
 /// 默认 socket 路径（与 daemon 一致：`$CODECODER_ROOT/.ccd.sock`）。
@@ -192,5 +230,13 @@ mod tests {
         drop(conn);
         h.join().unwrap();
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn print_event_renders_bus_notice() {
+        let ev = ServerEvent::BusNotice { source: "workgraph".into(), text: "milestone done".into() };
+        // print_event prints to stdout; we only assert it's non-terminal (returns false)
+        // and doesn't panic. (Terminal events are TurnComplete/Error.)
+        assert!(!print_event(&ev));
     }
 }
