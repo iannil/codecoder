@@ -67,7 +67,9 @@ pub fn handle_connection(
     // 由 writer 线程单一写出——写天然串行化。
     let (combined_tx, combined_rx) = mpsc::channel::<ServerEvent>();
     // 注册到 bus：广播事件直接落进 combined_rx，与 turn 事件同流。
-    bus.register(combined_tx.clone());
+    // 保留订阅 id：连接关闭（EOF）时用它 unregister，移除 bus 端的 sender clone，
+    // 从而让 combined_rx 的所有 sender 都释放 → writer 线程 iter() 结束 → 干净退出。
+    let subscription = bus.register(combined_tx.clone());
     let writer_handle = std::thread::spawn(move || {
         for ev in combined_rx.iter() {
             if write_event(&mut writer, &ev).is_err() {
@@ -118,18 +120,11 @@ pub fn handle_connection(
         }
     }
 
-    // 客户端关闭（EOF）：清理资源
+    // 客户端关闭（EOF）：先从 bus 注销（移除其 sender clone），再 drop 本地 combined_tx，
+    // 这样 combined_rx 的所有 sender 都释放 → writer 的 iter() 结束 → 线程干净退出。
+    // 不再依赖广播或 sleep——直接、确定性。
+    bus.unregister(subscription);
     drop(combined_tx);
-    // 触发一个广播让 bus 清理死连接
-    // 这个广播会导致 bus 尝试发送给所有订阅者，包括我们
-    // 当 bus 尝试发送给我们的连接时，writer 会接收并尝试写入
-    // 写入会失败（因为连接已关闭），writer 退出
-    // 然后 bus 的 retain 会检测到 send 失败并移除死连接
-    bus.broadcast("_cleanup", "_connection_closed");
-    // 给 writer 线程足够时间处理 cleanup 广播并退出
-    std::thread::sleep(std::time::Duration::from_millis(200));
-
-    // 现在 writer 应该已经退出
     let _ = writer_handle.join();
     Ok(())
 }
@@ -390,7 +385,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore] // TODO: This test hangs due to mpsc channel design limitation - see comment at end of test
     fn bus_notice_reaches_idle_client() {
         // 客户端连上（订阅）但不发起 turn；daemon 广播一条 BusNotice；
         // 客户端即使在「idle」也必须收到——这是实时推送的核心。
@@ -438,7 +432,6 @@ mod tests {
                 Ok(0) => break,
                 Ok(_) => {
                     if let Ok(ServerEvent::BusNotice { source, text }) = serde_json::from_str(buf.trim()) {
-                        // 只关心我们期望的消息，忽略其他（如 cleanup）
                         if source == "workgraph" && text == "milestone #1 advanced" {
                             got = true;
                             break;
@@ -449,7 +442,10 @@ mod tests {
             }
         }
         assert!(got, "idle client must receive the bus notice in real time");
+        // 关闭客户端连接：服务端 read_request 见到 EOF → unregister → writer iter() 结束
+        // → handle_connection 返回 → h.join() 完成。这是 unregister liveness 修复的关键路径。
         drop(conn);
+        drop(r);
         h.join().unwrap();
         let _ = std::fs::remove_dir_all(&dir);
     }
