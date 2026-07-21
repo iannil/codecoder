@@ -110,29 +110,27 @@ pub fn shutdown_all() {
     }
 }
 
-/// 监督一个 Persistent Capability 的运行状态：记录重启次数与窗口。
+/// 监督一个 Persistent Capability 的运行状态。`gave_up` = 该服务已退出并被标记
+/// 为 Failed（ADR 0021：不自动重启）。
 pub struct SupervisedService {
     pub manifest: CapabilityManifest,
     pub child: Option<std::process::Child>,
-    pub restart_count: u32,
-    pub first_restart: Option<std::time::Instant>,
-    /// 达到上限后放弃重启（已死）。
+    /// 已退出并标记为 Failed（不再重启）。停留在此处对 agent 可见。
     pub gave_up: bool,
 }
 
 /// Persistent Capability 监督树（first-class citizen #3 的 daemon 级形态）：
-/// 扫 capabilities/ 起 Persistent 条目，崩溃自动重启，超过 max_restarts/window_secs
-/// 放弃；daemon 退出时 shutdown_all。
+/// daemon 启动时扫描 capabilities/ 起 Persistent+Shell 条目并 spawn。崩溃的服务
+/// 被标记 Failed 并保持可见——**不自动重启**（ADR 0021：静默重启会掩盖 bug）。
+/// daemon 退出时 shutdown_all。
 pub struct Supervisor {
-    pub max_restarts: u32,
-    pub window_secs: u64,
     pub root: std::path::PathBuf,
     pub states: std::collections::HashMap<String, SupervisedService>,
 }
 
 impl Supervisor {
     pub fn start_all(root: &std::path::Path) -> anyhow::Result<Self> {
-        let mut sup = Self { max_restarts: 3, window_secs: 60, root: root.to_path_buf(), states: Default::default() };
+        let mut sup = Self { root: root.to_path_buf(), states: Default::default() };
         let caps = root.join("capabilities");
         let Ok(entries) = std::fs::read_dir(&caps) else { return Ok(sup); };
         for e in entries.flatten() {
@@ -151,13 +149,13 @@ impl Supervisor {
         let child = spawn_shell_capability(root, &man)?;
         self.states.insert(
             name.to_string(),
-            SupervisedService { manifest: man, child: Some(child), restart_count: 0, first_restart: None, gave_up: false },
+            SupervisedService { manifest: man, child: Some(child), gave_up: false },
         );
         Ok(())
     }
 
-    /// 周期调用：检查每个已起服务的子进程，若已退出则按窗口/上限决定重启或放弃。
-    /// 返回本周期内发生的事件行（人类可读的重启/放弃消息）。
+    /// 周期调用：检查每个已起服务的子进程，若已退出则标记 Failed 并保持可见——
+    /// **不重启**（ADR 0021）。返回本周期内发生的事件行（人类可读）。
     pub fn supervise(&mut self) -> Vec<String> {
         let mut events = Vec::new();
         for (name, s) in self.states.iter_mut() {
@@ -167,29 +165,14 @@ impl Supervisor {
                 None => true,
             };
             if !exited { continue; }
-            // 窗口外重置计数（重启滑动窗口）
-            let now_inst = std::time::Instant::now();
-            if let Some(first) = s.first_restart {
-                if now_inst.duration_since(first).as_secs() >= self.window_secs {
-                    s.restart_count = 0;
-                    s.first_restart = None;
-                }
-            }
-            if s.restart_count >= self.max_restarts {
-                s.gave_up = true;
-                s.child = None;
-                events.push(format!("capability '{name}' gave up after {} restarts", s.restart_count));
-                continue;
-            }
-            s.restart_count += 1;
-            if s.first_restart.is_none() { s.first_restart = Some(now_inst); }
-            // 重启
-            if let Ok(c) = spawn_shell_capability(&self.root, &s.manifest) {
-                s.child = Some(c);
-                events.push(format!("capability '{name}' restarted (attempt {})", s.restart_count));
-            } else {
-                s.child = None;
-            }
+            // ADR 0021: a crashed Persistent capability is marked Failed and left
+            // visible for the agent to decide. Auto-restart is deliberately absent
+            // — a silent restart would mask bugs.
+            s.gave_up = true;
+            s.child = None;
+            events.push(format!(
+                "capability '{name}' exited; marked Failed (not auto-restarted, ADR 0021)"
+            ));
         }
         events
     }
@@ -223,7 +206,7 @@ mod tests {
     use std::time::Instant;
 
     #[test]
-    fn supervisor_restarts_crashed_persistent_until_cap() {
+    fn supervisor_marks_crashed_persistent_failed_without_restart() {
         let dir = std::env::temp_dir().join(format!("cc_supervisor_{}", std::process::id()));
         let capdir = dir.join("capabilities/flaky");
         std::fs::create_dir_all(&capdir).unwrap();
@@ -247,52 +230,38 @@ mod tests {
         std::fs::create_dir_all(dir.join("capabilities")).unwrap(); // 确保目录
 
         let mut sup = Supervisor::start_all(&dir).unwrap();
-        // 反复 supervise 直到放弃或超时
+        // Wait for the initial spawn to run and exit (writes the marker, exits 1).
         let start = Instant::now();
         loop {
-            sup.supervise();
-            if start.elapsed().as_secs() > 2 { break; } // 测试保护
-            let name = "flaky";
-            if let Some(s) = sup.states.get(name) {
-                if s.gave_up { break; }
+            if std::fs::read_to_string(&marker_path).is_ok() || start.elapsed().as_secs() > 2 {
+                break;
             }
             std::thread::sleep(std::time::Duration::from_millis(20));
         }
+        // Let the exit register, then supervise detects it and marks Failed.
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        let events = sup.supervise();
+
         let s = sup.states.get("flaky").expect("flaky supervised");
-        assert!(s.restart_count >= 1, "should have restarted at least once");
-        assert!(s.gave_up, "should give up after max_restarts");
+        assert!(s.gave_up, "crashed capability should be marked Failed (gave_up)");
+        assert!(
+            events.iter().any(|e| e.contains("marked Failed") && e.contains("not auto-restarted")),
+            "should emit a no-restart event: {:?}", events
+        );
 
-        // The marker file must exist for at least one respawn to have run
-        // With the wrong root, spawn will fail (no such directory) and marker won't be created
-        let marker_content = loop {
-            std::thread::sleep(std::time::Duration::from_millis(50));
-            match std::fs::read_to_string(&marker_path) {
-                Ok(content) if !content.trim().is_empty() => break content,
-                Ok(_) => continue, // File exists but empty, wait longer
-                Err(_) => {
-                    // If the respawn is using wrong root, spawn_shell_capability will fail
-                    // because the directory won't exist relative to daemon cwd
-                    if start.elapsed().as_secs() > 1 {
-                        panic!("Marker file not created within timeout. This indicates that the respawn failed to run, likely because spawn_shell_capability used the wrong root ('.' instead of project root), causing the directory lookup to fail.");
-                    }
-                }
-            }
-        };
-
-        // The marker file should have multiple lines (initial spawn + at least one respawn)
+        // ADR 0021: NO auto-restart → the marker must have exactly ONE line
+        // (the initial spawn). A second line would mean a respawn happened.
+        let marker_content = std::fs::read_to_string(&marker_path)
+            .expect("initial spawn should have written the marker");
         let lines: Vec<&str> = marker_content.lines().collect();
-        assert!(lines.len() >= 2, "Marker file should have at least 2 lines (initial spawn + respawn), got {} lines: {:?}", lines.len(), lines);
+        assert_eq!(lines.len(), 1, "should NOT respawn (ADR 0021 no auto-restart): got {} lines", lines.len());
 
-        // All lines should contain the same correct working directory
+        // The single spawn ran in the capability directory, not daemon cwd.
         let expected_cwd = dir.join("capabilities/flaky").canonicalize().expect("canonicalize expected path");
-        for line in lines {
-            let actual_cwd = std::path::PathBuf::from(line.trim());
-            let actual_cwd = actual_cwd.canonicalize().unwrap_or(actual_cwd);
-            assert_eq!(actual_cwd, expected_cwd,
-                       "Respawned capability should run in correct capability directory, not daemon cwd. \
-                        Got: {:?}, Expected: {:?}",
-                        actual_cwd, expected_cwd);
-        }
+        let actual_cwd = std::path::PathBuf::from(lines[0].trim());
+        let actual_cwd = actual_cwd.canonicalize().unwrap_or(actual_cwd);
+        assert_eq!(actual_cwd, expected_cwd,
+                   "capability should run in its own directory, not daemon cwd");
 
         sup.shutdown_all();
         let _ = std::fs::remove_dir_all(&dir);
