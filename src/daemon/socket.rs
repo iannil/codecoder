@@ -780,8 +780,8 @@ mod tests {
         let mut r = BufReader::new(conn.try_clone().unwrap());
         loop { let mut b = String::new(); if r.read_line(&mut b).unwrap() == 0 { break; }
             if let Ok(ServerEvent::TurnComplete) = serde_json::from_str(b.trim()) { break; } }
-        // Now try TreeNav to id 2 (the leaf in the forked session)
-        writeln!(conn, "{}", serde_json::to_string(&ClientRequest::TreeNav { id: 2 }).unwrap()).unwrap();
+        // Now navigate to id 0 (a non-leaf ancestor). This must MOVE the leaf from 2 to 0.
+        writeln!(conn, "{}", serde_json::to_string(&ClientRequest::TreeNav { id: 0 }).unwrap()).unwrap();
         conn.flush().unwrap();
         loop { let mut b = String::new(); if r.read_line(&mut b).unwrap() == 0 { break; }
             if let Ok(ServerEvent::TurnComplete) = serde_json::from_str(b.trim()) { break; } }
@@ -789,11 +789,11 @@ mod tests {
         drop(r);
         h.join().unwrap();
 
-        // re-read the forked session file to see if TreeNav worked
+        // re-read the forked session file to verify TreeNav actually MOVED the leaf
         let raw = std::fs::read_to_string(crate::session::sessions_dir(&dir).join("session-fork.json")).unwrap();
         let s = crate::session::Session::load(&raw).unwrap();
-        // If TreeNav worked, the leaf should still be 2 (navigating to current leaf is a no-op)
-        assert_eq!(s.leaf, Some(2), "TreeNav to current leaf should keep leaf at 2");
+        // TreeNav must have moved the leaf from 2 to 0. If this assertion fails, TreeNav is broken.
+        assert_eq!(s.leaf, Some(0), "TreeNav should move leaf from 2 to 0");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

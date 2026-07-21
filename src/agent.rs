@@ -479,6 +479,10 @@ impl AgentLoop {
                     }
                     if self.session.navigate_to(id) {
                         let _ = event_tx.send(AgentEvent::Notice(format!("navigated to entry #{id}")));
+                        // Autosave after changing leaf (daemon Navigate expects this).
+                        if self.persist {
+                            let _ = self.session.save(&self.session_path);
+                        }
                     } else {
                         let _ = event_tx.send(AgentEvent::Notice(format!("no entry #{id}")));
                     }
