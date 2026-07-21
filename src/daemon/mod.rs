@@ -47,10 +47,14 @@ impl Daemon {
 
         // 监督线程：周期 supervise（独立线程，避免阻塞 accept）。
         let shutdown_c = shutdown.clone();
+        let bus_for_sup = Arc::clone(&bus);
         let sup_handle = {
             std::thread::spawn(move || {
                 while !shutdown_c.load(Ordering::SeqCst) {
-                    supervisor.supervise();
+                    let events = supervisor.supervise();
+                    for line in events {
+                        bus_for_sup.broadcast("supervisor", &line);
+                    }
                     std::thread::sleep(std::time::Duration::from_secs(1));
                 }
                 supervisor.shutdown_all();
@@ -65,6 +69,7 @@ impl Daemon {
         let shutdown_c2 = shutdown.clone();
         let cfg_for_wg = self.cfg.clone();
         let turn_token_for_wg = Arc::clone(&turn_token);
+        let bus_for_wg = Arc::clone(&bus);
         let wg_handle = std::thread::spawn(move || {
             while !shutdown_c2.load(Ordering::SeqCst) {
                 std::thread::sleep(std::time::Duration::from_secs(30));
@@ -75,13 +80,18 @@ impl Daemon {
                 };
                 // advance 内部自建 agent，不复用 mgr；故此处不锁 mgr
                 let provider = crate::select_provider(&cfg_for_wg);
-                let _ = crate::background::advance_one_milestone(
+                let out = crate::background::advance_one_milestone(
                     provider,
                     cfg_for_wg.model.clone(),
                     cfg_for_wg.max_tokens,
                     cfg_for_wg.temperature,
                     cfg_for_wg.root.clone(),
                 );
+                if let Ok(Some(o)) = out {
+                    if let Some(line) = o.events.iter().find(|e| e.starts_with("milestone")) {
+                        bus_for_wg.broadcast("workgraph", line);
+                    }
+                }
             }
         });
 
@@ -174,5 +184,25 @@ mod tests {
         let has_x = reg.read().unwrap().catalog.iter().any(|e| e.name == "x");
         assert!(has_x, "reload loop must pick up the written skill");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn workgraph_publisher_test() {
+        use crate::daemon::bus::EventBus;
+
+        // 测试发布逻辑本身：模拟 daemon 线程收到 advance_one_milestone 的返回值并广播
+        let bus = Arc::new(EventBus::new());
+        let (tx, rx) = std::sync::mpsc::channel::<crate::daemon::proto::ServerEvent>();
+        bus.register(tx);
+
+        // 模拟 advance_one_milestone 返回 Some(BgOutcome { events: [...] })
+        let mock_events = vec!["milestone #1 (test) auto-updated: pass".to_string()];
+        if let Some(line) = mock_events.iter().find(|e| e.starts_with("milestone")) {
+            bus.broadcast("workgraph", line);
+        }
+
+        // 订阅者应收到 BusNotice
+        let ev = rx.recv().unwrap();
+        assert!(matches!(ev, crate::daemon::proto::ServerEvent::BusNotice { .. }));
     }
 }

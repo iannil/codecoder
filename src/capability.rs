@@ -157,8 +157,10 @@ impl Supervisor {
     }
 
     /// 周期调用：检查每个已起服务的子进程，若已退出则按窗口/上限决定重启或放弃。
-    pub fn supervise(&mut self) {
-        for (_name, s) in self.states.iter_mut() {
+    /// 返回本周期内发生的事件行（人类可读的重启/放弃消息）。
+    pub fn supervise(&mut self) -> Vec<String> {
+        let mut events = Vec::new();
+        for (name, s) in self.states.iter_mut() {
             if s.gave_up { continue; }
             let exited = match s.child.as_mut() {
                 Some(c) => c.try_wait().ok().flatten().is_some(),
@@ -176,6 +178,7 @@ impl Supervisor {
             if s.restart_count >= self.max_restarts {
                 s.gave_up = true;
                 s.child = None;
+                events.push(format!("capability '{name}' gave up after {} restarts", s.restart_count));
                 continue;
             }
             s.restart_count += 1;
@@ -183,10 +186,12 @@ impl Supervisor {
             // 重启
             if let Ok(c) = spawn_shell_capability(&self.root, &s.manifest) {
                 s.child = Some(c);
+                events.push(format!("capability '{name}' restarted (attempt {})", s.restart_count));
             } else {
                 s.child = None;
             }
         }
+        events
     }
 
     pub fn shutdown_all(&mut self) {
