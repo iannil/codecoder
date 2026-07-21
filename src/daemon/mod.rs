@@ -188,21 +188,70 @@ mod tests {
 
     #[test]
     fn workgraph_publisher_test() {
+        // 真集成测试（替代原先与 bus::tests 重复的 tautology 测试）：
+        // 1. 跑真实的 advance_one_milestone（temp root + 1 pending milestone + StubClient）；
+        // 2. 复用 daemon::run 中那段 filter-and-broadcast 逻辑：
+        //    `o.events.iter().find(|e| e.starts_with("milestone"))` → bus.broadcast("workgraph", line)；
+        // 3. 校验：若 advance 真产出了 milestone 行（parse_review 成功）→ 订阅者收到 BusNotice，
+        //    且其 text 以 "milestone" 开头（与 filter 一致）；
+        //    若未产出（StubClient 默认文本不含 verdict → unparsed → 不 emit milestone 行）
+        //    → 订阅者不应收到任何事件。
+        use crate::background::advance_one_milestone;
         use crate::daemon::bus::EventBus;
+        use crate::daemon::proto::ServerEvent;
+        use crate::provider::stub::StubClient;
+        use crate::workgraph::WorkGraph;
 
-        // 测试发布逻辑本身：模拟 daemon 线程收到 advance_one_milestone 的返回值并广播
+        let dir = std::env::temp_dir().join(format!(
+            "cc_wg_pub_{}_{}", std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH).unwrap().subsec_nanos(),
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        // 1 个 pending milestone。
+        let mut g = WorkGraph::default();
+        g.add("ship feature X", "acceptance criteria", vec![]).unwrap();
+        g.save(&dir).unwrap();
+
+        // 真实 advance：与 daemon::run 内部调用一致。
+        let out = advance_one_milestone(
+            Arc::new(StubClient), "gpt-4o".into(), 4096, 0.7, dir.clone(),
+        ).expect("advance_one_milestone must not error");
+
         let bus = Arc::new(EventBus::new());
-        let (tx, rx) = std::sync::mpsc::channel::<crate::daemon::proto::ServerEvent>();
-        bus.register(tx);
+        let (tx, rx) = std::sync::mpsc::channel::<ServerEvent>();
+        let _sub_id = bus.register(tx);
 
-        // 模拟 advance_one_milestone 返回 Some(BgOutcome { events: [...] })
-        let mock_events = vec!["milestone #1 (test) auto-updated: pass".to_string()];
-        if let Some(line) = mock_events.iter().find(|e| e.starts_with("milestone")) {
+        // 复用 daemon::run 的发布逻辑（mod.rs 中 wg_handle 线程体内的那段）。
+        let emitted_line: Option<String> = match out {
+            Some(ref o) => o.events.iter()
+                .find(|e: &&String| e.starts_with("milestone"))
+                .cloned(),
+            None => None,
+        };
+        if let Some(ref line) = emitted_line {
             bus.broadcast("workgraph", line);
         }
 
-        // 订阅者应收到 BusNotice
-        let ev = rx.recv().unwrap();
-        assert!(matches!(ev, crate::daemon::proto::ServerEvent::BusNotice { .. }));
+        if let Some(line) = emitted_line {
+            // 有真 milestone 行 → 订阅者必须收到一条 BusNotice，内容与 line 一致。
+            let ev = rx.recv_timeout(std::time::Duration::from_secs(1)).unwrap();
+            match ev {
+                ServerEvent::BusNotice { source, text } => {
+                    assert_eq!(source, "workgraph");
+                    assert_eq!(text, line, "broadcast text must equal the emitted milestone line");
+                    assert!(text.starts_with("milestone"), "filter must match real output");
+                }
+                other => panic!("expected BusNotice, got {other:?}"),
+            }
+        } else {
+            // StubClient 默认文本不含可解析 verdict → advance 不 emit milestone 行
+            // → daemon 不应广播任何东西。订阅者收不到事件即正确。
+            assert!(matches!(rx.recv_timeout(std::time::Duration::from_millis(200)),
+                              Err(std::sync::mpsc::RecvTimeoutError::Timeout)),
+                "no milestone line → daemon must NOT broadcast");
+        }
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

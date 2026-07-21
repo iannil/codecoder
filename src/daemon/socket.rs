@@ -4,7 +4,40 @@ use crate::config::Config;
 use std::io::BufReader;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
+
+/// 保证连接关闭时（EOF / Err / panic）都执行：从 bus 注销 → drop 所有本地
+/// combined_tx clone → join writer。没有它，bus 持有的 combined_tx clone 会让
+/// writer 线程的 `for ev in combined_rx.iter()` 永久阻塞（线程泄漏）—— 尤其是
+/// `?` 提前返回 / `mgr.lock().unwrap()` 中毒 panic 这两条非 EOF 出口。
+///
+/// 必须拥有「loop body 用的 sender clone」也至关重要：drop 顺序上，guard 比
+/// body_tx 先 drop（声明在前），若 guard 在 join 时 body_tx 还活着，combined_rx
+/// 永不关闭、writer 永远 join 不上。所以 guard 把所有 sender clone 都接管了。
+struct ConnGuard {
+    bus: Arc<super::bus::EventBus>,
+    sub: super::bus::SubscriptionId,
+    /// 由 loop body 通过 `as_ref()` 借用做 inline send / drain；Drop 时 take() 释放。
+    body_tx: Option<std::sync::mpsc::Sender<super::proto::ServerEvent>>,
+    /// 原始 combined_tx（drop 后与 body_tx 一起释放，彻底断流）。
+    combined_tx: Option<std::sync::mpsc::Sender<super::proto::ServerEvent>>,
+    writer: Option<std::thread::JoinHandle<()>>,
+}
+
+impl Drop for ConnGuard {
+    fn drop(&mut self) {
+        // 1. 从 bus 注销其 sender clone（bus 端的 combined_tx）。
+        self.bus.unregister(self.sub);
+        // 2. drop body_tx + combined_tx 本地 clone：至此 combined_rx 的所有 sender
+        //    都释放 → writer 线程的 `iter()` 自然结束。必须在 join 之前完成。
+        self.body_tx.take();
+        self.combined_tx.take();
+        // 3. join writer 线程，确保它退出（不会再有写入）。
+        if let Some(h) = self.writer.take() {
+            let _ = h.join();
+        }
+    }
+}
 
 pub fn default_sock_path(cfg: &Config) -> PathBuf {
     cfg.root.join(".ccd.sock")
@@ -67,8 +100,8 @@ pub fn handle_connection(
     // 由 writer 线程单一写出——写天然串行化。
     let (combined_tx, combined_rx) = mpsc::channel::<ServerEvent>();
     // 注册到 bus：广播事件直接落进 combined_rx，与 turn 事件同流。
-    // 保留订阅 id：连接关闭（EOF）时用它 unregister，移除 bus 端的 sender clone，
-    // 从而让 combined_rx 的所有 sender 都释放 → writer 线程 iter() 结束 → 干净退出。
+    // 保留订阅 id：连接关闭（任意路径）时由 ConnGuard 用它 unregister，
+    // 移除 bus 端的 sender clone → combined_rx 的所有 sender 释放 → writer 退出。
     let subscription = bus.register(combined_tx.clone());
     let writer_handle = std::thread::spawn(move || {
         for ev in combined_rx.iter() {
@@ -78,7 +111,28 @@ pub fn handle_connection(
         }
     });
 
-    // 持久连接：循环读 ClientRequest，直到客户端关闭（EOF）。
+    // ConnGuard 保证在函数返回（含 `?` 提前返回）或 panic-unwind 时执行：
+    //   bus.unregister(sub) → drop body_tx + combined_tx 本地 clone → join writer。
+    // 没有 guard，`?` 提前返回会跳过这几步 → bus 持有的 sender clone 让 writer
+    // 线程的 iter() 永久阻塞 → 线程泄漏（quiet daemon 上不可收敛）。
+    //
+    // body_tx 必须也由 guard 拥有：drop 顺序上 guard 比 body_tx 先 drop（声明在前），
+    // 若 guard 在 join 时 body_tx 还活着，combined_rx 永不关闭、writer 永远 join
+    // 不上。所以 guard 把所有本地 sender clone 都接管了——loop body 通过
+    // `guard.body_tx.as_ref().unwrap()` 借用做 inline send / drain。
+    let guard = ConnGuard {
+        bus: Arc::clone(bus),
+        sub: subscription,
+        body_tx: Some(combined_tx.clone()),
+        combined_tx: Some(combined_tx),
+        writer: Some(writer_handle),
+    };
+    // body_tx 借用：生命周期与 guard 一致，函数末尾 guard drop 后失效。
+    // （as_ref 返回 Option<&Sender>；unwrap 永不 panic——guard 在 drop 前始终保有它。）
+    let body_tx: &std::sync::mpsc::Sender<ServerEvent> = guard.body_tx.as_ref().unwrap();
+
+    // 持久连接：循环读 ClientRequest，直到客户端关闭（EOF）。以下 `?` 与
+    // `.unwrap()` 任意一条出错 / panic 都会触发 ConnGuard::drop，安全清理。
     while let Some(req) = read_request(&mut reader)? {
         match req {
             ClientRequest::SendMessage { content } => {
@@ -87,45 +141,40 @@ pub fn handle_connection(
                 let rx = g.send_message(&id, content)?;
                 drop(g); // 释放 mgr 锁，让其它客户端可 NewSession/ListSessions
                 let _turn_guard = turn_token.lock().unwrap();
-                drain_agent_events(rx, &mut reader, &combined_tx)?;
+                drain_agent_events(rx, &mut reader, body_tx)?;
             }
             ClientRequest::Resume { id } => {
                 let mut g = mgr.lock().unwrap();
                 let rx = g.resume(&id)?;
                 drop(g);
                 let _turn_guard = turn_token.lock().unwrap();
-                drain_agent_events(rx, &mut reader, &combined_tx)?;
+                drain_agent_events(rx, &mut reader, body_tx)?;
             }
             // PromptReply 只应在一个 turn 的 drain 中被内联消费；顶层收到说明协议误用。
             ClientRequest::PromptReply { .. } => {
-                let _ = combined_tx.send(ServerEvent::Error {
+                let _ = body_tx.send(ServerEvent::Error {
                     message: "unexpected PromptReply (no prompt pending)".into(),
                 });
             }
             ClientRequest::NewSession => {
                 let id = mgr.lock().unwrap().create();
-                let _ = combined_tx.send(ServerEvent::SessionCreated { id });
+                let _ = body_tx.send(ServerEvent::SessionCreated { id });
             }
             ClientRequest::ListSessions => {
                 let ids = mgr.lock().unwrap().disk_sessions();
-                let _ = combined_tx.send(ServerEvent::Sessions { ids });
+                let _ = body_tx.send(ServerEvent::Sessions { ids });
             }
             ClientRequest::Shutdown => {
                 shutdown.store(true, std::sync::atomic::Ordering::SeqCst);
-                let _ = combined_tx.send(ServerEvent::Notice { text: "shutting down".into() });
+                let _ = body_tx.send(ServerEvent::Notice { text: "shutting down".into() });
             }
             ClientRequest::Status => {
-                let _ = combined_tx.send(ServerEvent::Notice { text: "ccd running".into() });
+                let _ = body_tx.send(ServerEvent::Notice { text: "ccd running".into() });
             }
         }
     }
 
-    // 客户端关闭（EOF）：先从 bus 注销（移除其 sender clone），再 drop 本地 combined_tx，
-    // 这样 combined_rx 的所有 sender 都释放 → writer 的 iter() 结束 → 线程干净退出。
-    // 不再依赖广播或 sleep——直接、确定性。
-    bus.unregister(subscription);
-    drop(combined_tx);
-    let _ = writer_handle.join();
+    // EOF happy path：guard 在函数返回时 drop，完成 unregister + writer join。
     Ok(())
 }
 
@@ -457,5 +506,88 @@ mod tests {
         let mut buf: Vec<u8> = Vec::new();
         write_event(&mut buf, &ev).unwrap();
         assert!(!buf.is_empty());
+    }
+
+    /// 回归（C1 writer-leak）：非 EOF 的 Err 出口也必须触发清理——
+    /// 即 bus 注销订阅 + drop combined_tx + join writer。
+    ///
+    /// 触发方式：客户端发送一个畸形首行（非 JSON），使 `read_request` 返回 Err，
+    /// `handle_connection` 经 `?` 提前返回 Err。
+    ///
+    /// 修复前：cleanup 被跳过 → bus 仍持有该订阅的 sender clone → writer 线程的
+    /// `iter()` 永久阻塞 → writer 线程泄漏 + 订阅在 bus 中残留。
+    ///
+    /// 修复后（ConnGuard）：任意 Err 出口都触发 Drop → unregister → writer 退出。
+    /// 我们断言：
+    ///   (1) handle_connection 的线程在短时间内 is_finished()（不挂）；
+    ///   (2) bus 的订阅集合恢复为 0（最迟在一条广播后）。
+    #[test]
+    fn error_close_path_unregisters_and_reaps_writer() {
+        let dir = std::env::temp_dir().join(format!(
+            "cc_err_close_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH).unwrap().subsec_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let sock = dir.join(".ccd.sock");
+
+        let server = SocketServer::bind(&sock).unwrap();
+        let registry = Arc::new(std::sync::RwLock::new(Registry::scan(&dir)));
+        let mgr = Arc::new(Mutex::new(DaemonSessionManager::new(
+            Arc::new(StubClient), "gpt-4o".into(), 4096, 0.7, dir.clone(), registry,
+        )));
+        let turn_token = mgr.lock().unwrap().turn_token();
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let bus = Arc::new(crate::daemon::bus::EventBus::new());
+
+        let mgr_c = Arc::clone(&mgr);
+        let shutdown_c = shutdown.clone();
+        let turn_token_c = turn_token.clone();
+        let bus_c = Arc::clone(&bus);
+        let h = std::thread::spawn(move || {
+            let stream = server.accept_one().unwrap();
+            // 期望返回 Err（read_request 解析 "not-json" 失败）。
+            let _ = handle_connection(stream, &mgr_c, &shutdown_c, &turn_token_c, &bus_c);
+        });
+
+        // 给 server 时间 accept。
+        std::thread::sleep(Duration::from_millis(50));
+
+        // 客户端连上 → 发畸形首行。
+        {
+            use std::io::Write;
+            let mut conn = UnixStream::connect(&sock).unwrap();
+            conn.write_all(b"not-json\n").unwrap();
+            conn.flush().unwrap();
+            // 关闭客户端连接（虽然 server 已经因 Err 返回，但确保 write-half 也释放）。
+            let _ = conn.shutdown(std::net::Shutdown::Both);
+        }
+
+        // (1) handle_connection 必须在短时间内结束——修复前 writer 永久阻塞会让
+        //     这个线程永远 is_finished()==false。用 5s deadline 轮询 is_finished()。
+        //     （真出现 pre-fix 退化时，本断言会 fail，不会无限挂死套件。）
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        let finished = loop {
+            if h.is_finished() { break true; }
+            if std::time::Instant::now() >= deadline { break false; }
+            std::thread::sleep(Duration::from_millis(50));
+        };
+        assert!(finished,
+            "handle_connection thread must finish on Err close path \
+             (pre-fix: writer leak keeps it alive forever)");
+
+        // (2) bus 订阅集合必须恢复为 0：guard 的 unregister 已移除该订阅。
+        //     pre-fix 下这里会是 1（残留）。
+        let n_after = bus.subscriber_count();
+        assert_eq!(n_after, 0,
+            "ConnGuard must unregister on Err path (subscriber count must be 0, got {})", n_after);
+        // broadcast 一次兜底——不 panic、不残留。
+        bus.broadcast("test", "post-close");
+        assert_eq!(bus.subscriber_count(), 0);
+
+        // 回收线程（已确认 finished）。
+        let _ = h.join();
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

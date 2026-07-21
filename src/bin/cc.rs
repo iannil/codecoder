@@ -47,7 +47,6 @@ fn send_one(sock: &std::path::Path, req: ClientRequest) -> anyhow::Result<()> {
 
 /// REPL：读 stdin 一行 → 发 SendMessage → 流式打印 → 直到 TurnComplete（Task 9a: 支持 Prompt）。
 fn repl(sock: &std::path::Path) -> anyhow::Result<()> {
-    use codecoder::client::Connection;
     use std::sync::{mpsc, Arc, Mutex};
 
     let conn = Connection::connect(sock)
@@ -98,6 +97,19 @@ fn repl(sock: &std::path::Path) -> anyhow::Result<()> {
         // 等 reader 线程通知 turn 结束（期间 reader 可能读 stdin 答 prompt）。
         let _ = done_rx.recv();
     }
+
+    // I1 fix：cc 在 /exit 或 stdin-EOF 时，必须主动关闭写半（SHUT_WR）才能让 daemon
+    // 的 read_request 见到 EOF 而返回——否则会形成三方死锁：
+    //   - main 阻塞在 reader_handle.join()；
+    //   - reader 线程阻塞在 reader.next_event() 等 daemon 关闭写半；
+    //   - daemon 阻塞在 read_request 等 cc 关闭写半；
+    //   - cc 的写半被 writer Arc（main）+ writer_for_reader Arc（reader 线程）共同持有，
+    //     都不释放 → daemon 永远见不到 EOF → reader 永远见不到 EOF → main 永远 join 不上。
+    //
+    // shutdown_write 走 SHUT_WR（内核级关闭写方向），不依赖 drop 顺序，也不需要 reader
+    // 线程先释放它的 Arc clone。daemon 收到 EOF → ConnGuard 清理 → 关闭 daemon 写半
+    // → reader 的 next_event 见到 EOF → reader 线程退出 → main 的 join 返回。
+    let _ = writer.lock().map_err(|e| anyhow::anyhow!("writer poisoned: {e}"))?.shutdown_write();
     let _ = reader_handle.join();
     Ok(())
 }

@@ -51,6 +51,12 @@ impl EventBus {
         let mut subs = self.subscribers.lock().unwrap();
         subs.retain(|_, tx| tx.send(ev.clone()).is_ok());
     }
+
+    /// 当前活跃订阅数（测试 / 诊断用）。正常路径上 unregister 后立即归零；
+    /// 出错路径上若 ConnGuard 没运行，会残留。
+    pub fn subscriber_count(&self) -> usize {
+        self.subscribers.lock().unwrap().len()
+    }
 }
 
 impl Default for EventBus {

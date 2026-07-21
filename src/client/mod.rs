@@ -58,6 +58,14 @@ impl ConnectionWriter {
         self.writer.flush()?;
         Ok(())
     }
+
+    /// 关闭写半（SHUT_WR）。让 daemon 的读半见到 EOF，从而触发其 handle_connection
+    /// 返回 → 关闭 daemon 的写半 → 本连接的 reader 见到 EOF 退出。
+    /// 用于 cc REPL 在 `/exit` 时打破「reader 等 daemon EOF / daemon 等 cc EOF」
+    /// 的循环死锁。读取 `&self` 即可调用——UnixStream::shutdown 不需要 `&mut`。
+    pub fn shutdown_write(&self) -> std::io::Result<()> {
+        self.writer.shutdown(std::net::Shutdown::Write)
+    }
 }
 
 /// 连接的读半（供 reader 线程 next_event）。
