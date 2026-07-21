@@ -301,7 +301,22 @@ impl WorkGraph {
             self.nodes.len(),
             self.nodes.iter().filter(|n| n.status == NodeStatus::Done).count(),
         )];
+        // Bound the prompt: a large graph would bloat every system message. Urgent
+        // rows (ready / in_progress / needs_fix) are always shown; the long tail of
+        // pending/blocked is capped with an elision note.
+        const MAX_PROMPT_NODES: usize = 40;
+        let mut shown = 0usize;
+        let mut elided = 0usize;
         for n in &self.nodes {
+            if n.status == NodeStatus::Done {
+                continue;
+            }
+            let urgent = matches!(n.status, NodeStatus::InProgress | NodeStatus::NeedsFix)
+                || Some(n.id) == ready;
+            if !urgent && shown >= MAX_PROMPT_NODES {
+                elided += 1;
+                continue;
+            }
             let tag = match n.status {
                 NodeStatus::Done => continue,
                 NodeStatus::Pending if Some(n.id) == ready => "▶ready",
@@ -319,6 +334,12 @@ impl WorkGraph {
                 format!(" ({})", ds.join(","))
             };
             lines.push(format!("- [{}] #{}{}{}", tag, n.id, n.title, deps));
+            shown += 1;
+        }
+        if elided > 0 {
+            lines.push(format!(
+                "… ({elided} more pending/blocked hidden — use `milestone list` for the full graph)"
+            ));
         }
         lines.join("\n")
     }
@@ -517,5 +538,21 @@ mod tests {
         assert!(prompt.contains("!needs_fix"), "needs_fix marker: {prompt}");
         assert!(prompt.contains("?hypothesis"), "hypothesis marker: {prompt}");
         assert!(prompt.contains("·locked"), "locked marker: {prompt}");
+    }
+
+    #[test]
+    fn render_for_prompt_caps_large_graph() {
+        let mut g = wg();
+        // 50 pending nodes exceeds MAX_PROMPT_NODES (40); the non-urgent tail
+        // is elided with a note, while the urgent ready node still shows.
+        for i in 0..50 {
+            g.add(&format!("task-{i}"), "", vec![]).unwrap();
+        }
+        let prompt = g.render_for_prompt();
+        assert!(
+            prompt.contains("more pending/blocked hidden"),
+            "large graph should elide the tail: {prompt}"
+        );
+        assert!(prompt.contains("▶ready"), "ready node must survive the cap: {prompt}");
     }
 }
