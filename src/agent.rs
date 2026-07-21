@@ -759,8 +759,10 @@ impl AgentLoop {
         self.resolve_trust_if_pending(event_tx);
         self.append(Role::User, vec![MessageItem::Text { text }]);
 
+        let mut hit_tool_cap = true; // cleared on every non-exhaustion exit
         for _ in 0..MAX_TOOL_ITERATIONS {
             if self.cancel.is_cancelled() {
+                hit_tool_cap = false;
                 break;
             }
 
@@ -813,6 +815,7 @@ impl AgentLoop {
                         ));
                     }
                     let _ = event_tx.send(AgentEvent::StreamDelta(format!("error: {e}")));
+                    hit_tool_cap = false;
                     break;
                 }
             };
@@ -841,6 +844,7 @@ impl AgentLoop {
                 if self.drain_steer(event_tx) {
                     continue;
                 }
+                hit_tool_cap = false;
                 break; // no tools requested and nothing steered → turn is done
             }
 
@@ -889,8 +893,17 @@ impl AgentLoop {
                 self.append(Role::Tool, results);
             }
             if cancelled {
+                hit_tool_cap = false;
                 break;
             }
+        }
+        if hit_tool_cap {
+            // The loop exhausted MAX_TOOL_ITERATIONS while the agent kept calling
+            // tools — the turn was capped, not finished. Surface it so the abrupt
+            // stop isn't mistaken for completion.
+            let _ = event_tx.send(AgentEvent::Notice(format!(
+                "turn stopped at the {MAX_TOOL_ITERATIONS}-tool-iteration cap; the task may be incomplete — send another message to continue."
+            )));
         }
 
         let _ = event_tx.send(AgentEvent::TurnComplete);
@@ -1330,6 +1343,13 @@ impl AgentLoop {
                 )));
             }
         }
+        // The loop exhausted MAX_AUTO; if a milestone is still ready, more work
+        // remains — surface it rather than stopping silently mid-graph.
+        if WorkGraph::read(&self.root).next_ready().is_some() {
+            let _ = event_tx.send(AgentEvent::Notice(format!(
+                "workgraph auto-advance capped at {MAX_AUTO} milestones this turn; more are ready — send another message to continue."
+            )));
+        }
     }
 }
 
@@ -1721,6 +1741,37 @@ mod tests {
             assert!(msg.contains("NOT loaded"), "denial should explain the allowlist is not loaded: {msg}");
             assert!(msg.contains("CODECODER_DEFAULT_TRUST"), "denial should offer the remediation: {msg}");
         }
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn turn_emits_notice_when_tool_iteration_cap_hit() {
+        use std::sync::mpsc::channel;
+        // A provider that ALWAYS requests a read-only tool (Permission::None, so
+        // it runs without prompts). The loop must exhaust MAX_TOOL_ITERATIONS and
+        // surface a cap Notice rather than stopping silently.
+        struct AlwaysTool;
+        impl Provider for AlwaysTool {
+            fn name(&self) -> &str { "always-tool" }
+            fn complete(&self, _req: &CompletionRequest) -> anyhow::Result<Completion> {
+                Ok(Message::new(0, Role::Assistant, vec![MessageItem::ToolCall {
+                    id: "c".into(), name: "list_directory".into(), args: serde_json::json!({}),
+                }]).into())
+            }
+        }
+        let dir = std::env::temp_dir().join(format!("cc_cap_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let provider = std::sync::Arc::new(AlwaysTool);
+        let mut agent = AgentLoop::new(provider, "m", 256, 0.0, dir.clone());
+        let (tx, rx) = channel();
+        agent.run_one_turn("go".into(), &tx);
+        drop(tx);
+        let events: Vec<_> = rx.into_iter().collect();
+        assert!(
+            events.iter().any(|e| matches!(e, AgentEvent::Notice(n) if n.contains("tool-iteration cap"))),
+            "exhausting MAX_TOOL_ITERATIONS should emit a cap Notice (found {} events, none matching)",
+            events.len()
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 
