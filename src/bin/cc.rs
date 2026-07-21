@@ -15,6 +15,12 @@ fn main() -> anyhow::Result<()> {
         [one] if one == "sessions" => send_one(&sock, ClientRequest::ListSessions),
         [one] if one == "status" => send_one(&sock, ClientRequest::Status),
         [one] if one == "shutdown" => send_one(&sock, ClientRequest::Shutdown),
+        [one] if one == "tree" => send_one(&sock, ClientRequest::TreeShow),
+        [one, id] if one == "fork" => {
+            let id: u64 = id.parse().map_err(|e| anyhow::anyhow!("fork <id>: {e}"))?;
+            send_one(&sock, ClientRequest::TreeNav { id })
+        }
+        [one] if one == "clone" => send_one(&sock, ClientRequest::TreeClone),
         [msg @ ..] => {
             // cc "hello world" — 一次性发送
             let content = msg.join(" ");
@@ -93,6 +99,25 @@ fn repl(sock: &std::path::Path) -> anyhow::Result<()> {
         let trimmed = line.trim();
         if trimmed.is_empty() { continue; }
         if trimmed == "/exit" || trimmed == "/quit" { break; }
+
+        // Tree-sessions slash commands
+        if trimmed == "/tree" {
+            writer.lock().unwrap().send(&ClientRequest::TreeShow)?;
+            let _ = done_rx.recv(); // TreeShow -> Tree + TurnComplete -> reader signals done
+            continue;
+        }
+        if let Some(rest) = trimmed.strip_prefix("/fork ") {
+            let id: u64 = rest.trim().parse().map_err(|e| anyhow::anyhow!("/fork <id>: {e}"))?;
+            writer.lock().unwrap().send(&ClientRequest::TreeNav { id })?;
+            let _ = done_rx.recv(); // Navigate -> Notice + TurnComplete
+            continue;
+        }
+        if trimmed == "/clone" {
+            writer.lock().unwrap().send(&ClientRequest::TreeClone)?;
+            let _ = done_rx.recv();
+            continue;
+        }
+
         writer.lock().unwrap().send(&ClientRequest::SendMessage { content: trimmed.to_string() })?;
         // 等 reader 线程通知 turn 结束（期间 reader 可能读 stdin 答 prompt）。
         let _ = done_rx.recv();
