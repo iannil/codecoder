@@ -133,7 +133,18 @@ impl Tool for Grep {
             for (i, line) in text.lines().enumerate() {
                 if re.is_match(line) {
                     let trimmed = line.trim();
-                    let shown = if trimmed.len() > 200 { &trimmed[..200] } else { trimmed };
+                    // CJK-safe truncation: `&str` byte-slicing inside a multi-byte
+                    // char panics, so slice at the char boundary of the 201st char.
+                    let shown = if trimmed.chars().count() > 200 {
+                        let end = trimmed
+                            .char_indices()
+                            .nth(200)
+                            .map(|(i, _)| i)
+                            .unwrap_or(trimmed.len());
+                        &trimmed[..end]
+                    } else {
+                        trimmed
+                    };
                     hits.push(format!("{rel}:{}: {shown}", i + 1));
                     if hits.len() >= MAX_MATCHES {
                         break 'outer;
@@ -264,6 +275,22 @@ mod tests {
         let mut ctx = ToolCtx::new(&dir);
         let out = Grep.run(json!({ "pattern": "(" }), &mut ctx).unwrap();
         assert!(out.is_error);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn grep_truncates_long_cjk_line_without_panicking() {
+        // Regression: `&trimmed[..200]` panicked when byte 200 fell inside a
+        // multi-byte CJK char. A long Chinese match line must truncate at a char
+        // boundary, not crash the agent thread.
+        let dir = std::env::temp_dir().join(format!("cc_cjk_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let long = "为什么".repeat(40); // 120 chars / 360 bytes; byte 200 is mid-char
+        std::fs::write(dir.join("zh.md"), format!("# 标记 {long}\n")).unwrap();
+        let mut ctx = ToolCtx::new(&dir);
+        let out = Grep.run(json!({ "pattern": "标记" }), &mut ctx).unwrap();
+        assert!(!out.is_error, "{}", out.content);
+        assert!(out.content.contains("zh.md:1:"), "{}", out.content);
         std::fs::remove_dir_all(&dir).ok();
     }
 }
