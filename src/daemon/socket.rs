@@ -162,17 +162,21 @@ pub fn handle_connection(
             ClientRequest::NewSession => {
                 let id = mgr.lock().unwrap().create();
                 let _ = body_tx.send(ServerEvent::SessionCreated { id });
+                let _ = body_tx.send(ServerEvent::TurnComplete);
             }
             ClientRequest::ListSessions => {
                 let ids = mgr.lock().unwrap().disk_sessions();
                 let _ = body_tx.send(ServerEvent::Sessions { ids });
+                let _ = body_tx.send(ServerEvent::TurnComplete);
             }
             ClientRequest::Shutdown => {
                 shutdown.store(true, std::sync::atomic::Ordering::SeqCst);
                 let _ = body_tx.send(ServerEvent::Notice { text: "shutting down".into() });
+                let _ = body_tx.send(ServerEvent::TurnComplete);
             }
             ClientRequest::Status => {
                 let _ = body_tx.send(ServerEvent::Notice { text: "ccd running".into() });
+                let _ = body_tx.send(ServerEvent::TurnComplete);
             }
             ClientRequest::TreeShow => {
                 // 读最新 session 文件 → 建树视图。（单活动 session 场景≈活动 session。）
@@ -836,6 +840,54 @@ mod tests {
         assert!(got_created, "TreeClone must return SessionCreated");
         let after = std::fs::read_dir(crate::session::sessions_dir(&dir)).unwrap().count();
         assert_eq!(after, before + 1, "TreeClone must create one new session file");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn list_sessions_terminates_with_turncomplete() {
+        let dir = std::env::temp_dir().join(format!("cc_lstterm_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let sock = dir.join(".ccd.sock");
+        let server = SocketServer::bind(&sock).unwrap();
+        let registry = Arc::new(std::sync::RwLock::new(Registry::scan(&dir)));
+        let mgr = Arc::new(Mutex::new(DaemonSessionManager::new(
+            Arc::new(StubClient), "gpt-4o".into(), 4096, 0.7, dir.clone(), registry,
+        )));
+        let turn_token = mgr.lock().unwrap().turn_token();
+        let bus = Arc::new(crate::daemon::bus::EventBus::new());
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let mgr_c = Arc::clone(&mgr);
+        let bus_c = Arc::clone(&bus);
+        let shutdown_c = shutdown.clone();
+        let h = std::thread::spawn(move || {
+            let s = server.accept_one().unwrap();
+            handle_connection(s, &mgr_c, &shutdown_c, &turn_token, &bus_c).unwrap();
+        });
+        std::thread::sleep(Duration::from_millis(50));
+        let mut conn = UnixStream::connect(&sock).unwrap();
+        use std::io::Write;
+        writeln!(conn, "{}", serde_json::to_string(&ClientRequest::ListSessions).unwrap()).unwrap();
+        conn.flush().unwrap();
+        let mut r = BufReader::new(conn.try_clone().unwrap());
+        let mut got_sessions = false;
+        let mut got_complete = false;
+        for _ in 0..50 {
+            let mut buf = String::new();
+            r.get_mut().set_read_timeout(Some(Duration::from_millis(200))).unwrap();
+            match r.read_line(&mut buf) {
+                Ok(0) => break,
+                Ok(_) => {
+                    if let Ok(ServerEvent::Sessions { .. }) = serde_json::from_str(buf.trim()) { got_sessions = true; }
+                    if let Ok(ServerEvent::TurnComplete) = serde_json::from_str(buf.trim()) { got_complete = true; break; }
+                }
+                Err(_) => break,
+            }
+        }
+        drop(conn);
+        drop(r);
+        h.join().unwrap();
+        assert!(got_sessions, "ListSessions must return Sessions");
+        assert!(got_complete, "ListSessions must terminate with TurnComplete (was hanging)");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
