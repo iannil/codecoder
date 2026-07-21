@@ -467,43 +467,71 @@ impl AgentLoop {
                     let _ = event_tx.send(AgentEvent::TurnComplete);
                 }
                 AgentCommand::Navigate(id) => {
-                    // Phase C: when navigating leaves a branch behind, summarize it
-                    // before the jump (ADR 0023 tier-2 is reused for the summary).
-                    if self.session.leaf.is_some_and(|l| l != 0) && self.session.entries.len() > 1 {
-                        let abandoned = self.session.abandoned_branch(id);
-                        if !abandoned.is_empty() {
-                            let thread = self.session.nodes_by_id(&abandoned);
-                            let rendered = crate::compaction::render_span(&thread);
-                            if !rendered.trim().is_empty() {
-                                match self.summarize_span(&rendered, None) {
-                                    Ok(summary) => {
-                                        let _ = event_tx.send(AgentEvent::Notice(
-                                            format!("abandoned branch summarized: {summary}"),
-                                        ));
-                                    }
-                                    Err(_) => {
-                                        let _ = event_tx.send(AgentEvent::Notice(
-                                            "failed to summarize abandoned branch".into(),
-                                        ));
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    if self.session.navigate_to(id) {
-                        let _ = event_tx.send(AgentEvent::Notice(format!("navigated to entry #{id}")));
-                        // Autosave after changing leaf (daemon Navigate expects this).
-                        if self.persist {
-                            let _ = self.session.save(&self.session_path);
-                        }
-                    } else {
-                        let _ = event_tx.send(AgentEvent::Notice(format!("no entry #{id}")));
-                    }
+                    self.handle_navigate(id, &event_tx);
                     let _ = event_tx.send(AgentEvent::TurnComplete);
                 }
                 AgentCommand::Cancel => self.cancel.cancel(),
                 AgentCommand::Shutdown => break,
             }
+        }
+    }
+
+    /// Handle a Navigate command (Phase C: summarize abandoned branch, then jump).
+    /// Extracted for testability (Task 3).
+    fn handle_navigate(&mut self, id: u64, event_tx: &Sender<AgentEvent>) {
+        // Phase C: when navigating leaves a branch behind, summarize it
+        // before the jump (ADR 0023 tier-2 is reused for the summary).
+        if self.session.leaf.is_some_and(|l| l != 0) && self.session.entries.len() > 1 {
+            let abandoned = self.session.abandoned_branch(id);
+            if !abandoned.is_empty() {
+                let thread = self.session.nodes_by_id(&abandoned);
+                let rendered = crate::compaction::render_span(&thread);
+                if !rendered.trim().is_empty() {
+                    match self.summarize_span(&rendered, None) {
+                        Ok(summary) => {
+                            let _ = event_tx.send(AgentEvent::Notice(
+                                format!("abandoned branch summarized: {summary}"),
+                            ));
+                            // Phase E: structured ruling on linked causal nodes.
+                            for entry_id in &abandoned {
+                                let causal_node = self.session.entry_by_id(*entry_id)
+                                    .and_then(|e| e.meta.as_ref())
+                                    .and_then(|m| m.get("causal_node"))
+                                    .and_then(|v| v.as_u64());
+                                if let Some(cn) = causal_node {
+                                    let s = summary.clone();
+                                    self.session.update_meta(*entry_id, |m| {
+                                        let obj = m.get_or_insert(serde_json::json!({}));
+                                        if let Some(o) = obj.as_object_mut() {
+                                            o.insert("status".into(), "ruled_out".into());
+                                            o.insert("ruling".into(), s.into());
+                                        }
+                                    });
+                                    if let Err(e) = crate::tool::reason::record_ruling(&self.root, cn, &summary) {
+                                        let _ = event_tx.send(AgentEvent::Notice(
+                                            format!("causal ruling write failed for node #{cn}: {e}"),
+                                        ));
+                                    }
+                                }
+                            }
+                        }
+                        Err(_) => {
+                            let _ = event_tx.send(AgentEvent::Notice(
+                                "failed to summarize abandoned branch".into(),
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+        if self.session.navigate_to(id) {
+            let _ = event_tx.send(AgentEvent::Notice(format!("navigated to entry #{id}")));
+            // Autosave after changing leaf (daemon Navigate expects this).
+            if self.persist {
+                let _ = self.session.save(&self.session_path);
+            }
+        } else {
+            let _ = event_tx.send(AgentEvent::Notice(format!("no entry #{id}")));
         }
     }
 
@@ -2159,6 +2187,62 @@ mod tests {
 
         let meta = agent.session.entry_by_id(0).unwrap().meta.clone();
         assert_eq!(meta, Some(mark), "leaf meta must equal the applied mark");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn navigate_abandon_records_ruling_on_linked_branch() {
+        use crate::message::{Message, Role};
+        let dir = std::env::temp_dir().join(format!("cc_navruling_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        // seed a causal tree with node 1
+        std::fs::write(
+            dir.join("causal_tree.json"),
+            r#"{"nodes":[{"id":1,"question":"why slow?","status":"hypothesis"}],"next_id":2}"#,
+        ).unwrap();
+
+        // Create a scripted provider that returns a summary for the abandoned branch
+        struct SummaryProvider {
+            calls: std::sync::atomic::AtomicUsize,
+        }
+        impl crate::provider::Provider for SummaryProvider {
+            fn name(&self) -> &str { "summary" }
+            fn complete(&self, _req: &crate::provider::CompletionRequest) -> anyhow::Result<crate::provider::Completion> {
+                self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Ok(Message::text(0, Role::Assistant, "ruled out: alternative approach failed").into())
+            }
+        }
+
+        let mut agent = AgentLoop::new(
+            std::sync::Arc::new(SummaryProvider { calls: std::sync::atomic::AtomicUsize::new(0) }),
+            "gpt-4o", 4096, 0.7, dir.clone(),
+        );
+        // build a session tree: root(0) -> A(1, linked to causal node 1) ; navigate to 0 then append B(2)
+        agent.session.append(Message::text(0, Role::User, "root"));
+        agent.session.append(Message {
+            id: 1, role: Role::Assistant,
+            items: vec![crate::message::MessageItem::Text { text: "trying hypothesis".into() }],
+        });
+        // mark entry 1's leaf as linked (simulate `reason link`)
+        agent.session.leaf = Some(1);
+        agent.session.update_meta(1, |m| *m = Some(serde_json::json!({"causal_node":1,"status":"hypothesis"})));
+
+        // Navigate to root (0): abandons entry 1
+        let (tx, _rx) = std::sync::mpsc::channel::<AgentEvent>();
+        agent.handle_navigate(0, &tx);
+
+        // After navigation away from entry 1, entry 1's meta should be ruled_out:
+        let m = agent.session.entry_by_id(1).unwrap().meta.clone();
+        assert!(matches!(m, Some(ref v) if v.get("status") == Some(&serde_json::json!("ruled_out"))));
+        let ruling = m.as_ref().and_then(|v| v.get("ruling").and_then(|r| r.as_str()));
+        assert_eq!(ruling, Some("ruled out: alternative approach failed"));
+
+        // Causal tree node 1 should have the ruling
+        let causal_content = std::fs::read_to_string(dir.join("causal_tree.json")).unwrap();
+        let causal: serde_json::Value = serde_json::from_str(&causal_content).unwrap();
+        let node = causal["nodes"][0].clone();
+        assert_eq!(node["ruling"], serde_json::json!("ruled out: alternative approach failed"));
+
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
