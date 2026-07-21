@@ -48,6 +48,21 @@ pub enum TrustDecisionWire {
     Never,
 }
 
+/// One node of the session tree, for the `cc tree` view.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TreeNode {
+    pub id: u64,
+    pub parent: Option<u64>,
+    /// "user" | "assistant" | "system" | "tool"
+    pub role: String,
+    /// First non-empty line of the message, truncated.
+    pub preview: String,
+    /// true iff this entry is the session's current leaf.
+    pub is_leaf: bool,
+    /// true iff this entry is on the leaf→root active thread.
+    pub on_active_path: bool,
+}
+
 /// 客户端 → daemon 的请求。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -60,6 +75,12 @@ pub enum ClientRequest {
     Status,
     /// 对 daemon 发来的 `ServerEvent::Prompt` 的回答。
     PromptReply { id: u64, answer: PromptAnswer },
+    /// 显示活动 session 的会话树（`cc tree`）。
+    TreeShow,
+    /// 导航活动 session 的 leaf 到 id（`cc fork <id>`；下次 append 即分叉）。
+    TreeNav { id: u64 },
+    /// 复制活动 session 为新 session 文件（`cc clone`）。
+    TreeClone,
 }
 
 /// daemon → 客户端的事件。一个 `SendMessage` 会产生一串事件，以 `TurnComplete` 或
@@ -81,6 +102,8 @@ pub enum ServerEvent {
     /// daemon 级广播通知（来自 event bus，如 workgraph/supervisor）。
     /// 与 per-turn `Notice` 区分：带 `source` 标签，客户端可不同渲染。
     BusNotice { source: String, text: String },
+    /// 会话树视图（响应 `TreeShow`）。
+    Tree { nodes: Vec<TreeNode> },
 }
 
 /// 从一行读一个 `ClientRequest`。`Ok(None)` 表示客户端关闭（EOF）。
@@ -295,5 +318,31 @@ mod tests {
             let back: TrustDecisionWire = serde_json::from_str(&json).unwrap();
             assert_eq!(decision, back);
         }
+    }
+
+    #[test]
+    fn tree_node_and_variants_serde_roundtrip() {
+        let n = TreeNode {
+            id: 5, parent: Some(2), role: "assistant".into(), preview: "hi".into(),
+            is_leaf: true, on_active_path: true,
+        };
+        let j = serde_json::to_string(&n).unwrap();
+        let back: TreeNode = serde_json::from_str(&j).unwrap();
+        assert_eq!(n, back);
+
+        let reqs = vec![
+            ClientRequest::TreeShow,
+            ClientRequest::TreeNav { id: 7 },
+            ClientRequest::TreeClone,
+        ];
+        for r in reqs {
+            let j = serde_json::to_string(&r).unwrap();
+            assert_eq!(r, serde_json::from_str::<ClientRequest>(&j).unwrap());
+        }
+        let ev = ServerEvent::Tree { nodes: vec![n.clone()] };
+        let j = serde_json::to_string(&ev).unwrap();
+        let back: ServerEvent = serde_json::from_str(&j).unwrap();
+        assert_eq!(ev, back);
+        assert!(j.contains("\"type\":\"tree\""));
     }
 }

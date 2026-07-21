@@ -171,6 +171,12 @@ pub fn handle_connection(
             ClientRequest::Status => {
                 let _ = body_tx.send(ServerEvent::Notice { text: "ccd running".into() });
             }
+            // Placeholder for tree-related requests (Task 2 will implement)
+            ClientRequest::TreeShow | ClientRequest::TreeNav { .. } | ClientRequest::TreeClone => {
+                let _ = body_tx.send(ServerEvent::Error {
+                    message: "tree requests not yet implemented".into(),
+                });
+            }
         }
     }
 

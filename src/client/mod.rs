@@ -89,6 +89,46 @@ pub fn default_sock_path(cfg: &Config) -> std::path::PathBuf {
     crate::daemon::socket::default_sock_path(cfg)
 }
 
+/// 渲染会话树为字符串：按 parent 链缩进，active 路径前缀 ►，leaf 前缀 ●，废弃分支无标记。
+/// 纯函数（不打印），便于单测。
+pub fn print_tree(nodes: &[crate::daemon::proto::TreeNode]) -> String {
+    use std::collections::HashMap;
+    let by_id: HashMap<u64, &crate::daemon::proto::TreeNode> =
+        nodes.iter().map(|n| (n.id, n)).collect();
+    let mut children: HashMap<u64, Vec<u64>> = HashMap::new();
+    let mut roots: Vec<u64> = Vec::new();
+    for n in nodes {
+        match n.parent {
+            None => roots.push(n.id),
+            Some(p) => children.entry(p).or_default().push(n.id),
+        }
+    }
+    // 稳定排序：按 id 升序，保证渲染确定性
+    for v in children.values_mut() { v.sort(); }
+    roots.sort();
+
+    let mut out = String::new();
+    fn rec(
+        id: u64,
+        depth: usize,
+        by_id: &HashMap<u64, &crate::daemon::proto::TreeNode>,
+        children: &HashMap<u64, Vec<u64>>,
+        out: &mut String,
+    ) {
+        let n = by_id.get(&id).copied().unwrap();
+        let prefix = if n.is_leaf { "●" }
+            else if n.on_active_path { "►" }
+            else { " " };
+        let indent = "  ".repeat(depth);
+        out.push_str(&format!("{indent}{prefix} [{}] {}: {}\n", n.id, n.role, n.preview));
+        if let Some(kids) = children.get(&id) {
+            for c in kids { rec(*c, depth + 1, by_id, children, out); }
+        }
+    }
+    for r in roots { rec(r, 0, &by_id, &children, &mut out); }
+    out
+}
+
 /// 把一个 ServerEvent 渲染到 stdout/stderr。返回 true 表示是 turn 终态。
 pub fn print_event(ev: &ServerEvent) -> bool {
     use std::io::Write;
@@ -120,6 +160,11 @@ pub fn print_event(ev: &ServerEvent) -> bool {
             false
         }
         ServerEvent::BusNotice { source, text } => { println!("· [{source}] {text}"); false }
+        ServerEvent::Tree { nodes } => {
+            print!("{}", print_tree(nodes));
+            let _ = std::io::stdout().flush();
+            false
+        }
     }
 }
 
@@ -246,5 +291,26 @@ mod tests {
         // print_event prints to stdout; we only assert it's non-terminal (returns false)
         // and doesn't panic. (Terminal events are TurnComplete/Error.)
         assert!(!print_event(&ev));
+    }
+
+    #[test]
+    fn print_tree_marks_active_path_leaf_and_abandoned() {
+        use crate::daemon::proto::TreeNode;
+        // root(0) → A(1) → leaf(3)   [active]
+        //        → B(2)               [abandoned]
+        let nodes = vec![
+            TreeNode { id: 0, parent: None,      role: "user".into(),      preview: "root".into(),      is_leaf: false, on_active_path: true },
+            TreeNode { id: 1, parent: Some(0),   role: "assistant".into(), preview: "A".into(),         is_leaf: false, on_active_path: true },
+            TreeNode { id: 2, parent: Some(0),   role: "assistant".into(), preview: "B".into(),         is_leaf: false, on_active_path: false },
+            TreeNode { id: 3, parent: Some(1),   role: "user".into(),      preview: "leaf".into(),      is_leaf: true,  on_active_path: true },
+        ];
+        let rendered = print_tree(&nodes);
+        // active path nodes (0,1,3) get ► or ●; abandoned (2) gets a space prefix
+        assert!(rendered.contains("► [0]"));
+        assert!(rendered.contains("► [1]"));
+        assert!(rendered.contains("● [3]"));
+        assert!(rendered.contains("  [2]")); // abandoned: leading space, no marker
+        // indentation depth: leaf at depth 2 (4 spaces: 2 per depth)
+        assert!(rendered.contains("    ● [3]"));
     }
 }
