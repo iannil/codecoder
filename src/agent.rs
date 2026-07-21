@@ -1026,7 +1026,20 @@ impl AgentLoop {
         if let Permission::Ask { key } = tool.permission(&args, &self.root) {
             if !self.allowlist.allows(&key) && !self.project_allowlist.allows(&key) {
                 if self.headless {
-                    let output = format!("denied: no user present; '{key}' not in project allowlist");
+                    // Name the root cause (ADR 0028): an untrusted project's
+                    // codecoder.json allowlist is NOT loaded, so a key the operator
+                    // believes they pre-authorized is denied. Distinguish that from a
+                    // genuinely-absent key (trust == Trusted, allowlist loaded).
+                    let output = if self.trust != TrustState::Trusted {
+                        format!(
+                            "denied: '{key}' — project not trusted (headless); the \
+                             codecoder.json allowlist is NOT loaded. Set \
+                             CODECODER_DEFAULT_TRUST=always (or record trust) to enable \
+                             pre-authorized tools."
+                        )
+                    } else {
+                        format!("denied: no user present; '{key}' not in project allowlist")
+                    };
                     // Emit a ToolFinished error so the denial is observable in the
                     // event stream (BgOutcome.denied is drained from these events).
                     let _ = event_tx.send(AgentEvent::ToolFinished {
@@ -1696,6 +1709,18 @@ mod tests {
             "headless must not emit PermissionRequest");
         // The unauthorized write did not happen.
         assert!(!dir.join("hacked.txt").exists(), "unauthorized write_file must be denied");
+        // ADR 0028: the project is untrusted (headless, no recorded decision) so
+        // the codecoder.json allowlist is NOT loaded. The denial must name that
+        // root cause and offer the remediation — not just "not in allowlist".
+        let denial = events.iter().find_map(|e| match e {
+            AgentEvent::ToolFinished { is_error: true, output, .. } => Some(output.as_str()),
+            _ => None,
+        });
+        if let Some(msg) = denial {
+            assert!(msg.contains("not trusted"), "denial should name the trust root cause: {msg}");
+            assert!(msg.contains("NOT loaded"), "denial should explain the allowlist is not loaded: {msg}");
+            assert!(msg.contains("CODECODER_DEFAULT_TRUST"), "denial should offer the remediation: {msg}");
+        }
         std::fs::remove_dir_all(&dir).ok();
     }
 

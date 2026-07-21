@@ -73,6 +73,14 @@ A legitimate operator therefore opts in explicitly: `CODECODER_DEFAULT_TRUST=alw
 or a recorded decision. This tightens ADR 0026's contract: pre-authorization now
 additionally requires trust.
 
+When a headless run denies an Ask-tool because the project is **not** trusted, the
+denial message must name that root cause — "project not trusted; the codecoder.json
+allowlist is NOT loaded" plus the `CODECODER_DEFAULT_TRUST` remediation — rather than
+the bare "not in project allowlist" used when the allowlist *is* loaded but the key is
+genuinely absent. A confused operator who did pre-authorize the key must be able to
+diagnose that the file was never loaded. (Default trust itself is unchanged; this is a
+diagnosability requirement, not a safety relaxation.)
+
 ## Trust-requiring resources
 
 `AGENTS.md`, `CONTEXT.md`, `codecoder.json` (files) and `skills/`, `prompts/`,
