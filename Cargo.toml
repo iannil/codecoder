@@ -19,6 +19,8 @@ serde_json = "1"
 # Errors
 anyhow = "1"
 thiserror = "2"
+# SIGINT → graceful cancel for the headless Background Agent (ADR 0026).
+signal-hook = "0.3"
 # Blocking HTTP for the Provider — no async runtime, consistent with OS-threads kernel (ADR 0016)
 ureq = { version = "2", features = ["json"] }
 # Search tools: glob (file patterns) + regex (grep)

@@ -68,6 +68,11 @@ pub fn run_background(
 
     // Build the agent once; reuse across milestones.
     let mut agent = AgentLoop::new_background(provider.clone(), model.clone(), max_tokens, temperature, root.clone());
+    // ADR 0026: wire SIGINT → cancel so a runaway headless task can be stopped
+    // gracefully (Ctrl+C / `kill -INT`). The turn loop + run_command poll cancel.
+    if let Err(e) = agent.cancel_token().cancel_on_sigint() {
+        eprintln!("ccd: SIGINT cancel not wired: {e}");
+    }
 
     // Run the first turn (explicit task or first workgraph milestone).
     let (tx, rx) = channel::<AgentEvent>();
@@ -152,6 +157,11 @@ pub fn advance_one_milestone(
         (t, n.title.clone())
     };
     let mut agent = AgentLoop::new_background(provider, model, max_tokens, temperature, root.clone());
+    // Each auto-advanced milestone runs on its own agent (own cancel token), so
+    // re-wire SIGINT here too — signal-hook stacks handlers, all tokens get set.
+    if let Err(e) = agent.cancel_token().cancel_on_sigint() {
+        eprintln!("ccd: SIGINT cancel not wired: {e}");
+    }
     let mut out = BgOutcome::default();
     out.events.push(format!("task: workgraph milestone #{} ({})", milestone_id, title));
     let (tx, rx) = channel::<AgentEvent>();

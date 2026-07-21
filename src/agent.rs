@@ -116,6 +116,24 @@ impl CancelToken {
     pub fn reset(&self) {
         self.0.store(false, std::sync::atomic::Ordering::SeqCst);
     }
+
+    /// On Unix, arrange for SIGINT (Ctrl+C / `kill -INT`) to cancel this token,
+    /// so a runaway headless Background Agent stops gracefully (ADR 0026): the
+    /// turn loop polls `is_cancelled`, and `run_command` kills its subprocess on
+    /// cancel. signal-hook stacks handlers, so registering per-agent (the initial
+    /// turn + each auto-advanced milestone) sets every registered token on SIGINT.
+    /// Returns Err if installation fails; callers log and continue (cancel just
+    /// won't be wired). No-op off-Unix.
+    #[cfg(unix)]
+    pub fn cancel_on_sigint(&self) -> anyhow::Result<()> {
+        signal_hook::flag::register(signal_hook::consts::SIGINT, self.0.clone())?;
+        Ok(())
+    }
+    #[cfg(not(unix))]
+    #[allow(unused_variables)]
+    pub fn cancel_on_sigint(&self) -> anyhow::Result<()> {
+        Ok(())
+    }
 }
 
 /// A shared queue of user messages submitted while a turn is running (ADR 0029).

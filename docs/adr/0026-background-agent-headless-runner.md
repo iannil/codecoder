@@ -33,7 +33,19 @@ toolbox** and may write/run — bounded only by the pre-authorized allowlist. It
 `headless`, a boolean on `AgentLoop` that only alters the unauthorized-Ask branch
 and the interactive-tool intercepts; interactive behavior is unchanged.
 
+## Graceful SIGINT cancel
+
+A headless run wires SIGINT (Ctrl+C / `kill -INT`) to the agent's `CancelToken`
+via `signal-hook` (`CancelToken::cancel_on_sigint`), registered for the initial
+turn's agent and each auto-advanced milestone's agent. On SIGINT the token flips,
+the turn loop's cancel check fires, and `run_command` kills its subprocess — so a
+runaway task stops gracefully instead of requiring `kill -9`. The runner then
+returns a partial `BgOutcome`. (Cancellation is cooperative: a turn blocked in a
+single long provider call still completes that call before the next iteration
+checks cancel.)
+
 ## Deferred (named hard problems, not in v1)
 
-SIGINT/cancel wiring, a built-in scheduler, and multi-runner resource limits are
-out of scope; the external scheduler bounds concurrency.
+A built-in scheduler and multi-runner resource limits are out of scope; the
+external scheduler bounds concurrency. (SIGINT/cancel, originally listed here,
+is now implemented above.)
