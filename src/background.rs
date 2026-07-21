@@ -142,8 +142,10 @@ pub fn advance_one_milestone(
         let n = g.get(milestone_id).expect("just read");
         let t = format!(
             "workgraph milestone #{}: {}\nacceptance: {}\n\n\
-             Complete this milestone, then review your changes and report the \
-             verdict (pass / needs_fix / rebuild).",
+             Complete this milestone, then self-review. You MUST end your reply \
+             with a final line in EXACTLY this format (nothing after it) so the \
+             kernel can parse and auto-update the milestone status:\n\
+             VERDICT: <pass|needs_fix|rebuild>",
             n.id, n.title,
             if n.acceptance.is_empty() { "(none)" } else { &n.acceptance },
         );

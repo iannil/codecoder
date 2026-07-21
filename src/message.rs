@@ -56,3 +56,79 @@ impl Message {
         }
     }
 }
+
+/// Strip assistant `ToolCall`s whose matching `ToolResult` is absent from the
+/// thread, leaving every remaining `ToolCall` paired. After a `navigate_to`
+/// onto a mid-tool-call assistant, the active thread can contain an assistant
+/// whose tool_calls were abandoned (their results off the active path) — which
+/// the OpenAI-compatible provider rejects with a 400 ("tool_calls must be
+/// followed by tool messages"). This sanitizes the in-memory copy sent to the
+/// provider without altering recorded history. See ADR 0015.
+pub fn sanitize_unpaired_tool_calls(messages: &mut Vec<Message>) {
+    use std::collections::HashSet;
+    let answered: HashSet<String> = messages
+        .iter()
+        .flat_map(|m| {
+            m.items.iter().filter_map(|it| match it {
+                MessageItem::ToolResult { call_id, .. } => Some(call_id.clone()),
+                _ => None,
+            })
+        })
+        .collect();
+    for m in messages.iter_mut() {
+        if m.role != Role::Assistant {
+            continue;
+        }
+        m.items.retain(|it| match it {
+            MessageItem::ToolCall { id, .. } => answered.contains(id),
+            _ => true,
+        });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sanitize_strips_unpaired_tool_calls_after_navigate() {
+        // Simulates a navigate onto an assistant whose tool_call result was
+        // abandoned (off the active thread): the provider would otherwise see an
+        // assistant tool_call with no following tool message.
+        let assistant = Message::new(
+            1,
+            Role::Assistant,
+            vec![
+                MessageItem::Text { text: "let me check".into() },
+                MessageItem::ToolCall { id: "c1".into(), name: "read_file".into(), args: serde_json::json!({}) },
+            ],
+        );
+        // No ToolResult for c1 anywhere in this thread.
+        let mut thread = vec![
+            Message::text(0, Role::User, "hi"),
+            assistant,
+            Message::text(2, Role::User, "now what?"),
+        ];
+        sanitize_unpaired_tool_calls(&mut thread);
+        let asst = &thread[1];
+        assert!(asst.items.iter().any(|it| matches!(it, MessageItem::Text { .. })));
+        assert!(!asst.items.iter().any(|it| matches!(it, MessageItem::ToolCall { .. })));
+    }
+
+    #[test]
+    fn sanitize_keeps_paired_tool_calls() {
+        let assistant = Message::new(
+            1,
+            Role::Assistant,
+            vec![MessageItem::ToolCall { id: "c1".into(), name: "read_file".into(), args: serde_json::json!({}) }],
+        );
+        let result = Message::new(
+            2,
+            Role::Tool,
+            vec![MessageItem::ToolResult { call_id: "c1".into(), output: "ok".into(), is_error: false }],
+        );
+        let mut thread = vec![Message::text(0, Role::User, "hi"), assistant, result];
+        sanitize_unpaired_tool_calls(&mut thread);
+        assert!(thread[1].items.iter().any(|it| matches!(it, MessageItem::ToolCall { .. })));
+    }
+}

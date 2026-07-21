@@ -779,6 +779,11 @@ impl AgentLoop {
             }
             messages.extend(working);
 
+            // A navigate onto a mid-tool-call assistant can leave an assistant
+            // ToolCall whose result is off the active path; the provider rejects
+            // such unpaired tool_calls with a 400. Sanitize the in-memory copy.
+            crate::message::sanitize_unpaired_tool_calls(&mut messages);
+
             // Accurate token count for the status bar + compaction (ADR 0023).
             let used = crate::tokenizer::count_tokens(&self.model, &messages);
             self.session.token_count = used;
@@ -1267,8 +1272,10 @@ impl AgentLoop {
                 let n = g.get(milestone_id).expect("just read, must exist");
                 let t = format!(
                     "workgraph milestone #{}: {}\nacceptance: {}\n\n\
-                     Complete this milestone, then review your changes and report the \
-                     verdict (pass / needs_fix / rebuild).",
+                     Complete this milestone, then self-review. You MUST end your reply \
+                     with a final line in EXACTLY this format (nothing after it) so the \
+                     kernel can parse and auto-update the milestone status:\n\
+                     VERDICT: <pass|needs_fix|rebuild>",
                     n.id,
                     n.title,
                     if n.acceptance.is_empty() { "(none)" } else { &n.acceptance },
