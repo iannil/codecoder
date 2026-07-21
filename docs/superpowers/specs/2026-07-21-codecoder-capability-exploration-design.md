@@ -19,7 +19,7 @@
 | 运行边界 | **隔离工作区**(`codecoder-lab/`,真实仓保持干净,仅最终报告写回) |
 | 操作模式 | **交互式 `cc` + headless Background Agent 双模式** |
 | 展示目标 | **集成任务:小 Rust crate**(`mdslides`) |
-| cc 驱动机制 | **A. pexpect/PTY 驱动**(`drive_cc.py`),不可用时降级 FIFO+tail |
+| cc 驱动机制 | **piped-stdin one-shot 驱动**(`drive_cc.sh`):`prompt_user` 读 `io::stdin()` 且 one-shot 模式 `cc "<msg>"` 只为 prompt 回复读 stdin,故可按序管道喂 `y/n/s/p/N`/自由文本 应答五类 Dialog。规划期查明 `pexpect` 未装,此法比 pexpect 更稳更简 |
 
 ## 3. 架构
 
@@ -36,7 +36,7 @@
   └─ showcase/mdslides/              ← 深度展示目标 Rust crate
 
 驱动层
-  ├─ drive_cc.py        (pexpect,驱动交互式 cc,Phase 1)
+  ├─ drive_cc.sh        (piped-stdin 驱动 one-shot cc,Phase 1)
   └─ bg_runner.sh       (CODECODER_BG_TASK 驱动 headless,Phase 2)
 ```
 
@@ -54,7 +54,7 @@
 2. `cargo test` 跑测试套件,核验测试计数声明。**注:仓库内文档自身已不一致**——`CLAUDE.md` 称「244 通过 + 3 `#[ignore]`」,而 `ARCHITECTURE.md`/`README.md` 称「202 通过 + 3」。审计将以 `cargo test` 实际输出为真值,判定哪个文档过时(这本身是一条审计发现)。
 3. `cargo build --bin cc` 核验 cc 客户端二进制。
 4. 建 `codecoder-lab/`:写一份真实但小的目标项目身份(`AGENTS.md` + `CONTEXT.md`),放审计阶段 `codecoder.json` 预授权。
-5. 写 `drive_cc.py`(pexpect spawn `cc`,按正则匹配五类 Dialog 弹窗并插话应答,全量录日志)+ `bg_runner.sh`。
+5. 写 `drive_cc.sh`(piped-stdin 驱动 one-shot `cc "<msg>"`,按序喂五类 Dialog 应答,全量 tee 到日志)+ `bg_runner.sh`。
 6. **Smoke**: 跑 `cc> 列出当前目录`,确认 daemon ↔ cc ↔ DeepSeek 全链路通,事件能流到 stdout。
 
 **Phase 0 出口条件**: 二进制编译通过、测试计数与文档一致、lab 建好、smoke 一轮通过。
@@ -134,4 +134,4 @@
 
 1. `codecoder-lab/` 隔离工作区(含 codecoder 自撰的 skills/capabilities/memory/causal_tree/workgraph + mdslides crate)。
 2. `docs/superpowers/audits/2026-07-21-codecoder-capability-matrix.md` 能力矩阵 + 上限报告(feature branch 提交到真实仓)。
-3. (过程产物)`drive_cc.py`、`bg_runner.sh`、各 Phase 的运行日志。
+3. (过程产物)`drive_cc.sh`、`bg_runner.sh`、各 Phase 的运行日志。
