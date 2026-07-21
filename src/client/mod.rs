@@ -187,6 +187,9 @@ mod tests {
             if print_event(&ev) { done = true; break; }
         }
         assert!(done);
+        // 关闭客户端连接 → 服务端 handle_connection 的 read_request 见 EOF
+        // → 注销 bus → writer 退出 → handle_connection 返回，h.join() 才不会挂。
+        drop(conn);
         h.join().unwrap();
         let _ = std::fs::remove_dir_all(&dir);
     }
