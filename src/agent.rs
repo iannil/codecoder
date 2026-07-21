@@ -487,38 +487,41 @@ impl AgentLoop {
                 let thread = self.session.nodes_by_id(&abandoned);
                 let rendered = crate::compaction::render_span(&thread);
                 if !rendered.trim().is_empty() {
-                    match self.summarize_span(&rendered, None) {
-                        Ok(summary) => {
-                            let _ = event_tx.send(AgentEvent::Notice(
-                                format!("abandoned branch summarized: {summary}"),
-                            ));
-                            // Phase E: structured ruling on linked causal nodes.
-                            for entry_id in &abandoned {
-                                let causal_node = self.session.entry_by_id(*entry_id)
-                                    .and_then(|e| e.meta.as_ref())
-                                    .and_then(|m| m.get("causal_node"))
-                                    .and_then(|v| v.as_u64());
-                                if let Some(cn) = causal_node {
-                                    let s = summary.clone();
-                                    self.session.update_meta(*entry_id, |m| {
-                                        let obj = m.get_or_insert(serde_json::json!({}));
-                                        if let Some(o) = obj.as_object_mut() {
-                                            o.insert("status".into(), "ruled_out".into());
-                                            o.insert("ruling".into(), s.into());
-                                        }
-                                    });
-                                    if let Err(e) = crate::tool::reason::record_ruling(&self.root, cn, &summary) {
-                                        let _ = event_tx.send(AgentEvent::Notice(
-                                            format!("causal ruling write failed for node #{cn}: {e}"),
-                                        ));
-                                    }
+                    let (summary, summarized_ok) = match self.summarize_span(&rendered, None) {
+                        Ok(s) => (s, true),
+                        Err(_) => (
+                            "(summary unavailable: compaction failed — branch abandoned without a generated brief)"
+                                .into(),
+                            false,
+                        ),
+                    };
+                    let _ = event_tx.send(AgentEvent::Notice(if summarized_ok {
+                        format!("abandoned branch summarized: {summary}")
+                    } else {
+                        "failed to summarize abandoned branch; linked causal nodes marked ruled_out with an unavailable ruling".into()
+                    }));
+                    // Phase E: structured ruling on linked causal nodes. Even when
+                    // summarization failed, write a placeholder ruling so a linked
+                    // node is visibly marked rather than silently orphaned.
+                    for entry_id in &abandoned {
+                        let causal_node = self.session.entry_by_id(*entry_id)
+                            .and_then(|e| e.meta.as_ref())
+                            .and_then(|m| m.get("causal_node"))
+                            .and_then(|v| v.as_u64());
+                        if let Some(cn) = causal_node {
+                            let s = summary.clone();
+                            self.session.update_meta(*entry_id, |m| {
+                                let obj = m.get_or_insert(serde_json::json!({}));
+                                if let Some(o) = obj.as_object_mut() {
+                                    o.insert("status".into(), "ruled_out".into());
+                                    o.insert("ruling".into(), s.into());
                                 }
+                            });
+                            if let Err(e) = crate::tool::reason::record_ruling(&self.root, cn, &summary) {
+                                let _ = event_tx.send(AgentEvent::Notice(
+                                    format!("causal ruling write failed for node #{cn}: {e}"),
+                                ));
                             }
-                        }
-                        Err(_) => {
-                            let _ = event_tx.send(AgentEvent::Notice(
-                                "failed to summarize abandoned branch".into(),
-                            ));
                         }
                     }
                 }
@@ -1304,6 +1307,13 @@ impl AgentLoop {
                 let _ = event_tx.send(AgentEvent::Notice(format!(
                     "milestone #{} ({}) auto-updated: {}",
                     milestone_id, title, verdict_str,
+                )));
+            } else {
+                // No VERDICT: line parsed — surface it instead of leaving the
+                // milestone silently stuck in_progress.
+                let _ = event_tx.send(AgentEvent::Notice(format!(
+                    "milestone #{} ({}) ran but emitted no VERDICT: line; status left unchanged",
+                    milestone_id, title,
                 )));
             }
         }

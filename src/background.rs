@@ -174,6 +174,13 @@ pub fn advance_one_milestone(
         }
         let _ = g.save(&root);
         out.events.push(format!("milestone #{} ({}) auto-updated: {}", milestone_id, title, vs));
+    } else {
+        // No VERDICT: line parsed — record it so headless runs surface the
+        // no-op instead of silently leaving the milestone in_progress.
+        out.events.push(format!(
+            "milestone #{} ({}) ran but emitted no VERDICT: line; status left unchanged",
+            milestone_id, title
+        ));
     }
     Ok(Some(out))
 }
