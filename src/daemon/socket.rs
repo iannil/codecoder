@@ -60,10 +60,16 @@ impl SocketServer {
         Ok(Self { listener, sock_path: sock_path.to_path_buf() })
     }
 
-    /// 阻塞接受一个连接。
+    /// 接受一个连接(阻塞或非阻塞取决于 set_nonblocking)。
     pub fn accept_one(&self) -> anyhow::Result<UnixStream> {
         let (stream, _) = self.listener.accept()?;
         Ok(stream)
+    }
+
+    /// 把底层 listener 设为非阻塞模式(daemon 的 accept 轮询需要)。
+    pub fn set_nonblocking(&self, nonblocking: bool) -> anyhow::Result<()> {
+        self.listener.set_nonblocking(nonblocking)?;
+        Ok(())
     }
 
     pub fn sock_path(&self) -> &Path {
