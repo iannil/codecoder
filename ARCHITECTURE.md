@@ -128,7 +128,7 @@ codecoder 的「文件系统即自我」覆盖了三层身份与工作/推理层
 
 ## 权限与安全
 
-- **PermissionKey** 细到命令类/环境(`run_command:git`、`run_capability:foo@shell`),而非整工具名。
+- **PermissionKey** 细到命令类/环境(`run_command:git`、`run_capability:foo@shell`),而非整工具名。**复合命令(含 `&&`/`||`/`;`/`|` 等)按整条命令串 keying**(`run_command:<整 cmd>`),不可经良性前缀预授权(ADR 0036)。
 - **天花板规则**(0005/0022):`@shell` 能力上限 `AlwaysThisSession`,永不 `AlwaysThisProject`——它是唯一自修改逃逸口;自撰生效须经一次可见 `/reload`(不热注册)。
 - **闸门在执行侧**:`generate_*` 仅 `write_file` 级;真正危险在 `run_capability`。Capability 进程拿不到 agent 工具集,不能递归自撰。
 - **子 agent 无用户通道** → 只能用 `Permission::None` 工具(没人能答它的权限提问),这是 read-only 的可强制定义。

@@ -39,7 +39,7 @@ cargo run --bin cc            # 连接 (cc 客户端)
 |------|------|
 | `read_file` | 读取文件内容 |
 | `write_file` | 写入文件（自动创建父目录） |
-| `run_command` | 执行 shell 命令 |
+| `run_command` | 执行 shell 命令（复合命令按整串 keying,不可经前缀预授权,ADR 0036） |
 | `list_directory` | 列出目录内容 |
 | `search_web` | 抓取 URL 内容 |
 | `search_github` | 搜索 GitHub 仓库 (`repos:`) 或代码 (`code:`) |
