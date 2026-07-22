@@ -146,13 +146,18 @@ pub(crate) fn run_background_cfg(
             max_tokens,
             temperature,
             root.clone(),
-        )? {
-            Some(s) => s,
-            None => {
+        ) {
+            Ok(Some(s)) => s,
+            Ok(None) => {
                 // 无就绪 milestone(空图或全部完成/阻塞)。
                 if out.mission_state == crate::bg_gate::MissionState::Running {
                     out.mission_state = crate::bg_gate::MissionState::CompletedAllReady;
                 }
+                break;
+            }
+            Err(e) => {
+                // provider 错误:置 Error(ADR 0033),不 ?逃逸成 anyhow Err→exit 1。
+                out.mission_state = crate::bg_gate::MissionState::Error(e.to_string());
                 break;
             }
         };
@@ -266,6 +271,10 @@ pub fn advance_one_milestone(
     agent.run_one_turn(task_text, &tx);
     drop(tx);
     drain_bg_events(rx, &mut out);
+    // provider 错误:让上层 run_background_cfg catch → mission_state=Error(不再 ?逃逸成 exit 1)。
+    if let Some(e) = agent.last_error() {
+        return Err(anyhow::anyhow!(e.to_string()));
+    }
 
     // ── 客观验收门(覆盖 agent 自报 VERDICT)── spec 2026-07-22
     let m = {
@@ -390,6 +399,32 @@ mod tests {
             0.0,
             dir.clone(),
             "do something".into(),
+            3,
+            2,
+            8,
+        )
+        .unwrap();
+        assert!(
+            matches!(out.mission_state, MissionState::Error(_)),
+            "got {:?}",
+            out.mission_state
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn workgraph_provider_error_yields_error_state() {
+        let dir = std::env::temp_dir().join(format!("cc_wgerr_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        ws(&dir, &[(1, "echo ok", vec![])]); // 有就绪里程碑,但 provider 会错
+        let out = run_background_cfg(
+            Arc::new(FailingProvider),
+            "m".into(),
+            256,
+            0.0,
+            dir.clone(),
+            "".into(), // 空 task → workgraph 分支
             3,
             2,
             8,
