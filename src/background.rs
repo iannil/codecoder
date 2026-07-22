@@ -91,48 +91,104 @@ pub fn run_background(
     root: PathBuf,
     task: String,
 ) -> anyhow::Result<BgOutcome> {
-    const MAX_AUTO: usize = 3;
+    let cfg = crate::config::Config::from_env();
+    run_background_cfg(
+        provider, model, max_tokens, temperature, root, task,
+        cfg.bg_max_auto, cfg.bg_circuit_k, cfg.bg_milestone_tool_cap,
+    )
+}
+
+/// 与 `run_background` 同,但 caps 显式注入(测试用,避开全局 env 的并行竞态)。
+pub(crate) fn run_background_cfg(
+    provider: Arc<dyn Provider>,
+    model: String,
+    max_tokens: u32,
+    temperature: f32,
+    root: PathBuf,
+    task: String,
+    max_auto: usize,
+    circuit_k: usize,
+    tool_cap: usize,
+) -> anyhow::Result<BgOutcome> {
     let mut out = BgOutcome::default();
 
-    // Determine initial task from explicit arg or workgraph.
-    let (initial_task, label) = resolve_bg_task(&task, &root);
-    if initial_task.is_empty() && !label.starts_with("workgraph milestone") {
-        out.events.push(label);
+    // ── 显式任务分支:跑一 turn,不进验收门、不自动推进。──
+    if !task.trim().is_empty() {
+        out.events.push("task: explicit task".into());
+        let mut agent = AgentLoop::new_background(provider, model, max_tokens, temperature, root);
+        // ADR 0026:wire SIGINT → cancel。
+        if let Err(e) = agent.cancel_token().cancel_on_sigint() {
+            eprintln!("ccd: SIGINT cancel not wired: {e}");
+        }
+        agent.set_tool_cap(tool_cap);
+        let (tx, rx) = channel::<AgentEvent>();
+        agent.run_one_turn(task, &tx);
+        drop(tx);
+        drain_bg_events(rx, &mut out);
         return Ok(out);
     }
-    out.events.push(format!("task: {label}"));
 
-    // Build the agent once; reuse across milestones.
-    let mut agent = AgentLoop::new_background(provider.clone(), model.clone(), max_tokens, temperature, root.clone());
-    // ADR 0026: wire SIGINT → cancel so a runaway headless task can be stopped
-    // gracefully (Ctrl+C / `kill -INT`). The turn loop + run_command poll cancel.
-    if let Err(e) = agent.cancel_token().cancel_on_sigint() {
-        eprintln!("ccd: SIGINT cancel not wired: {e}");
-    }
-
-    // Run the first turn (explicit task or first workgraph milestone).
-    let (tx, rx) = channel::<AgentEvent>();
-    agent.run_one_turn(initial_task, &tx);
-    drop(tx);
-    drain_bg_events(rx, &mut out);
-
-    // If no explicit task was given, auto-advance through more workgraph milestones.
-    if task.trim().is_empty() {
-        for _ in 0..MAX_AUTO.saturating_sub(1) {
-            match advance_one_milestone(
-                provider.clone(),
-                model.clone(),
-                max_tokens,
-                temperature,
-                root.clone(),
-            )? {
-                None => break,
-                Some(step_out) => {
-                    out.final_text.push_str(&step_out.final_text);
-                    out.tool_calls.extend(step_out.tool_calls);
-                    out.denied.extend(step_out.denied);
-                    out.events.extend(step_out.events);
+    // ── Workgraph 分支:客观门驱动的 milestone 循环(spec 2026-07-22)。──
+    out.mission_state = crate::bg_gate::MissionState::Running;
+    let mut consecutive_fail = 0usize;
+    let mut advanced = 0usize;
+    loop {
+        if advanced >= max_auto {
+            out.mission_state = crate::bg_gate::MissionState::CompletedAllReady;
+            break;
+        }
+        let step = match advance_one_milestone(
+            provider.clone(),
+            model.clone(),
+            max_tokens,
+            temperature,
+            root.clone(),
+        )? {
+            Some(s) => s,
+            None => {
+                // 无就绪 milestone(空图或全部完成/阻塞)。
+                if out.mission_state == crate::bg_gate::MissionState::Running {
+                    out.mission_state = crate::bg_gate::MissionState::CompletedAllReady;
                 }
+                break;
+            }
+        };
+        let last = step.subgoals.last().cloned();
+        out.final_text.push_str(&step.final_text);
+        out.tool_calls.extend(step.tool_calls);
+        out.denied.extend(step.denied);
+        out.events.extend(step.events);
+        out.subgoals.extend(step.subgoals);
+        advanced += 1;
+
+        let Some(sg) = last else { break; };
+        let passed = matches!(sg.verdict, SubgoalVerdict::Pass);
+        if passed {
+            consecutive_fail = 0;
+        } else {
+            consecutive_fail += 1;
+        }
+        let gv = if passed {
+            crate::bg_gate::GateVerdict::Pass
+        } else if matches!(sg.verdict, SubgoalVerdict::Inconclusive) {
+            crate::bg_gate::GateVerdict::Inconclusive(sg.gate_reason.clone())
+        } else {
+            crate::bg_gate::GateVerdict::NeedsFix(sg.gate_reason.clone())
+        };
+        let g = crate::workgraph::WorkGraph::read(&root);
+        let budget_left = advanced < max_auto;
+        match crate::bg_gate::next_action(
+            &g,
+            sg.milestone_id,
+            &gv,
+            consecutive_fail,
+            budget_left,
+            circuit_k,
+        ) {
+            crate::bg_gate::NextAction::Advance(_) => continue,
+            crate::bg_gate::NextAction::Stop(st) => {
+                out.mission_state = st;
+                break;
             }
         }
     }
@@ -198,6 +254,9 @@ pub fn advance_one_milestone(
     if let Err(e) = agent.cancel_token().cancel_on_sigint() {
         eprintln!("ccd: SIGINT cancel not wired: {e}");
     }
+    let cfg = crate::config::Config::from_env();
+    agent.set_tool_cap(cfg.bg_milestone_tool_cap);
+    let cancel = agent.cancel_token();
     let mut out = BgOutcome::default();
     out.events.push(format!("task: workgraph milestone #{} ({})", milestone_id, title));
     let (tx, rx) = channel::<AgentEvent>();
@@ -205,29 +264,58 @@ pub fn advance_one_milestone(
     drop(tx);
     drain_bg_events(rx, &mut out);
 
-    // auto-writeback：解析 verdict 更新里程碑状态
-    let outcome = crate::review::parse_review(&out.final_text);
-    if !outcome.unparsed {
+    // ── 客观验收门(覆盖 agent 自报 VERDICT)── spec 2026-07-22
+    let m = {
+        let g = WorkGraph::read(&root);
+        g.get(milestone_id).expect("just read").clone()
+    };
+    let tool_cap_hit = out.events.iter().any(|e| e.contains("tool-iteration cap"));
+    // v1 review 门:复用 agent 自产 VERDICT 文本(parse_review)作兜底;
+    // 真正的 review 子代理门为后续增强(spec §5.1 (b))。
+    let review_runner = || -> crate::bg_gate::GateVerdict {
+        let o = crate::review::parse_review(&out.final_text);
+        if !o.unparsed && matches!(o.verdict, crate::review::Verdict::Pass) {
+            crate::bg_gate::GateVerdict::Pass
+        } else if !o.unparsed {
+            crate::bg_gate::GateVerdict::NeedsFix(format!("self-review: {:?}", o.verdict))
+        } else {
+            crate::bg_gate::GateVerdict::Inconclusive("no command gate; review gate deferred in v1".into())
+        }
+    };
+    let verdict = crate::bg_gate::evaluate(&m, &root, Some(&cancel), &review_runner);
+
+    let (sv, status, vs_str) = match &verdict {
+        crate::bg_gate::GateVerdict::Pass => (SubgoalVerdict::Pass, NodeStatus::Done, "pass"),
+        crate::bg_gate::GateVerdict::NeedsFix(_) => (SubgoalVerdict::NeedsFix, NodeStatus::NeedsFix, "needs_fix"),
+        crate::bg_gate::GateVerdict::Inconclusive(_) => (SubgoalVerdict::Inconclusive, NodeStatus::NeedsFix, "inconclusive"),
+    };
+    {
         let mut g = WorkGraph::read(&root);
-        let (status, vs) = match outcome.verdict {
-            crate::review::Verdict::Pass => (NodeStatus::Done, "pass"),
-            crate::review::Verdict::NeedsFix => (NodeStatus::NeedsFix, "needs_fix"),
-            crate::review::Verdict::Rebuild => (NodeStatus::NeedsFix, "rebuild"),
-        };
         g.set_status(milestone_id, status);
         if let Some(n) = g.nodes.iter_mut().find(|n| n.id == milestone_id) {
-            n.verdict = Some(vs.to_string());
+            n.verdict = Some(vs_str.into());
         }
         let _ = g.save(&root);
-        out.events.push(format!("milestone #{} ({}) auto-updated: {}", milestone_id, title, vs));
-    } else {
-        // No VERDICT: line parsed — record it so headless runs surface the
-        // no-op instead of silently leaving the milestone in_progress.
-        out.events.push(format!(
-            "milestone #{} ({}) ran but emitted no VERDICT: line; status left unchanged",
-            milestone_id, title
-        ));
     }
+    let gate_reason = match &verdict {
+        crate::bg_gate::GateVerdict::Pass => "gate pass".to_string(),
+        crate::bg_gate::GateVerdict::NeedsFix(r) | crate::bg_gate::GateVerdict::Inconclusive(r) => r.clone(),
+    };
+    if !matches!(verdict, crate::bg_gate::GateVerdict::Pass) {
+        let _ = crate::tool::reason::record_cause(
+            &root,
+            &format!("milestone #{milestone_id} ({title}) 验收失败: {gate_reason}"),
+            None,
+        );
+    }
+    out.subgoals.push(SubgoalOutcome {
+        milestone_id,
+        verdict: sv,
+        gate_reason,
+        tool_cap_hit,
+        touched_files: m.touched.clone(),
+    });
+    out.events.push(format!("milestone #{} ({}) gated: {vs_str}", milestone_id, title));
     Ok(Some(out))
 }
 
@@ -267,6 +355,79 @@ mod tests {
         assert!(out.is_some(), "should run a turn for the ready milestone");
         let outcome = out.unwrap();
         assert!(!outcome.final_text.is_empty(), "stub should produce some final text");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ── 客观验收门集成测试(spec T1/T2/T4/T5)──
+
+    use crate::bg_gate::MissionState;
+    use crate::workgraph::NodeStatus;
+
+    fn ws(dir: &std::path::Path, nodes: &[(u64, &str, Vec<u64>)]) {
+        let mut g = WorkGraph::default();
+        for (id, acc, deps) in nodes {
+            g.add(&format!("t{id}"), acc, deps.clone()).unwrap();
+        }
+        let _ = g.save(dir);
+    }
+
+    #[test]
+    fn t1_command_gate_pass_marks_done() {
+        let dir = std::env::temp_dir().join(format!("cc_t1_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        // "rustc --version" 含已知模式 "rustc" 且 exit 0 → 命令门 Pass(hermetic:Rust 仓必装 rustc)。
+        ws(&dir, &[(1, "rustc --version", vec![])]);
+        let out = advance_one_milestone(
+            Arc::new(StubClient), "gpt-4o".into(), 4096, 0.7, dir.clone(),
+        ).unwrap().unwrap();
+        assert_eq!(WorkGraph::read(&dir).get(1).unwrap().status, NodeStatus::Done);
+        assert_eq!(out.subgoals[0].verdict, SubgoalVerdict::Pass, "{:?}", out.subgoals);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn t2_command_gate_fail_marks_needsfix_and_causal() {
+        let dir = std::env::temp_dir().join(format!("cc_t2_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        // "rustc --bad-flag-xyz" 含模式 "rustc" 且 exit≠0 → 命令门 NeedsFix。
+        ws(&dir, &[(1, "rustc --bad-flag-xyz", vec![])]);
+        let out = advance_one_milestone(
+            Arc::new(StubClient), "gpt-4o".into(), 4096, 0.7, dir.clone(),
+        ).unwrap().unwrap();
+        assert_eq!(WorkGraph::read(&dir).get(1).unwrap().status, NodeStatus::NeedsFix);
+        assert_eq!(out.subgoals[0].verdict, SubgoalVerdict::NeedsFix);
+        assert!(out.subgoals[0].gate_reason.contains("rustc"), "{:?}", out.subgoals[0].gate_reason);
+        let causal = std::fs::read_to_string(dir.join("causal_tree.json")).unwrap_or_default();
+        assert!(causal.contains("验收失败"), "causal node not written: {causal}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn t4_blocked_at_when_dependent_blocked() {
+        let dir = std::env::temp_dir().join(format!("cc_t4_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        ws(&dir, &[(1, "false", vec![]), (2, "echo ok", vec![1])]);
+        let out = run_background_cfg(
+            Arc::new(StubClient), "gpt-4o".into(), 4096, 0.7, dir.clone(), "".into(), 3, 2, 8,
+        ).unwrap();
+        assert_eq!(out.mission_state, MissionState::BlockedAt(1), "{:?}", out.mission_state);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn t5_circuit_breaker_on_consecutive_fails() {
+        let dir = std::env::temp_dir().join(format!("cc_t5_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        // 两个独立 milestone,都 fail(false)→ 连续 2 fail → CircuitBreaker。
+        ws(&dir, &[(1, "false", vec![]), (2, "false", vec![])]);
+        let out = run_background_cfg(
+            Arc::new(StubClient), "gpt-4o".into(), 4096, 0.7, dir.clone(), "".into(), 3, 2, 8,
+        ).unwrap();
+        assert_eq!(out.mission_state, MissionState::CircuitBreaker, "{:?}", out.mission_state);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
