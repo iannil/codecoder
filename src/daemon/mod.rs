@@ -39,10 +39,16 @@ impl Daemon {
         let shutdown = Arc::new(AtomicBool::new(false));
         let bus = Arc::new(crate::daemon::bus::EventBus::new());
 
-        let mut supervisor = crate::capability::Supervisor::start_all(&self.cfg.root)
+        let budget = self.cfg.supervisor_crash_budget;
+        let mut supervisor = crate::capability::Supervisor::start_all(&self.cfg.root, budget)
             .unwrap_or_else(|e| {
                 eprintln!("ccd: supervisor init failed: {e}");
-                crate::capability::Supervisor { root: self.cfg.root.clone(), states: Default::default() }
+                crate::capability::Supervisor {
+                    root: self.cfg.root.clone(),
+                    states: Default::default(),
+                    state: crate::supervisor_state::SupervisorState::default(),
+                    crash_budget: budget,
+                }
             });
 
         // 监督线程：周期 supervise（独立线程，避免阻塞 accept）。

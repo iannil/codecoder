@@ -126,21 +126,42 @@ pub struct SupervisedService {
 pub struct Supervisor {
     pub root: std::path::PathBuf,
     pub states: std::collections::HashMap<String, SupervisedService>,
+    /// 跨重启持久化判定状态(ADR 0034)。
+    pub state: crate::supervisor_state::SupervisorState,
+    pub crash_budget: u32,
 }
 
 impl Supervisor {
-    pub fn start_all(root: &std::path::Path) -> anyhow::Result<Self> {
-        let mut sup = Self { root: root.to_path_buf(), states: Default::default() };
+    pub fn start_all(root: &std::path::Path, crash_budget: u32) -> anyhow::Result<Self> {
+        use crate::supervisor_state::{self};
+        let mut sup = Self {
+            root: root.to_path_buf(),
+            states: Default::default(),
+            state: supervisor_state::load(root),
+            crash_budget,
+        };
         let caps = root.join("capabilities");
         let Ok(entries) = std::fs::read_dir(&caps) else { return Ok(sup); };
         for e in entries.flatten() {
             let man = e.path().join("manifest.json");
             let Ok(raw) = std::fs::read_to_string(&man) else { continue; };
             let Ok(m) = serde_json::from_str::<CapabilityManifest>(&raw) else { continue; };
-            if m.lifecycle == Lifecycle::Persistent && m.environment == Environment::Shell {
-                let _ = sup.start_one(&m.name, root);
+            if !(m.lifecycle == Lifecycle::Persistent && m.environment == Environment::Shell) {
+                continue;
             }
+            let cur_mtime = supervisor_state::mtime_of(&man);
+            supervisor_state::reset_if_manifest_changed(&mut sup.state, &m.name, cur_mtime);
+            if supervisor_state::should_skip(&sup.state, &m.name, crash_budget) {
+                let cnt = sup.state.services.get(&m.name).map(|e| e.crash_count).unwrap_or(0);
+                eprintln!(
+                    "capability '{}' skipped: previously Failed (crash_count={}, budget={})",
+                    m.name, cnt, crash_budget
+                );
+                continue;
+            }
+            let _ = sup.start_one(&m.name, root);
         }
+        let _ = supervisor_state::save(root, &sup.state);
         Ok(sup)
     }
 
@@ -170,8 +191,12 @@ impl Supervisor {
             // — a silent restart would mask bugs.
             s.gave_up = true;
             s.child = None;
+            crate::supervisor_state::record_crash(&mut self.state, name, self.crash_budget);
+            let _ = crate::supervisor_state::save(&self.root, &self.state);
+            let cnt = self.state.services.get(name).map(|e| e.crash_count).unwrap_or(0);
             events.push(format!(
-                "capability '{name}' exited; marked Failed (not auto-restarted, ADR 0021)"
+                "capability '{name}' exited; marked Failed (crash_count={cnt}, budget={}, not auto-restarted, ADR 0021)",
+                self.crash_budget
             ));
         }
         events
@@ -229,7 +254,7 @@ mod tests {
         ).unwrap();
         std::fs::create_dir_all(dir.join("capabilities")).unwrap(); // 确保目录
 
-        let mut sup = Supervisor::start_all(&dir).unwrap();
+        let mut sup = Supervisor::start_all(&dir, 3).unwrap();
         // Wait for the initial spawn to run and exit (writes the marker, exits 1).
         let start = Instant::now();
         loop {
@@ -264,6 +289,87 @@ mod tests {
                    "capability should run in its own directory, not daemon cwd");
 
         sup.shutdown_all();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn start_all_skips_persistently_failed_service() {
+        use crate::supervisor_state::{save, ServiceEntry, SupervisorState};
+        let dir = std::env::temp_dir().join(format!(
+            "cc_sup_skip_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .subsec_nanos()
+        ));
+        let capdir = dir.join("capabilities/flaky");
+        std::fs::create_dir_all(&capdir).unwrap();
+        let marker = dir.join("skip_marker.txt");
+        std::fs::write(
+            dir.join("capabilities/flaky/entry.sh"),
+            format!("#!/bin/sh\necho ran >> \"{}\"\nexit 1\n", marker.display()),
+        )
+        .unwrap();
+        let man_path = capdir.join("manifest.json");
+        std::fs::write(
+            &man_path,
+            r#"{"name":"flaky","description":"d","environment":"shell","lifecycle":"persistent","entry":"sh entry.sh"}"#,
+        )
+        .unwrap();
+        // 预写:gave_up=true + 记录真实 mtime(避免 reset 清掉 gave_up)。
+        let real_mtime = crate::supervisor_state::mtime_of(&man_path);
+        let mut st = SupervisorState::default();
+        st.services.insert(
+            "flaky".into(),
+            ServiceEntry { gave_up: true, crash_count: 3, manifest_mtime_secs: real_mtime },
+        );
+        save(&dir, &st).unwrap();
+        let sup = Supervisor::start_all(&dir, 3).unwrap();
+        assert!(!marker.exists(), "gave_up 服务不应被 spawn");
+        assert!(sup.states.get("flaky").is_none(), "states 不应含被跳过的服务");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn start_all_respawns_when_manifest_changed() {
+        use crate::supervisor_state::{save, ServiceEntry, SupervisorState};
+        let dir = std::env::temp_dir().join(format!(
+            "cc_sup_reset_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .subsec_nanos()
+        ));
+        let capdir = dir.join("capabilities/flaky");
+        std::fs::create_dir_all(&capdir).unwrap();
+        let marker = dir.join("reset_marker.txt");
+        std::fs::write(
+            dir.join("capabilities/flaky/entry.sh"),
+            format!("#!/bin/sh\necho ran >> \"{}\"\nexit 0\n", marker.display()),
+        )
+        .unwrap();
+        let man = capdir.join("manifest.json");
+        std::fs::write(
+            &man,
+            r#"{"name":"flaky","description":"d","environment":"shell","lifecycle":"persistent","entry":"sh entry.sh"}"#,
+        )
+        .unwrap();
+        // 预写:gave_up=true + 旧 mtime(0);真实 manifest mtime ≠ 0 → 触发 reset → 重 spawn。
+        let mut st = SupervisorState::default();
+        st.services.insert(
+            "flaky".into(),
+            ServiceEntry { gave_up: true, crash_count: 3, manifest_mtime_secs: 0 },
+        );
+        save(&dir, &st).unwrap();
+        let _sup = Supervisor::start_all(&dir, 3).unwrap();
+        // spawn 异步,poll marker(最长 ~1s)。
+        let start = Instant::now();
+        while !marker.exists() && start.elapsed().as_secs() < 1 {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert!(marker.exists(), "manifest 变更后应重置并 spawn");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
