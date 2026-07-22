@@ -9,7 +9,7 @@ CodeCoder 是一个**已落地**的自主 AI agent，使用 Rust 编写。仓库
 **已知未实现的部分(文档中已标注,勿误以为已就绪):**
 
 - **Wasm Capability 源码→wasm 编译未实现**:`run_capability` 的 Wasm 环境只接受预编译 `.wasm`/`.wat`,源码跨编译单独立项(ADR 0021)。
-- **Persistent 服务无跨重启注册表**:绑进程生命周期,daemon 重启即丢;`Supervisor` 仅「崩溃标记 Failed 不重启」(ADR 0021/0022)。
+- **Persistent 服务跨重启韧性已实现(ADR 0034)**:`supervisor_state.json` 持久化 gave_up/crash_count/manifest mtime;daemon 重启后跳过超预算/gave_up 的服务、manifest 变更自动重置。**会话内仍守 ADR 0021**(崩溃即 give_up、不自动重启;预算只管"重启后是否再 spawn")。live handles(PID)仍绑进程生命周期,不持久化。
 - **内置调度器 / 多 runner 资源上限**:调度外置,并发由外置调度器限制(ADR 0026)。
 - **margin/leverage/terminal 仅为字符串元数据**:"关键节点 = 余量 × 杠杆"的排序未内核化,靠 agent/skill 判断(reason 工具;rc 纪律 skill 待写)。
 

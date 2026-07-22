@@ -44,7 +44,8 @@
 | `compaction.rs` | 派生的 Context Working Set(不毁持久记录)。**tier-1 + tier-2 已实现** | 0023 |
 | `tokenizer.rs` | tiktoken 精确计数 + 模型→窗口表 | 0023 |
 | `registry.rs` | 扫 `skills/`+`prompts/`+`capabilities/` → 常驻目录(prompts 标 `[draft]`);**每个条目带 `SourceInfo` 溯源元数据** | 0020 0025 |
-| `capability.rs` | `Environment`/`Lifecycle`/manifest/`RunningServiceTable`、`Supervisor`(Persistent 服务崩溃→标记 Failed 可见,**不自动重启**,0021) | 0021 |
+| `capability.rs` | `Environment`/`Lifecycle`/manifest/`RunningServiceTable`、`Supervisor`(Persistent 服务崩溃→标记 Failed 可见,**不自动重启**,0021;**跨重启持久化判定状态 + 崩溃预算**,0034) | 0021 0034 |
+| `supervisor_state.rs` | **Persistent 跨重启监督状态**(ADR 0034):`supervisor_state.json` 持久化 gave_up/crash_count/manifest mtime;load/save/reset/should_skip/record_crash | 0034 |
 | `memory.rs` | `memory/<key>` 文件级 KV + 数据索引(**跨 session 共享**) | — |
 | `workgraph.rs` | **Work Graph(一等公民 #2)**:持久化、依赖有序的里程碑图,`Milestone` 节点含 `NodeStatus`(含 `Hypothesis`/`Locked`)、`next_ready()` 调度、`render_for_prompt()` 摘要 | 设计文档 |
 | `review.rs` | **结构化验收裁决(一等公民 #4)**:`Verdict`(pass/needs_fix/rebuild)+ 四信号(`foundation`/`over_engineering`/`volume`/`terminology`),纯函数解析 | 设计文档 |
@@ -141,7 +142,7 @@ codecoder 的「文件系统即自我」覆盖了三层身份与工作/推理层
 
 ## ADR 索引
 
-`0001` TUI 键位与 Mode 语义(已废弃)· `0002` slash 本地派发 · `0003` 中心 Theme(已废弃)· `0004` Session 持久化与迁移 · `0005` 权限 scope 与 allowlist · `0007` prompt 注入 slash · `0015` 统一消息模型 · `0016` channel 拓扑与事件模型 · `0017` provider 中立消息模型 · `0018` Tool trait 与 PermissionKey · `0019` 子 agent 能力边界 · `0020` Skills/Capabilities Registry · `0021` Capability 环境与生命周期 · `0022` 自撰安全回路 · `0023` 上下文压缩 · `0024` TUI 视口与渲染循环(已废弃)· `0025` Prompt 作为 Skill 草稿层 · `0026` Background Agent · `0027` pi 对照分析 · `0028` 项目信任加载门禁 · `0029` turn steering 与 follow-up · `0031` 拦截中间件边界论证(不做)· `0032` client-server 架构 · `0030` BG 客观验收门与失败写回 · `0033` BG 任务账本与退出码告警 ·
+`0001` TUI 键位与 Mode 语义(已废弃)· `0002` slash 本地派发 · `0003` 中心 Theme(已废弃)· `0004` Session 持久化与迁移 · `0005` 权限 scope 与 allowlist · `0007` prompt 注入 slash · `0015` 统一消息模型 · `0016` channel 拓扑与事件模型 · `0017` provider 中立消息模型 · `0018` Tool trait 与 PermissionKey · `0019` 子 agent 能力边界 · `0020` Skills/Capabilities Registry · `0021` Capability 环境与生命周期 · `0022` 自撰安全回路 · `0023` 上下文压缩 · `0024` TUI 视口与渲染循环(已废弃)· `0025` Prompt 作为 Skill 草稿层 · `0026` Background Agent · `0027` pi 对照分析 · `0028` 项目信任加载门禁 · `0029` turn steering 与 follow-up · `0031` 拦截中间件边界论证(不做)· `0032` client-server 架构 · `0030` BG 客观验收门与失败写回 · `0033` BG 任务账本与退出码告警 · `0034` Persistent Capability 跨重启韧性 ·
 
 ## 测试与验证边界
 
