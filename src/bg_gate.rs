@@ -90,7 +90,7 @@ pub fn evaluate(
 // ── continue/stop 策略 ─────────────────────────────────────────────────────
 
 /// 一次 BG 调用的整体任务终态。
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum MissionState {
     /// 仍在推进循环内。
     Running,

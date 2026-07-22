@@ -8,7 +8,7 @@ use std::sync::Arc;
 use std::sync::mpsc::channel;
 
 /// 单个 milestone 的客观验收结论(供 BgOutcome.subgoals)。
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum SubgoalVerdict {
     Pass,
     NeedsFix,
@@ -16,7 +16,7 @@ pub enum SubgoalVerdict {
 }
 
 /// 一次 BG 调用中某个 milestone 的验收结果记录。
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct SubgoalOutcome {
     pub milestone_id: u64,
     pub verdict: SubgoalVerdict,
@@ -429,5 +429,32 @@ mod tests {
         ).unwrap();
         assert_eq!(out.mission_state, MissionState::CircuitBreaker, "{:?}", out.mission_state);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn bg_outcome_types_are_serializable() {
+        use crate::bg_gate::MissionState;
+        let sg = SubgoalOutcome {
+            milestone_id: 1,
+            verdict: SubgoalVerdict::NeedsFix,
+            gate_reason: "gate failed".into(),
+            tool_cap_hit: true,
+            touched_files: vec!["a.rs".into()],
+        };
+        let j = serde_json::to_string(&sg).unwrap();
+        assert!(j.contains("NeedsFix") && j.contains("a.rs"), "{j}");
+        let back: SubgoalOutcome = serde_json::from_str(&j).unwrap();
+        assert_eq!(back.milestone_id, 1);
+        for s in [
+            MissionState::Running,
+            MissionState::CompletedAllReady,
+            MissionState::BlockedAt(7),
+            MissionState::CircuitBreaker,
+            MissionState::Error("boom".into()),
+        ] {
+            let j = serde_json::to_string(&s).unwrap();
+            let back: MissionState = serde_json::from_str(&j).unwrap();
+            assert_eq!(format!("{back:?}"), format!("{s:?}"));
+        }
     }
 }
