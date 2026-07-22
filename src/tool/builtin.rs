@@ -43,10 +43,25 @@ impl Tool for ReadFile {
 pub struct RunCommand;
 
 impl RunCommand {
-    /// Permission key at the command-class sweet spot (ADR 0018): `run_command:git`.
+    /// 复合命令(含 shell 控制运算符)?保守偏向安全:引号内的 `>`/`<` 会误判
+    /// 为复合(过度弹窗),但**绝不漏判**(ADR 0036)。
+    fn is_compound(cmd: &str) -> bool {
+        ["&&", "||", ";", "|", "`", "$(", "<", ">"]
+            .iter()
+            .any(|op| cmd.contains(op))
+            || cmd.trim_end().ends_with('&')
+    }
+
+    /// Permission key(ADR 0018)。简单命令按命令类(`run_command:git`);
+    /// **复合命令按整条命令串**(`run_command:cd X && rm`),使其不可经良性
+    /// 前缀预授权(ADR 0036,P5 加固)。
     fn key_for(cmd: &str) -> String {
-        let head = cmd.split_whitespace().next().unwrap_or("");
-        format!("run_command:{head}")
+        if Self::is_compound(cmd) {
+            format!("run_command:{cmd}")
+        } else {
+            let head = cmd.split_whitespace().next().unwrap_or("");
+            format!("run_command:{head}")
+        }
     }
 }
 
@@ -911,6 +926,40 @@ mod tests {
         match RunCommand.permission(&json!({ "cmd": "git status --short" }), std::path::Path::new(".")) {
             Permission::Ask { key } => assert_eq!(key, "run_command:git"),
             _ => panic!("expected Ask"),
+        }
+    }
+
+    #[test]
+    fn run_command_compound_keys_by_full_string() {
+        // 复合命令(含 shell 运算符)→ 整条命令串 key,不可经良性前缀预授权(ADR 0036)。
+        let cases: &[(&str, &str)] = &[
+            ("cd X && cargo test", "run_command:cd X && cargo test"),
+            ("ls | grep foo", "run_command:ls | grep foo"),
+            ("a; b", "run_command:a; b"),
+            ("sort &", "run_command:sort &"),
+            ("echo `whoami`", "run_command:echo `whoami`"),
+            ("tee <(x)", "run_command:tee <(x)"),
+        ];
+        for (cmd, want) in cases {
+            match RunCommand.permission(&json!({ "cmd": cmd }), std::path::Path::new(".")) {
+                Permission::Ask { key } => assert_eq!(key, *want, "cmd={cmd:?}"),
+                _ => panic!("expected Ask for {cmd:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn run_command_simple_keys_by_first_token() {
+        // 简单命令(无运算符)→ 首 token,同既有行为,可预授权。
+        let cases: &[(&str, &str)] = &[
+            ("echo hi", "run_command:echo"),
+            ("cargo test", "run_command:cargo"),
+        ];
+        for (cmd, want) in cases {
+            match RunCommand.permission(&json!({ "cmd": cmd }), std::path::Path::new(".")) {
+                Permission::Ask { key } => assert_eq!(key, *want, "cmd={cmd:?}"),
+                _ => panic!("expected Ask for {cmd:?}"),
+            }
         }
     }
 
