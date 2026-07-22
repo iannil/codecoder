@@ -83,7 +83,7 @@ impl Tool for RunCommand {
 /// cancelled mid-run (ADR 0016). Spawns (not `.output()`) and drains stdout/stderr
 /// on their own threads so a chatty command can't fill the pipe buffer and
 /// deadlock the poll loop. Shared by `run_command` and shell Capabilities.
-fn run_shell_cancellable(mut command: Command, ctx: &ToolCtx) -> anyhow::Result<ToolOutput> {
+pub(crate) fn run_shell_cancellable(mut command: Command, ctx: &ToolCtx) -> anyhow::Result<ToolOutput> {
     if ctx.is_cancelled() {
         return Ok(ToolOutput::err("cancelled"));
     }
