@@ -13,7 +13,7 @@ CodeCoder 是一个**已落地**的自主 AI agent，使用 Rust 编写。仓库
 - **内置调度器 / 多 runner 资源上限**:调度外置,并发由外置调度器限制(ADR 0026)。
 - **margin/leverage/terminal 仅为字符串元数据**:"关键节点 = 余量 × 杠杆"的排序未内核化,靠 agent/skill 判断(reason 工具;rc 纪律 skill 待写)。
 
-> **Background Agent 已落地 headless one-shot runner**(见 ADR 0026):由 `CODECODER_BG_TASK=<task>` 触发,无用户在场地跑完一个 task 即退出;权限走 `codecoder.json` 预授权,任何未授权的 Ask 工具被自动拒绝(记入 `BgOutcome.denied`、发 `ToolFinished{is_error}` 事件),从不弹 prompt。调度外置;**SIGINT 优雅取消已实现**(`Ctrl+C`/`kill -INT` 经 signal-hook 接 `CancelToken`,见 ADR 0026);内置调度器/多 runner 资源上限仍属延后项。
+> **Background Agent 已落地 headless one-shot runner**(见 ADR 0026):由 `CODECODER_BG_TASK=<task>` 触发,无用户在场地跑完一个 task 即退出;另有 `CODECODER_BG_WORKGRAPH=1` 走 **workgraph 逐里程碑模式**(无显式 task,产出 mission_state→退出码 0/2/3/4,见 ADR 0033 修订);权限走 `codecoder.json` 预授权,任何未授权的 Ask 工具被自动拒绝(记入 `BgOutcome.denied`、发 `ToolFinished{is_error}` 事件),从不弹 prompt。调度外置;**SIGINT 优雅取消已实现**(`Ctrl+C`/`kill -INT` 经 signal-hook 接 `CancelToken`,见 ADR 0026);内置调度器/多 runner 资源上限仍属延后项。
 
 > **Compaction 已全量实现**(tier-1 + tier-2,见 ADR 0023):tier-1 超阈值时丢 `Reasoning` + 占位化旧 `ToolResult` 正文,保护 anchor 与近端 tail;tier-1 后仍超阈值时,`AgentLoop::context_working_set` 用一次带缓存的 LLM 调用把最旧跨度摘要为合成 `System` 消息,摘要失败/为空则降级回 tier-1。tier-2 摘要采用结构化模板、迭代式合并(span 增长只摘增量并带入上一版摘要),并累积追踪 read/modified 文件路径附于摘要末尾(见 docs/adr/0023 增强说明)。
 

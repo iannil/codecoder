@@ -48,6 +48,30 @@ pub fn select_provider(cfg: &Config) -> Arc<dyn Provider> {
     }
 }
 
+/// BG 模式的 env 路由结果(ADR 0033)。空 task→workgraph 分支由 background.rs 处理。
+pub enum BgMode {
+    Explicit(String),
+    Workgraph,
+}
+
+/// 从 env 解析 BG 模式。优先级:显式非空 task > WORKGRAPH 哨兵 > None(走 daemon)。
+/// `CODECODER_BG_WORKGRAPH=1`(无显式 task)→ workgraph 逐里程碑模式(空 task);
+/// `CODECODER_BG_TASK=<非空>` → 显式单 shot(同既有);否则 None。
+pub fn bg_mode_from_env() -> Option<BgMode> {
+    if let Ok(task) = std::env::var("CODECODER_BG_TASK") {
+        if !task.trim().is_empty() {
+            return Some(BgMode::Explicit(task));
+        }
+    }
+    if std::env::var("CODECODER_BG_WORKGRAPH")
+        .map(|v| v == "1")
+        .unwrap_or(false)
+    {
+        return Some(BgMode::Workgraph);
+    }
+    None
+}
+
 /// Headless Background Agent entry (ADR 0026): pick the provider, run one task,
 /// print a report to stdout, persist the session. Scheduling is external.
 pub fn run_background(cfg: Config, task: String) -> anyhow::Result<()> {
@@ -111,5 +135,45 @@ mod tests {
         assert_eq!(recs.len(), 1);
         assert_eq!(crate::bg_ledger::mission_exit_code(&recs[0].mission_state), 2);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn bg_mode_from_env_routes_correctly() {
+        use crate::{BgMode, bg_mode_from_env};
+        use std::sync::Mutex;
+        // env::set_var is process-global; serialize against other env-touching tests.
+        static LOCK: Mutex<()> = Mutex::new(());
+        let _g = LOCK.lock().unwrap();
+        unsafe {
+            std::env::remove_var("CODECODER_BG_TASK");
+            std::env::remove_var("CODECODER_BG_WORKGRAPH");
+        }
+        assert!(bg_mode_from_env().is_none(), "nothing set → None (daemon)");
+
+        unsafe { std::env::set_var("CODECODER_BG_WORKGRAPH", "1"); }
+        assert!(
+            matches!(bg_mode_from_env(), Some(BgMode::Workgraph)),
+            "WORKGRAPH=1 → Workgraph"
+        );
+
+        unsafe { std::env::set_var("CODECODER_BG_TASK", "do X"); }
+        assert!(
+            matches!(bg_mode_from_env(), Some(BgMode::Explicit(t)) if t == "do X"),
+            "explicit task wins over WORKGRAPH"
+        );
+
+        unsafe {
+            std::env::remove_var("CODECODER_BG_TASK");
+            std::env::set_var("CODECODER_BG_WORKGRAPH", "0");
+        }
+        assert!(bg_mode_from_env().is_none(), "WORKGRAPH=0 (not '1') → None");
+
+        unsafe { std::env::set_var("CODECODER_BG_TASK", "   "); }
+        assert!(bg_mode_from_env().is_none(), "whitespace-only task → None");
+
+        unsafe {
+            std::env::remove_var("CODECODER_BG_TASK");
+            std::env::remove_var("CODECODER_BG_WORKGRAPH");
+        }
     }
 }

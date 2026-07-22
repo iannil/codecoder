@@ -218,6 +218,8 @@ pub struct AgentLoop {
     steer: SteerQueue,
     /// Derived tier-2 summary overlay (ADR 0023); never persisted.
     tier2: Option<Tier2Summary>,
+    /// 最近一次 turn 的 provider 错误(若有)。BG runner 据此置 mission_state=Error(ADR 0033)。
+    last_error: Option<String>,
     /// daemon 共享目录（ADR 0020）。`None` 时 build_system_prompt 自扫（TUI/sub-agent）。
     shared_registry: Option<Arc<std::sync::RwLock<Registry>>>,
 }
@@ -351,6 +353,7 @@ impl AgentLoop {
             trust,
             steer: SteerQueue::default(),
             tier2: None,
+            last_error: None,
             shared_registry,
         }
     }
@@ -386,6 +389,11 @@ impl AgentLoop {
     /// 覆盖默认工具迭代上限(ADR 0026:BG 单 milestone 用更紧预算,防固着)。
     pub fn set_tool_cap(&mut self, n: usize) {
         self.tool_cap = n.max(1);
+    }
+
+    /// 最近一次 turn 是否因 provider 错误失败(ADR 0033:BG 据此置 mission_state=Error)。
+    pub fn last_error(&self) -> Option<&str> {
+        self.last_error.as_deref()
     }
 
     /// A shared handle to the steering queue (ADR 0029). The TUI pushes mid-turn
@@ -842,6 +850,7 @@ impl AgentLoop {
                         ));
                     }
                     let _ = event_tx.send(AgentEvent::StreamDelta(format!("error: {e}")));
+                    self.last_error = Some(msg.clone());
                     hit_tool_cap = false;
                     break;
                 }
@@ -1935,6 +1944,26 @@ mod tests {
             "the error should be surfaced"
         );
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn provider_error_sets_last_error() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let dir = std::env::temp_dir().join(format!("cc_lasterr_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let provider = Arc::new(AuthFailProvider { calls: AtomicUsize::new(0) });
+        let mut agent = AgentLoop::new(provider.clone() as Arc<dyn Provider>, "m", 256, 0.0, dir.clone());
+        let (etx, erx) = channel();
+        agent.process_turn("go".into(), &etx);
+        drop(etx);
+        for _ in erx {}
+        assert!(agent.last_error().is_some(), "provider error should set last_error");
+        assert!(
+            agent.last_error().unwrap().contains("401"),
+            "got: {:?}", agent.last_error()
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// call 0 → plain text (no tool calls) but pushes a steering message mid-call,
