@@ -177,7 +177,9 @@ pub(crate) fn run_shell_cancellable(mut command: Command, ctx: &ToolCtx) -> anyh
     if is_error {
         buf = format!("exit {}: {buf}", status.code().unwrap_or(-1));
     }
-    Ok(ToolOutput { content: buf, is_error, session_meta_mark: None })
+    let max = crate::config::Config::from_env().max_tool_output;
+    let total = buf.len();
+    Ok(ToolOutput { content: truncate_output(buf, max, total), is_error, session_meta_mark: None })
 }
 
 pub struct ListDirectory;
@@ -998,6 +1000,25 @@ mod tests {
         assert!(!out.is_error, "{}", out.content);
         assert!(out.content.contains("truncated"), "marker present: {}", out.content);
         assert!(out.content.contains("100000 bytes"), "total reported: {}", out.content);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn run_command_truncates_large_output() {
+        let dir = std::env::temp_dir().join(format!("cc_rctrunc_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let lock = std::sync::Mutex::new(());
+        let _g = lock.lock().unwrap();
+        unsafe { std::env::set_var("CODECODER_MAX_TOOL_OUTPUT", "512"); }
+        let mut ctx = crate::tool::ToolCtx::new(&dir);
+        // seq 1 5000 产出 ~20KB >> 512
+        let out = RunCommand
+            .run(json!({ "cmd": "seq 1 5000" }), &mut ctx)
+            .unwrap();
+        unsafe { std::env::remove_var("CODECODER_MAX_TOOL_OUTPUT"); }
+        drop(_g);
+        assert!(out.content.contains("truncated"), "marker present: {}", out.content);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
