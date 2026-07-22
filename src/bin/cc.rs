@@ -21,6 +21,48 @@ fn main() -> anyhow::Result<()> {
             send_one(&sock, ClientRequest::TreeNav { id })
         }
         [one] if one == "clone" => send_one(&sock, ClientRequest::TreeClone),
+        [one, rest @ ..] if one == "ledger" => {
+            // 直读 bg_ledger.jsonl,不经 daemon(BG 独立于 daemon)。
+            let root = codecoder::Config::from_env().root;
+            let mut n: usize = 10;
+            let mut only_failed = false;
+            let mut detail = false;
+            let mut it = rest.iter();
+            while let Some(a) = it.next() {
+                match a.as_str() {
+                    "--failed" => only_failed = true,
+                    "--detail" => detail = true,
+                    "--last" => {
+                        n = it.next().and_then(|v| v.parse().ok()).unwrap_or(10);
+                    }
+                    other => {
+                        eprintln!("cc ledger: unknown flag '{other}'");
+                        std::process::exit(2);
+                    }
+                }
+            }
+            let recs =
+                codecoder::bg_ledger::read_recent(&root, if detail { 1 } else { n }, only_failed);
+            if recs.is_empty() {
+                println!("(no bg_ledger.jsonl yet, or no matching records)");
+            } else if detail {
+                let r = recs.last().unwrap();
+                println!("{}  task={}", codecoder::bg_ledger::format_utc(r.ts), r.task);
+                println!("  mission: {:?}", r.mission_state);
+                println!("  counts:  {:?}", r.counts);
+                for sg in &r.subgoals {
+                    println!(
+                        "  - milestone #{}: {:?}  {}",
+                        sg.milestone_id, sg.verdict, sg.gate_reason
+                    );
+                }
+            } else {
+                for r in &recs {
+                    println!("{}", codecoder::bg_ledger::summarize_line(r));
+                }
+            }
+            Ok(())
+        }
         [msg @ ..] => {
             // cc "hello world" — 一次性发送
             let content = msg.join(" ");

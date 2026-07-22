@@ -51,6 +51,7 @@ pub fn select_provider(cfg: &Config) -> Arc<dyn Provider> {
 /// print a report to stdout, persist the session. Scheduling is external.
 pub fn run_background(cfg: Config, task: String) -> anyhow::Result<()> {
     let provider = select_provider(&cfg);
+    let task_label = if task.trim().is_empty() { "workgraph".to_string() } else { task.clone() };
     let outcome = background::run_background(
         provider,
         cfg.model.clone(),
@@ -70,7 +71,17 @@ pub fn run_background(cfg: Config, task: String) -> anyhow::Result<()> {
         println!("denied/errors: {}", outcome.denied.join(" | "));
     }
     println!("=== summary: {} tools, {} denied ===", outcome.tool_calls.len(), outcome.denied.len());
-    Ok(())
+    // 账本(ADR 0033):追加一条 JSONL;失败仅警告,不拖垮主流程。
+    if let Err(e) = crate::bg_ledger::append(&cfg.root, &outcome, &task_label) {
+        eprintln!("bg ledger append failed: {e}");
+    }
+    let code = crate::bg_ledger::mission_exit_code(&outcome.mission_state);
+    if code == 0 {
+        Ok(())
+    } else {
+        // 非零退出码:外部调度器(systemd OnFailure / cron)据此告警。
+        std::process::exit(code);
+    }
 }
 
 /// Daemon 入口（client-server 架构）：起长驻 daemon，无 TUI。socket/session 逻辑
@@ -78,4 +89,26 @@ pub fn run_background(cfg: Config, task: String) -> anyhow::Result<()> {
 pub fn run_daemon(cfg: Config) -> anyhow::Result<()> {
     let daemon = daemon::Daemon::new(cfg);
     daemon.run()
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::background::BgOutcome;
+    use crate::bg_gate::MissionState;
+
+    #[test]
+    fn run_background_ledger_append_and_exit_code() {
+        // 验证 run_background 末尾将调用的 append + mission_exit_code 链路可用
+        // (进程退出码本身不在进程内断言;断言函数返回值 + 账本读写一致)。
+        let dir = std::env::temp_dir().join(format!("cc_lib_ledger_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut o = BgOutcome::default();
+        o.mission_state = MissionState::BlockedAt(9);
+        crate::bg_ledger::append(&dir, &o, "workgraph").unwrap();
+        let recs = crate::bg_ledger::read_recent(&dir, 5, false);
+        assert_eq!(recs.len(), 1);
+        assert_eq!(crate::bg_ledger::mission_exit_code(&recs[0].mission_state), 2);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
