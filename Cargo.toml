@@ -38,6 +38,8 @@ tiktoken-rs = "0.6"
 # Wasm capability environment: wasmtime + WASI isolation (ADR 0021)
 wasmtime = "27"
 wasmtime-wasi = "27"
+# Advisory file lock for WorkGraph concurrent-write protection (ADR 0035).
+fs2 = "0.4"
 
 [dev-dependencies]
 insta = { version = "1", features = ["colors"] }
