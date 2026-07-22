@@ -1,0 +1,313 @@
+//! BG 客观验收门 + continue/stop 策略(spec 2026-07-22)。
+//!
+//! Background Agent 的失败安全层:turn 结束后**客观**判定 milestone 的 acceptance,
+//! verdict **覆盖** agent 自报的 `VERDICT:` 行;失败时由 background.rs 写回
+//! `needs_fix` + reason 因果节点。本模块全是纯函数 + 一个可取消 shell 调用,
+//! 便于 hermetic 单测。
+use crate::agent::CancelToken;
+use crate::tool::ToolCtx;
+use crate::tool::builtin::run_shell_cancellable;
+use crate::workgraph::{Milestone, NodeStatus, WorkGraph};
+use std::path::Path;
+use std::process::Command;
+
+/// 客观验收门的判定结果。**覆盖** agent 自报 verdict。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GateVerdict {
+    Pass,
+    NeedsFix(String),
+    Inconclusive(String),
+}
+
+/// 从 acceptance 文本提取可执行的验收命令(若有)。按行扫描,返回首个含已知
+/// 测试/构建命令模式的行(原样,含其修饰)。已知模式:cargo test/build/check/clippy、
+/// pytest、npm/yarn test、make、go test、rustc。
+pub fn extract_gate_command(acceptance: &str) -> Option<String> {
+    const PATTERNS: &[&str] = &[
+        "cargo test",
+        "cargo build",
+        "cargo check",
+        "cargo clippy",
+        "pytest",
+        "py.test",
+        "npm test",
+        "yarn test",
+        "go test",
+        "rustc",
+        "make ",
+    ];
+    for line in acceptance.lines() {
+        let low = line.to_lowercase();
+        if PATTERNS.iter().any(|p| low.contains(p)) {
+            return Some(line.trim().to_string());
+        }
+    }
+    None
+}
+
+/// 跑命令门:exit 0 → Pass;非零 → NeedsFix(附输出摘要);跑不起来 → Inconclusive。
+pub fn run_command_gate(cmd: &str, root: &Path, cancel: Option<&CancelToken>) -> GateVerdict {
+    let mut command = Command::new("sh");
+    command.arg("-c").arg(cmd).current_dir(root);
+    let r = match cancel {
+        Some(c) => run_shell_cancellable(command, &ToolCtx::with_cancel(root, c)),
+        None => run_shell_cancellable(command, &ToolCtx::new(root)),
+    };
+    match r {
+        Ok(out) if !out.is_error => GateVerdict::Pass,
+        Ok(out) => GateVerdict::NeedsFix(format!("gate `{cmd}` failed: {}", truncate(out.content, 400))),
+        Err(e) => GateVerdict::Inconclusive(format!("gate `{cmd}` could not run: {e}")),
+    }
+}
+
+fn truncate(s: String, n: usize) -> String {
+    if s.chars().count() <= n {
+        s
+    } else {
+        let mut t: String = s.chars().take(n).collect();
+        t.push('…');
+        t
+    }
+}
+
+/// 顶层验收:命令门优先(客观);否则注入式 review 门;acceptance 空 → Inconclusive。
+/// `review_runner` 注入便于纯策略测试;prod 由 background.rs 注入调用 review 工具的闭包。
+pub fn evaluate(
+    m: &Milestone,
+    root: &Path,
+    cancel: Option<&CancelToken>,
+    review_runner: &dyn Fn() -> GateVerdict,
+) -> GateVerdict {
+    if let Some(cmd) = extract_gate_command(&m.acceptance) {
+        return run_command_gate(&cmd, root, cancel);
+    }
+    if m.acceptance.trim().is_empty() {
+        return GateVerdict::Inconclusive("no acceptance criterion (weak signal)".into());
+    }
+    review_runner()
+}
+
+// ── continue/stop 策略 ─────────────────────────────────────────────────────
+
+/// 一次 BG 调用的整体任务终态。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MissionState {
+    /// 仍在推进循环内。
+    Running,
+    /// 无更多就绪 milestone(全部完成或无就绪)。
+    CompletedAllReady,
+    /// 某 milestone 失败且其下游全部 Blocked,任务无法继续。
+    BlockedAt(u64),
+    /// 连续 K 个 milestone 失败,熔断。
+    CircuitBreaker,
+    /// turn/provider 自身错误(不动 workgraph 状态)。
+    Error(String),
+}
+
+/// `next_action` 的返回:推进到下一个 milestone,或停止并给出终态。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NextAction {
+    Advance(u64),
+    Stop(MissionState),
+}
+
+/// 决定一次 milestone 验收后的下一步。`next_ready()` 自然跳过因失败而 Blocked 的依赖者
+/// (recompute_blocked 把 dep 未 Done 的节点置 Blocked)。
+///
+/// - Pass & 有就绪 & 有预算 → Advance(next)
+/// - 失败 & consecutive ≥ k → Stop(CircuitBreaker)(即便有就绪,也停,防连环 flail)
+/// - 无预算 → Stop(CompletedAllReady)
+/// - 有就绪 → Advance(next)
+/// - 无就绪 & 有被阻塞的下游 → Stop(BlockedAt(just_done_id));否则 CompletedAllReady
+pub fn next_action(
+    graph: &WorkGraph,
+    just_done_id: u64,
+    verdict: &GateVerdict,
+    consecutive_fail: usize,
+    budget_left: bool,
+    k: usize,
+) -> NextAction {
+    let failed = !matches!(verdict, GateVerdict::Pass);
+    // 熔断优先。
+    if failed && consecutive_fail >= k {
+        return NextAction::Stop(MissionState::CircuitBreaker);
+    }
+    if !budget_left {
+        return NextAction::Stop(MissionState::CompletedAllReady);
+    }
+    // 是否有因 just_done 失败而 Blocked 的下游(独立借用,先于 next_ready)。
+    let has_blocked_dependent = graph
+        .nodes
+        .iter()
+        .any(|n| n.status != NodeStatus::Done && n.deps.contains(&just_done_id));
+    match graph.next_ready() {
+        Some(n) => NextAction::Advance(n.id),
+        None => {
+            if has_blocked_dependent {
+                NextAction::Stop(MissionState::BlockedAt(just_done_id))
+            } else {
+                NextAction::Stop(MissionState::CompletedAllReady)
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    fn ms(id: u64, acceptance: &str) -> Milestone {
+        Milestone {
+            id,
+            title: format!("t{id}"),
+            acceptance: acceptance.into(),
+            deps: vec![],
+            status: NodeStatus::Pending,
+            verdict: None,
+            touched: vec![],
+        }
+    }
+
+    fn graph_with(nodes: Vec<Milestone>) -> WorkGraph {
+        let mut g = WorkGraph::default();
+        for n in nodes {
+            g.nodes.push(n);
+        }
+        g
+    }
+
+    // ── extract_gate_command ──
+    #[test]
+    fn extract_gate_command_finds_known_patterns() {
+        assert_eq!(extract_gate_command("cargo test 通过"), Some("cargo test 通过".into()));
+        assert_eq!(extract_gate_command("runs: pytest -q"), Some("runs: pytest -q".into()));
+        assert_eq!(extract_gate_command("make test"), Some("make test".into()));
+    }
+
+    #[test]
+    fn extract_gate_command_none_when_no_pattern() {
+        assert_eq!(extract_gate_command("renderer 输出正确"), None);
+        assert_eq!(extract_gate_command(""), None);
+    }
+
+    // ── run_command_gate ──
+    #[test]
+    fn command_gate_pass_on_exit_zero() {
+        let dir = tempdir().unwrap();
+        assert_eq!(run_command_gate("echo ok", dir.path(), None), GateVerdict::Pass);
+    }
+
+    #[test]
+    fn command_gate_needsfix_on_nonzero() {
+        let dir = tempdir().unwrap();
+        match run_command_gate("false", dir.path(), None) {
+            GateVerdict::NeedsFix(msg) => assert!(msg.contains("false"), "{msg}"),
+            other => panic!("expected NeedsFix, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn command_gate_needsfix_on_missing_binary() {
+        // sh -c <missing> → exit 127 → NeedsFix(sh 包装了缺失命令,非 spawn 错误)。
+        // Inconclusive 分支为防御性代码(sh 基本总能 spawn),此处不直接触发。
+        let dir = tempdir().unwrap();
+        let v = run_command_gate("this-binary-does-not-exist-xyz-123", dir.path(), None);
+        match v {
+            GateVerdict::NeedsFix(msg) => assert!(msg.contains("command not found") || msg.contains("exit 127"), "{msg}"),
+            other => panic!("expected NeedsFix for missing binary, got {other:?}"),
+        }
+    }
+
+    // ── evaluate ──
+    #[test]
+    fn evaluate_uses_command_gate_when_present() {
+        let dir = tempdir().unwrap();
+        let m = ms(1, "cargo test"); // 含已知模式 → 命令门触发
+        // review_runner 返回独特标记;若被调用说明命令门没生效。
+        let v = evaluate(&m, dir.path(), None, &|| GateVerdict::Inconclusive("REVIEW_RAN".into()));
+        match v {
+            GateVerdict::Inconclusive(msg) if msg.contains("REVIEW_RAN") =>
+                panic!("review_runner was called; command gate should have fired first"),
+            _ => {} // NeedsFix/Pass/其它 Inconclusive 都说明命令门跑了(空 tempdir 下 cargo test 多半 NeedsFix)
+        }
+    }
+
+    #[test]
+    fn evaluate_falls_back_to_review_runner() {
+        let dir = tempdir().unwrap();
+        let m = ms(1, "renderer 输出正确"); // 无命令模式
+        let v = evaluate(&m, dir.path(), None, &|| GateVerdict::NeedsFix("review says no".into()));
+        assert_eq!(v, GateVerdict::NeedsFix("review says no".into()));
+    }
+
+    #[test]
+    fn evaluate_inconclusive_when_acceptance_empty() {
+        let dir = tempdir().unwrap();
+        let m = ms(1, "");
+        let v = evaluate(&m, dir.path(), None, &|| GateVerdict::Pass);
+        assert!(matches!(v, GateVerdict::Inconclusive(_)));
+    }
+
+    // ── next_action ──
+    // 把指定 id 的节点置为给定状态(模拟 turn 后 background.rs 已写回状态)。
+    fn with_status(mut g: WorkGraph, id: u64, status: NodeStatus) -> WorkGraph {
+        if let Some(n) = g.nodes.iter_mut().find(|n| n.id == id) {
+            n.status = status;
+        }
+        g
+    }
+
+    #[test]
+    fn next_action_pass_advances_to_next_ready() {
+        let g = with_status(graph_with(vec![ms(1, "x"), ms(2, "y")]), 1, NodeStatus::Done);
+        assert_eq!(next_action(&g, 1, &GateVerdict::Pass, 0, true, 2), NextAction::Advance(2));
+    }
+
+    #[test]
+    fn next_action_pass_no_more_ready_completes() {
+        let g = with_status(graph_with(vec![ms(1, "x")]), 1, NodeStatus::Done);
+        assert_eq!(
+            next_action(&g, 1, &GateVerdict::Pass, 0, true, 2),
+            NextAction::Stop(MissionState::CompletedAllReady)
+        );
+    }
+
+    #[test]
+    fn next_action_fail_with_blocked_dependent_and_no_independent_ready_blocks() {
+        let mut m2 = ms(2, "y");
+        m2.deps = vec![1];
+        let g = with_status(graph_with(vec![ms(1, "x"), m2]), 1, NodeStatus::NeedsFix);
+        assert_eq!(
+            next_action(&g, 1, &GateVerdict::NeedsFix("e".into()), 1, true, 2),
+            NextAction::Stop(MissionState::BlockedAt(1))
+        );
+    }
+
+    #[test]
+    fn next_action_fail_independent_ready_advances() {
+        let g = with_status(graph_with(vec![ms(1, "x"), ms(3, "z")]), 1, NodeStatus::NeedsFix);
+        assert_eq!(
+            next_action(&g, 1, &GateVerdict::NeedsFix("e".into()), 1, true, 2),
+            NextAction::Advance(3)
+        );
+    }
+
+    #[test]
+    fn next_action_circuit_breaker_on_k_consecutive_fails() {
+        let g = with_status(graph_with(vec![ms(1, "x"), ms(3, "z")]), 1, NodeStatus::NeedsFix);
+        assert_eq!(
+            next_action(&g, 1, &GateVerdict::NeedsFix("e".into()), 2, true, 2),
+            NextAction::Stop(MissionState::CircuitBreaker)
+        );
+    }
+
+    #[test]
+    fn next_action_no_budget_stops_completed() {
+        let g = with_status(graph_with(vec![ms(1, "x"), ms(2, "y")]), 1, NodeStatus::Done);
+        assert_eq!(
+            next_action(&g, 1, &GateVerdict::Pass, 0, false, 2),
+            NextAction::Stop(MissionState::CompletedAllReady)
+        );
+    }
+}
