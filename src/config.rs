@@ -16,6 +16,8 @@ pub struct Config {
     pub bg_circuit_k: usize,
     /// BG 护栏:单 milestone turn 的工具迭代上限(< 全局 12)。
     pub bg_milestone_tool_cap: usize,
+    /// Persistent Capability 跨重启崩溃预算(ADR 0034)。
+    pub supervisor_crash_budget: u32,
 }
 
 impl Config {
@@ -45,6 +47,9 @@ impl Config {
             bg_milestone_tool_cap: env("CODECODER_BG_MILESTONE_TOOL_CAP")
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(8),
+            supervisor_crash_budget: env("CODECODER_SUPERVISOR_CRASH_BUDGET")
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(3),
         }
     }
 }
@@ -79,5 +84,14 @@ mod tests {
             std::env::remove_var("CODECODER_BG_CIRCUIT_K");
             std::env::remove_var("CODECODER_BG_MILESTONE_TOOL_CAP");
         }
+    }
+
+    #[test]
+    fn supervisor_crash_budget_default_and_override() {
+        unsafe { std::env::remove_var("CODECODER_SUPERVISOR_CRASH_BUDGET"); }
+        assert_eq!(Config::from_env().supervisor_crash_budget, 3);
+        unsafe { std::env::set_var("CODECODER_SUPERVISOR_CRASH_BUDGET", "5"); }
+        assert_eq!(Config::from_env().supervisor_crash_budget, 5);
+        unsafe { std::env::remove_var("CODECODER_SUPERVISOR_CRASH_BUDGET"); }
     }
 }
