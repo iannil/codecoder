@@ -18,6 +18,7 @@ pub mod registry;
 pub mod retry;
 pub mod review;
 pub mod session;
+pub mod supervisor_state;
 pub mod tokenizer;
 pub mod trust;
 pub mod workgraph;
