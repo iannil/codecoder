@@ -4,7 +4,7 @@
 - **范围**: 广度审计(全部内置能力)+ 深度展示(mdslides 集成任务压测)
 - **环境**: codecoder 真实仓 `target/debug/{codecoder,cc}`;隔离工作区 `codecoder-lab/`(sibling);真实 DeepSeek(`.ccd.env`,model=`deepseek-v4-flash`)
 - **方法**: 交互式经 `cc "<msg>"` one-shot(stdin 管道喂五类 Dialog 应答);headless 经 `CODECODER_BG_TASK`;断言基于文件系统 + `jq` + 日志标记 + 退出码(LLM 非确定性 → 结构化断言)。脚本: `docs/superpowers/scripts/{drive_cc,bg_runner,fake_cc}.sh`
-- **一句话结论**: codecoder **已落地且能力齐全**——26 工具、Tool/Skill/Capability 三分自我进化、env×lifecycle、workgraph/reason/review 三一等公民、client-server、headless BG + SIGINT 全部实测可用;发现 1 个真实功能 gap(`/reload` 客户端不可达)+ 若干上限信号(迭代 cap、上下文漂移、复合命令 keying、固着行为)与 2 处文档/源码注释过时。
+- **一句话结论**: codecoder **已落地且能力齐全**——26 工具、Tool/Skill/Capability 三分自我进化、env×lifecycle、workgraph/reason/review 三一等公民、client-server、headless BG + SIGINT、Registry 3s 热重载全部实测/源码核验可用;**审计范围内未发现真实功能 gap**,但捕获若干上限信号(迭代 cap、上下文漂移、复合命令 keying、固着行为)与 2 处文档/源码注释过时。
 
 ---
 
@@ -50,7 +50,8 @@
 | run_capability(Wasm,预编译 .wat) | works | mdcount:输出 count=42 | **codecoder 自撰 WASI .wat**(fd_write+iovec+_start)成功 |
 | run_capability(Docker) | works | dockhello:输出 hello | 本机 Docker 在场(10+ 容器) |
 | Docker 缺失不降级契约 | source-verified | builtin.rs:384-386/484-486/571-573 + test | 3 处 lifecycle 显式 "refusing to downgrade to host (ADR 0021)" |
-| **/reload 客户端可达性** | **gap** | socket.rs/proto.rs | **无 `ClientRequest::Reload`**;`AgentCommand::Reload` 无 wire 路径;自进化靠 use_skill 直读磁盘绕过,catalog 仅 daemon 重启更新 |
+| Registry 热重载(tick_reload) | works(source-verified) | daemon/mod.rs:102-108 后台线程每 3s 重扫 + registry.rs:102/266/288 test | 新自撰 skill/capability **~3s 内自动进 catalog**,无需重启、无需 `/reload`(hot-reload spec 已实现) |
+| /reload 客户端命令 | n/a(无需) | socket.rs/proto.rs | 无 `ClientRequest::Reload`、无 `/reload` slash,但**不构成 gap**——上方热重载已覆盖;`AgentCommand::Reload` 为内部残留 |
 
 ### 1.5 委派与交互(五类 Dialog)
 
@@ -133,7 +134,7 @@
 按影响排序的发现(均为本次压测实证):
 
 ### 4.1 真实功能 gap
-- **`/reload` 客户端不可达**(高影响): `AgentCommand::Reload` 在 agent.rs 存在且被处理,但 client-server 协议(ADR 0032)**未定义 `ClientRequest::Reload`**,cc 也无 `/reload` slash。后果: agent 自撰生成的新 Skill **不会进入 system prompt 的 skill catalog**,除非重启 daemon。当前靠 `use_skill` 直读磁盘(按名激活)绕过——但这要求外部知道 skill 名,agent 自己"发现"不了新 skill。**可突破**: 在 `ClientRequest` 增 `Reload` 变体 + socket.rs 映射 + cc 加 `/reload` slash。
+- **本次审计范围内未发现真实功能 gap**。初始怀疑的"`/reload` 不可达 → catalog 不更新"经源码复核**不成立**: daemon 后台线程每 3s `tick_reload` 重扫 Registry(`daemon/mod.rs:102-108` + `registry.rs:266/288` 测试),新自撰 skill/capability ~3s 内自动进 catalog,故 `/reload` 客户端命令虽不存在但**无需存在**。`AgentCommand::Reload`(agent.rs:27/450)为内部残留,可清理。
 
 ### 4.2 行为上限(非 bug,但约束自主性)
 - **12-tool-iteration cap**: 一个 turn 内工具调用上限。压测中两次触顶(grep AST 的 C 查询精修、workgraph+测试循环)。长任务必须跨多个 turn/message,或调高 cap。drive_workgraph 的自动推进正是为跨 turn 续跑而设。
