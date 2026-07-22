@@ -133,6 +133,7 @@ codecoder 的「文件系统即自我」覆盖了三层身份与工作/推理层
 - **闸门在执行侧**:`generate_*` 仅 `write_file` 级;真正危险在 `run_capability`。Capability 进程拿不到 agent 工具集,不能递归自撰。
 - **子 agent 无用户通道** → 只能用 `Permission::None` 工具(没人能答它的权限提问),这是 read-only 的可强制定义。
 - **隔离不静默降级**:Docker 缺失/Wasm 未编译 → 明确报错,绝不偷偷落到宿主。
+- **工具输出长度截断**:`read_file`(限读 `take(max+1)`,内存有界)/ `run_command`(drain 后截断,上下文有界)输出过 `truncate_output`,超 `CODECODER_MAX_TOOL_OUTPUT`(默认 256KB)截断带 marker(ADR 0037)。
 
 ## Client-Server UI(0032)
 
