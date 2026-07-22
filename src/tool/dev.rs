@@ -166,26 +166,36 @@ impl Tool for Milestone {
         Permission::None
     }
     fn run(&self, args: Value, ctx: &mut ToolCtx) -> anyhow::Result<ToolOutput> {
-        use crate::workgraph::{NodeStatus, WorkGraph};
-        let action = args.get("action").and_then(Value::as_str).unwrap_or("list");
+        use crate::workgraph::WorkGraph;
+        let action = args
+            .get("action")
+            .and_then(Value::as_str)
+            .unwrap_or("list")
+            .to_string();
         let id = args.get("id").and_then(Value::as_u64);
-        let mut g = WorkGraph::read(ctx.root);
+        // 读+改+存统一在咨询锁内(ADR 0035),防与并发写者 lost-update。
+        // 读动作(list/next)走同一锁取一致快照;with_lock 末尾 save 对未改图幂等。
+        WorkGraph::with_lock(ctx.root, |g| Ok(Self::apply(g, &action, id, &args)))
+    }
+}
 
+impl Milestone {
+    /// 纯内存态:按 action 改 `g` 并返回输出(无 IO,由 with_lock 负责存盘)。
+    fn apply(g: &mut crate::workgraph::WorkGraph, action: &str, id: Option<u64>, args: &Value) -> ToolOutput {
+        use crate::workgraph::NodeStatus;
         match action {
-            "list" => {}
-            "next" => {
-                return Ok(ToolOutput::ok(match g.next_ready() {
-                    Some(n) => {
-                        let acc = if n.acceptance.is_empty() {
-                            String::new()
-                        } else {
-                            format!("\n  accept: {}", n.acceptance)
-                        };
-                        format!("▶ #{} {}{}", n.id, n.title, acc)
-                    }
-                    None => "(nothing ready — all milestones done, blocked, or in progress)".into(),
-                }));
-            }
+            "list" => ToolOutput::ok(g.render()),
+            "next" => ToolOutput::ok(match g.next_ready() {
+                Some(n) => {
+                    let acc = if n.acceptance.is_empty() {
+                        String::new()
+                    } else {
+                        format!("\n  accept: {}", n.acceptance)
+                    };
+                    format!("▶ #{} {}{}", n.id, n.title, acc)
+                }
+                None => "(nothing ready — all milestones done, blocked, or in progress)".into(),
+            }),
             "add" => {
                 let title = args.get("title").and_then(Value::as_str).unwrap_or_default();
                 let acceptance = args.get("acceptance").and_then(Value::as_str).unwrap_or_default();
@@ -195,28 +205,27 @@ impl Tool for Milestone {
                     .map(|a| a.iter().filter_map(Value::as_u64).collect())
                     .unwrap_or_default();
                 match g.add(title, acceptance, deps) {
-                    Ok(new) => {
-                        g.save(ctx.root)?;
-                        return Ok(ToolOutput::ok(format!("added #{new}\n{}", g.render())));
-                    }
-                    Err(e) => return Ok(ToolOutput::err(e.to_string())),
+                    Ok(new) => ToolOutput::ok(format!("added #{new}\n{}", g.render())),
+                    Err(e) => ToolOutput::err(e.to_string()),
                 }
             }
             "start" => {
-                let ok = id.map(|i| g.set_status(i, NodeStatus::InProgress)).unwrap_or(false);
-                if !ok {
-                    return Ok(ToolOutput::err("start needs a valid `id`"));
+                if id.map(|i| g.set_status(i, NodeStatus::InProgress)).unwrap_or(false) {
+                    ToolOutput::ok(g.render())
+                } else {
+                    ToolOutput::err("start needs a valid `id`")
                 }
             }
             "needs_fix" => {
-                let ok = id.map(|i| g.set_status(i, NodeStatus::NeedsFix)).unwrap_or(false);
-                if !ok {
-                    return Ok(ToolOutput::err("needs_fix needs a valid `id`"));
+                if id.map(|i| g.set_status(i, NodeStatus::NeedsFix)).unwrap_or(false) {
+                    ToolOutput::ok(g.render())
+                } else {
+                    ToolOutput::err("needs_fix needs a valid `id`")
                 }
             }
             "done" => {
                 let Some(i) = id else {
-                    return Ok(ToolOutput::err("done needs `id`"));
+                    return ToolOutput::err("done needs `id`");
                 };
                 let verdict = args.get("verdict").and_then(Value::as_str);
                 // Acceptance gate: a non-pass verdict lands NeedsFix, not Done.
@@ -225,24 +234,24 @@ impl Tool for Milestone {
                     _ => NodeStatus::Done,
                 };
                 if !g.set_status(i, status) {
-                    return Ok(ToolOutput::err("done needs a valid `id`"));
+                    return ToolOutput::err("done needs a valid `id`");
                 }
                 if let (Some(v), Some(n)) = (verdict, g.nodes.iter_mut().find(|n| n.id == i)) {
                     n.verdict = Some(v.to_string());
                 }
+                ToolOutput::ok(g.render())
             }
             "remove" => {
                 let Some(i) = id else {
-                    return Ok(ToolOutput::err("remove needs `id`"));
+                    return ToolOutput::err("remove needs `id`");
                 };
                 if let Err(e) = g.remove(i) {
-                    return Ok(ToolOutput::err(e.to_string()));
+                    return ToolOutput::err(e.to_string());
                 }
+                ToolOutput::ok(g.render())
             }
-            other => return Ok(ToolOutput::err(format!("unknown action: {other}"))),
+            other => ToolOutput::err(format!("unknown action: {other}")),
         }
-        g.save(ctx.root)?;
-        Ok(ToolOutput::ok(g.render()))
     }
 }
 

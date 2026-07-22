@@ -135,6 +135,35 @@ impl WorkGraph {
         Ok(())
     }
 
+    /// 在咨询文件锁内执行 read→mutate→save(ADR 0035),防并发写者 lost-update。
+    /// 锁独立文件 `workgraph.json.lock`(`save` 的 atomic-rename 会换数据文件 inode,
+    /// 故不能直接锁数据文件)。锁只包毫秒级闭包,**不覆盖调用方的 LLM turn**。
+    /// fs2 锁由 OS 在进程退出/崩溃时自动释放 → 无 stale-lock。
+    pub fn with_lock<T, F>(root: &Path, f: F) -> anyhow::Result<T>
+    where
+        F: FnOnce(&mut WorkGraph) -> anyhow::Result<T>,
+    {
+        use fs2::FileExt;
+        let lock_path = root.join("workgraph.json.lock");
+        if let Some(parent) = lock_path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .open(&lock_path)?;
+        file.lock_exclusive()?;
+        let result = (|| {
+            let mut g = WorkGraph::read(root);
+            let out = f(&mut g)?;
+            g.save(root)?;
+            Ok(out)
+        })();
+        let _ = file.unlock();
+        result
+    }
+
     fn next_id(&self) -> u64 {
         self.nodes.iter().map(|n| n.id).max().map(|m| m + 1).unwrap_or(1)
     }
@@ -554,5 +583,51 @@ mod tests {
             "large graph should elide the tail: {prompt}"
         );
         assert!(prompt.contains("▶ready"), "ready node must survive the cap: {prompt}");
+    }
+
+    #[test]
+    fn with_lock_prevents_lost_update_under_concurrency() {
+        use std::sync::Arc;
+        use std::thread;
+        let dir = std::env::temp_dir().join(format!("cc_wglock_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        WorkGraph::default().save(&dir).unwrap();
+        let dir = Arc::new(dir);
+        let n = 8;
+        let handles: Vec<_> = (0..n)
+            .map(|i| {
+                let d = Arc::clone(&dir);
+                thread::spawn(move || {
+                    WorkGraph::with_lock(&d, |g| {
+                        g.add(&format!("t{i}"), "", vec![])?;
+                        Ok(())
+                    })
+                })
+            })
+            .collect();
+        for h in handles {
+            h.join().unwrap().unwrap();
+        }
+        let g = WorkGraph::read(&dir);
+        assert_eq!(g.nodes.len(), n, "no milestone lost under concurrent with_lock writers");
+        let _ = std::fs::remove_dir_all(&*dir);
+    }
+
+    #[test]
+    fn with_lock_releases_so_sequential_calls_do_not_deadlock() {
+        let dir = std::env::temp_dir().join(format!("cc_wgseq_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        WorkGraph::default().save(&dir).unwrap();
+        for _ in 0..5 {
+            WorkGraph::with_lock(&dir, |g| {
+                g.add("t", "", vec![])?;
+                Ok(())
+            })
+            .unwrap();
+        }
+        assert_eq!(WorkGraph::read(&dir).nodes.len(), 5);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

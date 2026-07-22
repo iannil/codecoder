@@ -302,12 +302,13 @@ pub fn advance_one_milestone(
         crate::bg_gate::GateVerdict::Inconclusive(_) => (SubgoalVerdict::Inconclusive, NodeStatus::NeedsFix, "inconclusive"),
     };
     {
-        let mut g = WorkGraph::read(&root);
-        g.set_status(milestone_id, status);
-        if let Some(n) = g.nodes.iter_mut().find(|n| n.id == milestone_id) {
-            n.verdict = Some(vs_str.into());
-        }
-        let _ = g.save(&root);
+        let _ = WorkGraph::with_lock(&root, |g| {
+            g.set_status(milestone_id, status);
+            if let Some(n) = g.nodes.iter_mut().find(|n| n.id == milestone_id) {
+                n.verdict = Some(vs_str.into());
+            }
+            Ok(())
+        });
     }
     let gate_reason = match &verdict {
         crate::bg_gate::GateVerdict::Pass => "gate pass".to_string(),
