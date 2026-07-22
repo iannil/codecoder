@@ -28,13 +28,26 @@ impl Tool for ReadFile {
         Permission::None
     }
     fn run(&self, args: Value, ctx: &mut ToolCtx) -> anyhow::Result<ToolOutput> {
+        use std::io::Read;
         let path = args.get("path").and_then(Value::as_str).unwrap_or_default();
         if path.is_empty() {
             return Ok(ToolOutput::err("missing required arg: path"));
         }
         let full = ctx.root.join(path);
-        match std::fs::read_to_string(&full) {
-            Ok(contents) => Ok(ToolOutput::ok(contents)),
+        let max = crate::config::Config::from_env().max_tool_output;
+        let read = || -> anyhow::Result<(Vec<u8>, u64)> {
+            let mut f = std::fs::File::open(&full)?;
+            let total = f.metadata().map(|m| m.len()).unwrap_or(0); // 真实文件大小
+            let mut buf = Vec::new();
+            f.take((max as u64) + 1).read_to_end(&mut buf)?; // 限读:内存有界 max+1
+            Ok((buf, total))
+        };
+        match read() {
+            Ok((buf, total)) => Ok(ToolOutput::ok(truncate_output(
+                String::from_utf8_lossy(&buf).into_owned(),
+                max,
+                total as usize,
+            ))),
             Err(e) => Ok(ToolOutput::err(format!("cannot read {}: {e}", full.display()))),
         }
     }
@@ -94,6 +107,24 @@ impl Tool for RunCommand {
     }
 }
 
+/// 超长输出截断到 `max` 字节(char 边界安全)并加 marker(ADR 0037)。
+/// `s.len()<=max` 原样透传。`total` 为**真实**总字节数(marker 里报告它;
+/// 限读场景下 s 可能只含前 max+1 字节,真实总量需调用方传入,如文件 metadata)。
+pub fn truncate_output(s: String, max: usize, total: usize) -> String {
+    if s.len() <= max {
+        return s;
+    }
+    let mut cut = max;
+    while cut > 0 && !s.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    let mut head = String::from(&s[..cut]);
+    head.push_str(&format!(
+        "\n… [truncated: showed ~{cut} of {total} bytes; raise CODECODER_MAX_TOOL_OUTPUT to see more]"
+    ));
+    head
+}
+
 /// Run a shell `Command` to completion, killing the child if the turn is
 /// cancelled mid-run (ADR 0016). Spawns (not `.output()`) and drains stdout/stderr
 /// on their own threads so a chatty command can't fill the pipe buffer and
@@ -146,7 +177,9 @@ pub(crate) fn run_shell_cancellable(mut command: Command, ctx: &ToolCtx) -> anyh
     if is_error {
         buf = format!("exit {}: {buf}", status.code().unwrap_or(-1));
     }
-    Ok(ToolOutput { content: buf, is_error, session_meta_mark: None })
+    let max = crate::config::Config::from_env().max_tool_output;
+    let total = buf.len();
+    Ok(ToolOutput { content: truncate_output(buf, max, total), is_error, session_meta_mark: None })
 }
 
 pub struct ListDirectory;
@@ -927,6 +960,66 @@ mod tests {
             Permission::Ask { key } => assert_eq!(key, "run_command:git"),
             _ => panic!("expected Ask"),
         }
+    }
+
+    #[test]
+    fn truncate_output_passes_short_and_truncates_long() {
+        // 透传:未超 max 原样返回(无 marker)。
+        assert_eq!(truncate_output("hi".into(), 10, 2), "hi");
+        // 截断:超 max → 前缀为 max 字节 + marker(报告真实 total)。
+        let s = "a".repeat(100);
+        let out = truncate_output(s.clone(), 10, s.len());
+        assert!(out.starts_with("aaaaaaaaaa"), "prefix preserved: {out}");
+        assert!(out.contains("showed ~10 of 100 bytes"), "marker present: {out}");
+        // char 边界:多字节字符不切坏(截到 char 边界,结果合法 String)。
+        let multi = "é".repeat(100); // 每字 2 字节
+        let out2 = truncate_output(multi, 11, 200); // total=200(100 字×2 字节)
+        assert!(out2.ends_with(']'), "ends with marker: {out2}");
+        assert!(out2.contains("showed ~10 of 200 bytes"), "byte counts: {out2}");
+        let _chk: Vec<char> = out2.chars().collect(); // 不 panic = 合法 UTF-8
+    }
+
+    #[test]
+    fn read_file_truncates_large_file() {
+        use std::io::Write;
+        let dir = std::env::temp_dir().join(format!("cc_rftrunc_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let big = dir.join("big.txt");
+        {
+            let mut f = std::fs::File::create(&big).unwrap();
+            f.write_all("a".repeat(100_000).as_bytes()).unwrap();
+        }
+        let lock = std::sync::Mutex::new(());
+        let _g = lock.lock().unwrap();
+        unsafe { std::env::set_var("CODECODER_MAX_TOOL_OUTPUT", "1024"); }
+        let mut ctx = crate::tool::ToolCtx::new(&dir);
+        let out = ReadFile.run(json!({ "path": "big.txt" }), &mut ctx).unwrap();
+        unsafe { std::env::remove_var("CODECODER_MAX_TOOL_OUTPUT"); }
+        drop(_g);
+        assert!(!out.is_error, "{}", out.content);
+        assert!(out.content.contains("truncated"), "marker present: {}", out.content);
+        assert!(out.content.contains("100000 bytes"), "total reported: {}", out.content);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn run_command_truncates_large_output() {
+        let dir = std::env::temp_dir().join(format!("cc_rctrunc_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let lock = std::sync::Mutex::new(());
+        let _g = lock.lock().unwrap();
+        unsafe { std::env::set_var("CODECODER_MAX_TOOL_OUTPUT", "512"); }
+        let mut ctx = crate::tool::ToolCtx::new(&dir);
+        // seq 1 5000 产出 ~20KB >> 512
+        let out = RunCommand
+            .run(json!({ "cmd": "seq 1 5000" }), &mut ctx)
+            .unwrap();
+        unsafe { std::env::remove_var("CODECODER_MAX_TOOL_OUTPUT"); }
+        drop(_g);
+        assert!(out.content.contains("truncated"), "marker present: {}", out.content);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

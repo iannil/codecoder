@@ -137,6 +137,7 @@ project/
 | `CODECODER_SUPERVISOR_CRASH_BUDGET` | `3` | Persistent Capability 跨重启崩溃预算：累计崩溃达此值后 daemon 重启不再 spawn（会话内仍守 ADR 0021 不自动重启；manifest 变更自动重置；ADR 0034） |
 | `CODECODER_DEFAULT_TRUST` | `never` | 无用户在场（headless）时的默认信任策略：`never`/`always`/`once`（见 ADR 0028）。未信任则不加载 `AGENTS.md`/skills/capabilities 与 `codecoder.json` allowlist |
 | `CODECODER_TRUST_FILE` | `~/.codecoder/trust.json` | 全局信任决策存储路径（就近祖先匹配，见 ADR 0028） |
+| `CODECODER_MAX_TOOL_OUTPUT` | `262144` | `read_file` / `run_command` 单次输出字节上限，超长截断带 marker（ADR 0037） |
 | `GITHUB_TOKEN` | — | GitHub API token（提升 rate limit） |
 
 ## Background Agent 账本与告警（ADR 0033）

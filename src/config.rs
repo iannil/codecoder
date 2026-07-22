@@ -18,6 +18,8 @@ pub struct Config {
     pub bg_milestone_tool_cap: usize,
     /// Persistent Capability 跨重启崩溃预算(ADR 0034)。
     pub supervisor_crash_budget: u32,
+    /// 工具输出(read_file / run_command)字节上限,超长截断带 marker(ADR 0037)。
+    pub max_tool_output: usize,
 }
 
 impl Config {
@@ -50,6 +52,9 @@ impl Config {
             supervisor_crash_budget: env("CODECODER_SUPERVISOR_CRASH_BUDGET")
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(3),
+            max_tool_output: env("CODECODER_MAX_TOOL_OUTPUT")
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(256 * 1024),
         }
     }
 }
