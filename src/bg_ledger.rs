@@ -1,0 +1,275 @@
+//! BG 任务账本(spec 2026-07-22 #2 / ADR 0033):每次 BG 调用追加一条 JSONL 记录到
+//! `<root>/bg_ledger.jsonl`;`mission_exit_code` 把 mission_state 映射成进程退出码,
+//! 供外部调度器(systemd OnFailure / cron)告警。纯函数 + 文件 IO,不经 daemon。
+//! 写账本失败仅记 stderr,绝不拖垮主流程。
+use crate::background::{BgOutcome, SubgoalVerdict};
+use crate::bg_gate::MissionState;
+use serde::{Deserialize, Serialize};
+use std::fs::OpenOptions;
+use std::io::{BufRead, BufReader, Write};
+use std::path::{Path, PathBuf};
+
+/// 一条账本记录(JSONL 一行)。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LedgerRecord {
+    /// Unix epoch 秒(UTC)。
+    pub ts: u64,
+    /// "workgraph" | "<explicit task>" | "no task"。
+    pub task: String,
+    pub mission_state: MissionState,
+    /// 若 mission_state == BlockedAt(id),冗余存 id 便于 grep/过滤。
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub blocked_at: Option<u64>,
+    pub subgoals: Vec<crate::background::SubgoalOutcome>,
+    pub counts: LedgerCounts,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct LedgerCounts {
+    pub tools: usize,
+    pub denied: usize,
+    pub milestones: usize,
+    pub passed: usize,
+    pub failed: usize,
+}
+
+pub fn ledger_path(root: &Path) -> PathBuf {
+    root.join("bg_ledger.jsonl")
+}
+
+/// mission_state → 进程退出码。保守:未知 → 0(不误报)。
+pub fn mission_exit_code(state: &MissionState) -> i32 {
+    match state {
+        MissionState::CompletedAllReady | MissionState::Running => 0,
+        MissionState::BlockedAt(_) => 2,
+        MissionState::CircuitBreaker => 3,
+        MissionState::Error(_) => 4,
+    }
+}
+
+/// 从 BgOutcome 聚合 counts。
+pub fn counts_of(outcome: &BgOutcome) -> LedgerCounts {
+    let passed = outcome
+        .subgoals
+        .iter()
+        .filter(|s| matches!(s.verdict, SubgoalVerdict::Pass))
+        .count();
+    let failed = outcome.subgoals.len() - passed;
+    LedgerCounts {
+        tools: outcome.tool_calls.len(),
+        denied: outcome.denied.len(),
+        milestones: outcome.subgoals.len(),
+        passed,
+        failed,
+    }
+}
+
+fn blocked_at_of(state: &MissionState) -> Option<u64> {
+    match state {
+        MissionState::BlockedAt(id) => Some(*id),
+        _ => None,
+    }
+}
+
+/// 从 BgOutcome 构造一条记录(ts 取当前 epoch 秒)。
+pub fn record_of(outcome: &BgOutcome, task: &str) -> LedgerRecord {
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    LedgerRecord {
+        ts,
+        task: task.to_string(),
+        blocked_at: blocked_at_of(&outcome.mission_state),
+        mission_state: outcome.mission_state.clone(),
+        subgoals: outcome.subgoals.clone(),
+        counts: counts_of(outcome),
+    }
+}
+
+/// 追加一条记录到 `<root>/bg_ledger.jsonl`(每行一个 JSON)。IO 失败返 Err。
+pub fn append(root: &Path, outcome: &BgOutcome, task: &str) -> anyhow::Result<()> {
+    let rec = record_of(outcome, task);
+    let line = serde_json::to_string(&rec)?;
+    let path = ledger_path(root);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let mut f = OpenOptions::new().create(true).append(true).open(&path)?;
+    writeln!(f, "{line}")?;
+    Ok(())
+}
+
+/// 读最近 n 条(文件顺序的最后 n,旧→新)。only_failed=true 只回
+/// mission_state≠CompletedAllReady 的。损坏行跳过(JSONL 容错)。
+pub fn read_recent(root: &Path, n: usize, only_failed: bool) -> Vec<LedgerRecord> {
+    let path = ledger_path(root);
+    let f = match std::fs::File::open(&path) {
+        Ok(f) => f,
+        Err(_) => return vec![],
+    };
+    let all: Vec<LedgerRecord> = BufReader::new(f)
+        .lines()
+        .filter_map(|ln| {
+            ln.ok()
+                .and_then(|s| serde_json::from_str::<LedgerRecord>(&s).ok())
+        })
+        .collect();
+    let filtered: Vec<LedgerRecord> = if only_failed {
+        all.into_iter()
+            .filter(|r| !matches!(r.mission_state, MissionState::CompletedAllReady))
+            .collect()
+    } else {
+        all
+    };
+    let start = filtered.len().saturating_sub(n);
+    filtered[start..].to_vec()
+}
+
+/// epoch 秒 → "YYYY-MM-DDTHH:MM:SSZ"(UTC,无 chrono 依赖;civil-from-days 算法)。
+pub fn format_utc(epoch_secs: u64) -> String {
+    let days = (epoch_secs / 86400) as i64;
+    let secs_of_day = (epoch_secs % 86400) as u64;
+    let z = days + 719468;
+    let era = if z >= 0 { z } else { z - 146096 } / 146097;
+    let doe = (z - era * 146097) as u64;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let y = yoe as i64 + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if m <= 2 { y + 1 } else { y };
+    let hh = secs_of_day / 3600;
+    let mm = (secs_of_day % 3600) / 60;
+    let ss = secs_of_day % 60;
+    format!("{y:04}-{m:02}-{d:02}T{hh:02}:{mm:02}:{ss:02}Z")
+}
+
+/// 单行摘要(供 `cc ledger` 默认输出)。
+pub fn summarize_line(r: &LedgerRecord) -> String {
+    let st = match &r.mission_state {
+        MissionState::BlockedAt(id) => format!("BlockedAt(#{id})"),
+        other => format!("{other:?}"),
+    };
+    format!(
+        "{}  {}  {}m({}✓ {}✗)  {}t  {}d",
+        format_utc(r.ts),
+        st,
+        r.counts.milestones,
+        r.counts.passed,
+        r.counts.failed,
+        r.counts.tools,
+        r.counts.denied
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::background::{BgOutcome, SubgoalOutcome};
+    use crate::bg_gate::MissionState;
+    use tempfile::tempdir;
+
+    fn outcome(state: MissionState) -> BgOutcome {
+        let mut o = BgOutcome::default();
+        o.mission_state = state;
+        o.tool_calls = vec!["read_file".into(), "edit_file".into()];
+        o.denied = vec!["run_command: x".into()];
+        o.subgoals = vec![SubgoalOutcome {
+            milestone_id: 1,
+            verdict: SubgoalVerdict::NeedsFix,
+            gate_reason: "gate failed".into(),
+            tool_cap_hit: false,
+            touched_files: vec!["a.rs".into()],
+        }];
+        o
+    }
+
+    #[test]
+    fn exit_code_mapping() {
+        assert_eq!(mission_exit_code(&MissionState::CompletedAllReady), 0);
+        assert_eq!(mission_exit_code(&MissionState::Running), 0);
+        assert_eq!(mission_exit_code(&MissionState::BlockedAt(3)), 2);
+        assert_eq!(mission_exit_code(&MissionState::CircuitBreaker), 3);
+        assert_eq!(mission_exit_code(&MissionState::Error("e".into())), 4);
+    }
+
+    #[test]
+    fn format_utc_is_human_readable() {
+        // epoch 1784678507 ≈ 2026-07-22T08:41:47Z。
+        let s = format_utc(1784678507);
+        assert!(s.starts_with("2026-07-22"), "{s}");
+        assert!(s.contains('T') && s.ends_with('Z'), "{s}");
+    }
+
+    #[test]
+    fn append_then_read_roundtrip() {
+        let dir = tempdir().unwrap();
+        append(dir.path(), &outcome(MissionState::BlockedAt(3)), "workgraph").unwrap();
+        let recs = read_recent(dir.path(), 10, false);
+        assert_eq!(recs.len(), 1);
+        let r = &recs[0];
+        assert_eq!(r.task, "workgraph");
+        assert!(matches!(r.mission_state, MissionState::BlockedAt(3)));
+        assert_eq!(r.blocked_at, Some(3));
+        assert_eq!(r.subgoals.len(), 1);
+        assert_eq!(
+            r.counts,
+            LedgerCounts { tools: 2, denied: 1, milestones: 1, passed: 0, failed: 1 }
+        );
+    }
+
+    #[test]
+    fn read_recent_returns_last_n_in_order() {
+        let dir = tempdir().unwrap();
+        append(dir.path(), &outcome(MissionState::Running), "a").unwrap();
+        append(dir.path(), &outcome(MissionState::Running), "b").unwrap();
+        append(dir.path(), &outcome(MissionState::Running), "c").unwrap();
+        let recs = read_recent(dir.path(), 2, false);
+        assert_eq!(recs.len(), 2);
+        assert_eq!(recs[0].task, "b"); // 旧→新
+        assert_eq!(recs[1].task, "c");
+    }
+
+    #[test]
+    fn read_recent_only_failed() {
+        let dir = tempdir().unwrap();
+        append(dir.path(), &outcome(MissionState::CompletedAllReady), "ok").unwrap();
+        append(dir.path(), &outcome(MissionState::BlockedAt(1)), "bad").unwrap();
+        let recs = read_recent(dir.path(), 10, true);
+        assert_eq!(recs.len(), 1);
+        assert_eq!(recs[0].task, "bad");
+    }
+
+    #[test]
+    fn read_recent_skips_malformed_lines() {
+        let dir = tempdir().unwrap();
+        std::fs::write(ledger_path(dir.path()), "{not json\n").unwrap();
+        append(dir.path(), &outcome(MissionState::Running), "good").unwrap();
+        let recs = read_recent(dir.path(), 10, false);
+        assert_eq!(recs.len(), 1, "坏行应被跳过");
+        assert_eq!(recs[0].task, "good");
+    }
+
+    #[test]
+    fn summarize_line_format() {
+        let r = LedgerRecord {
+            ts: 1784678507,
+            task: "wg".into(),
+            mission_state: MissionState::BlockedAt(3),
+            blocked_at: Some(3),
+            subgoals: vec![],
+            counts: LedgerCounts { tools: 15, denied: 2, milestones: 3, passed: 1, failed: 2 },
+        };
+        let s = summarize_line(&r);
+        assert!(
+            s.contains("2026-07-22")
+                && s.contains("BlockedAt(#3)")
+                && s.contains("3m(1✓ 2✗)")
+                && s.contains("15t")
+                && s.contains("2d"),
+            "{s}"
+        );
+    }
+}
