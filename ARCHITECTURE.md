@@ -28,7 +28,7 @@
 
 | 模块 | 职责 | ADR |
 |---|---|---|
-| `main.rs` | 入口分发:`CODECODER_BG_TASK`→`run_background`, 否则→`run_daemon` | 0016 0026 0032 |
+| `main.rs` | 入口分发(`bg_mode_from_env` 路由):`CODECODER_BG_TASK`→显式 BG、`CODECODER_BG_WORKGRAPH=1`→workgraph BG、否则→`run_daemon` | 0016 0026 0033 |
 | `config.rs` | `CODECODER_*` 环境变量 | — |
 | `message.rs` | `Message`/`MessageItem`/`MessageId`/`Role`(provider 中立) | 0015 0017 |
 | `provider/{mod,openai,stub}` | `Provider` trait;`OpenAiClient`(chat-completions)/`StubClient` | 0017 |
