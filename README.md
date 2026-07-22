@@ -137,6 +137,29 @@ project/
 | `CODECODER_TRUST_FILE` | `~/.codecoder/trust.json` | 全局信任决策存储路径（就近祖先匹配，见 ADR 0028） |
 | `GITHUB_TOKEN` | — | GitHub API token（提升 rate limit） |
 
+## Background Agent 账本与告警（ADR 0033）
+
+每次 BG 调用（独立进程、跑完即退）追加一条 JSONL 记录到 `CODECODER_ROOT/bg_ledger.jsonl`（ts / mission_state / 每 milestone 的 subgoal 结论 / counts）。`mission_state` 映射成进程退出码，外部调度器据此告警：
+
+| mission_state | exit code |
+|---|---|
+| `CompletedAllReady` / `Running`（正常） | 0 |
+| `BlockedAt(_)`（硬依赖断裂） | 2 |
+| `CircuitBreaker`（连续失败熔断） | 3 |
+| `Error(_)`（turn/provider 出错） | 4 |
+| SIGINT 取消 | 0（操作者主动，非故障） |
+
+查账本（直读文件，不经 daemon——BG 运行时 daemon 常不在场）：
+
+```bash
+cc ledger                 # 最近 10 次（单行摘要：ts / state / counts）
+cc ledger --last 50       # 最近 N 次
+cc ledger --failed        # 仅需关注（state ≠ CompletedAllReady）
+cc ledger --detail        # 最近一次的完整 subgoals 明细
+```
+
+systemd `OnFailure=` / cron 邮件可按非 0 退出码触发告警；账本文件 append-only，用外部 logrotate 轮转。
+
 ## 开发
 
 ```bash

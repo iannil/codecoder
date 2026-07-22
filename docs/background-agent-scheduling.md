@@ -99,6 +99,38 @@ Background Agent 默认输出到 stdout/stderr。在调度器中重定向到文�
 codecoder --background >> /var/log/codecoder-$(date +%Y%m%d).log 2>&1
 ```
 
+## 账本与退出码告警（ADR 0033）
+
+每次 BG 调用追加一条 JSONL 到 `CODECODER_ROOT/bg_ledger.jsonl`,并把 `mission_state` 映射成进程退出码:
+
+| exit | mission_state | 含义 |
+|---|---|---|
+| 0 | CompletedAllReady / Running / SIGINT 取消 | 正常 |
+| 2 | BlockedAt | 硬依赖断裂,任务卡住 |
+| 3 | CircuitBreaker | 连续失败熔断 |
+| 4 | Error | turn/provider 出错 |
+
+**systemd**(方案 A)按非 0 退出码触发 `OnFailure=`:
+
+```ini
+[Unit]
+OnFailure=codecoder-alert.service
+
+[Service]
+Type=oneshot
+Environment=CODECODER_BG_TASK=workgraph CODECODER_ROOT=/path/to/project
+ExecStart=/usr/local/bin/codecoder
+```
+
+**cron**:非 0 退出码默认触发 MAILTO 邮件(若配置)。
+
+**查账本**(不经 daemon,直读文件):
+
+```bash
+cc ledger --failed        # 只看需关注的运行
+cc ledger --detail        # 最近一次的完整 subgoals 明细
+```
+
 ## 延后项
 
 - 内置调度器（进程内定时器）

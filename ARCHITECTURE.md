@@ -35,6 +35,7 @@
 | `agent.rs` | `AgentLoop`、turn 循环、工具分派、子 agent、ask_user、reload、**workgraph 自动推进(`drive_workgraph`)** | 0016 0019 |
 | `background.rs` | Background Agent headless one-shot runner;`run_background` 驱动一个 turn 到结束,汇总为 `BgOutcome`;**无显式 task 时从 workgraph 取就绪里程碑推进**;**客观验收门覆盖自报 + 失败写回 + continue/stop 策略** | 0026 0030 |
 | `bg_gate.rs` | **BG 客观验收门 + 任务策略**(ADR 0030):`GateVerdict`/命令门/`evaluate`/`next_action`(BlockedAt/CircuitBreaker/CompletedAllReady);纯函数 + 可取消 shell,hermetic 可测 | 0030 |
+| `bg_ledger.rs` | **BG 任务账本**(ADR 0033):`append`/`read_recent`/`mission_exit_code`/`format_utc`;JSONL 持久化 + 退出码告警 | 0033 |
 | `permission.rs` | `PermScope`/`Permission`/`PermissionKey`/`SessionAllowlist` | 0005 0018 |
 | `tool/mod.rs` | `Tool` trait、`Toolbox`(父/子 read-only)、wire schema | 0018 0019 |
 | `tool/builtin.rs` | 文件/执行/自我进化/委派/验收工具 | 0018 0020 0022 |
@@ -140,7 +141,7 @@ codecoder 的「文件系统即自我」覆盖了三层身份与工作/推理层
 
 ## ADR 索引
 
-`0001` TUI 键位与 Mode 语义(已废弃)· `0002` slash 本地派发 · `0003` 中心 Theme(已废弃)· `0004` Session 持久化与迁移 · `0005` 权限 scope 与 allowlist · `0007` prompt 注入 slash · `0015` 统一消息模型 · `0016` channel 拓扑与事件模型 · `0017` provider 中立消息模型 · `0018` Tool trait 与 PermissionKey · `0019` 子 agent 能力边界 · `0020` Skills/Capabilities Registry · `0021` Capability 环境与生命周期 · `0022` 自撰安全回路 · `0023` 上下文压缩 · `0024` TUI 视口与渲染循环(已废弃)· `0025` Prompt 作为 Skill 草稿层 · `0026` Background Agent · `0027` pi 对照分析 · `0028` 项目信任加载门禁 · `0029` turn steering 与 follow-up · `0031` 拦截中间件边界论证(不做)· `0032` client-server 架构 · `0030` BG 客观验收门与失败写回 ·
+`0001` TUI 键位与 Mode 语义(已废弃)· `0002` slash 本地派发 · `0003` 中心 Theme(已废弃)· `0004` Session 持久化与迁移 · `0005` 权限 scope 与 allowlist · `0007` prompt 注入 slash · `0015` 统一消息模型 · `0016` channel 拓扑与事件模型 · `0017` provider 中立消息模型 · `0018` Tool trait 与 PermissionKey · `0019` 子 agent 能力边界 · `0020` Skills/Capabilities Registry · `0021` Capability 环境与生命周期 · `0022` 自撰安全回路 · `0023` 上下文压缩 · `0024` TUI 视口与渲染循环(已废弃)· `0025` Prompt 作为 Skill 草稿层 · `0026` Background Agent · `0027` pi 对照分析 · `0028` 项目信任加载门禁 · `0029` turn steering 与 follow-up · `0031` 拦截中间件边界论证(不做)· `0032` client-server 架构 · `0030` BG 客观验收门与失败写回 · `0033` BG 任务账本与退出码告警 ·
 
 ## 测试与验证边界
 
