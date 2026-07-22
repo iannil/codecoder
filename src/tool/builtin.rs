@@ -94,6 +94,24 @@ impl Tool for RunCommand {
     }
 }
 
+/// 超长输出截断到 `max` 字节(char 边界安全)并加 marker(ADR 0037)。
+/// `len<=max` 原样透传。marker 告知 agent 数据被截 + 如何放大。
+pub fn truncate_output(s: String, max: usize) -> String {
+    if s.len() <= max {
+        return s;
+    }
+    let total = s.len();
+    let mut cut = max;
+    while cut > 0 && !s.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    let mut head = String::from(&s[..cut]);
+    head.push_str(&format!(
+        "\n… [truncated: showed ~{cut} of {total} bytes; raise CODECODER_MAX_TOOL_OUTPUT to see more]"
+    ));
+    head
+}
+
 /// Run a shell `Command` to completion, killing the child if the turn is
 /// cancelled mid-run (ADR 0016). Spawns (not `.output()`) and drains stdout/stderr
 /// on their own threads so a chatty command can't fill the pipe buffer and
@@ -927,6 +945,23 @@ mod tests {
             Permission::Ask { key } => assert_eq!(key, "run_command:git"),
             _ => panic!("expected Ask"),
         }
+    }
+
+    #[test]
+    fn truncate_output_passes_short_and_truncates_long() {
+        // 透传:未超 max 原样返回(无 marker)。
+        assert_eq!(truncate_output("hi".into(), 10), "hi");
+        // 截断:超 max → 前缀为 max 字节 + marker。
+        let s = "a".repeat(100);
+        let out = truncate_output(s.clone(), 10);
+        assert!(out.starts_with("aaaaaaaaaa"), "prefix preserved: {out}");
+        assert!(out.contains("showed ~10 of 100 bytes"), "marker present: {out}");
+        // char 边界:多字节字符不切坏(截到 char 边界,结果合法 String)。
+        let multi = "é".repeat(100); // 每字 2 字节
+        let out2 = truncate_output(multi, 11); // 11 落 char 中间 → 回退到 10(5 字)
+        assert!(out2.ends_with(']'), "ends with marker: {out2}");
+        assert!(out2.contains("showed ~10 of 200 bytes"), "byte counts: {out2}");
+        let _chk: Vec<char> = out2.chars().collect(); // 不 panic = 合法 UTF-8
     }
 
     #[test]
