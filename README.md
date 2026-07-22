@@ -130,6 +130,9 @@ project/
 | `CODECODER_ROOT` | 当前目录 | 项目根目录 |
 | `CODECODER_DAEMON` | — | 设置后以 daemon 模式启动长驻服务（client-server 架构，无 TUI；见 ADR 0032） |
 | `CODECODER_BG_TASK` | — | 设置后以 Background Agent headless 模式跑完该 task 即退出（无 daemon、无用户在场；权限走 `codecoder.json` 预授权，见 ADR 0026） |
+| `CODECODER_BG_MAX_AUTO` | `3` | BG workgraph 模式下，单次调用最多推进的里程碑数（ADR 0030） |
+| `CODECODER_BG_CIRCUIT_K` | `2` | BG 连续失败里程碑的熔断阈值：连续 K 个 fail 即停止（ADR 0030） |
+| `CODECODER_BG_MILESTONE_TOOL_CAP` | `8` | BG 单里程碑 turn 的工具迭代上限（< 全局 12，防固着；ADR 0030） |
 | `CODECODER_DEFAULT_TRUST` | `never` | 无用户在场（headless）时的默认信任策略：`never`/`always`/`once`（见 ADR 0028）。未信任则不加载 `AGENTS.md`/skills/capabilities 与 `codecoder.json` allowlist |
 | `CODECODER_TRUST_FILE` | `~/.codecoder/trust.json` | 全局信任决策存储路径（就近祖先匹配，见 ADR 0028） |
 | `GITHUB_TOKEN` | — | GitHub API token（提升 rate limit） |
