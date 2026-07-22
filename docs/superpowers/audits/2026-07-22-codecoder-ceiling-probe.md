@@ -64,9 +64,10 @@
 
 ### P9 · 并发 / fan-out — **finding(workgraph 并发丢更新)** ⚠️
 
-- **实测**: 4 并发 BG 各 `milestone add` → workgraph.json **0 milestone 存活**(`jq` 合法 = **未损坏**,但**数据丢失**);bg_ledger 4 行全合法(append-only 安全);sessions 6 个全合法(分文件安全)。子 agent 只读(list/read)、串行、深度锁 1。
-- **结论**: workgraph.json 是**非原子 read-modify-write** → 并发写**静默 lost-update**(非 corruption,是 **data loss**)。ledger append-only 与 sessions 分文件均安全。
+- **实测(已订正 2026-07-22)**: 4 并发 BG 各 `milestone add` → workgraph.json **并发丢更新**。注:本行初版写"0 milestone 存活"系 **jq 字段名误用**——WorkGraph 序列化字段是 `"nodes"` 而非 `.milestones`,故"0"是**误读非真实观测**(实际 4 进程均成功调了 milestone 工具)。后续诊断坐实 bug 真实且更严重:**无锁 8 并发 raw `read→add→save` → 1/8 存活(丢 7)**,且并发 `save` 撞同一 `workgraph.json.tmp` 会 panic。bg_ledger 4 行全合法(append-only 安全);sessions 全合法(分文件安全)。子 agent 只读(list/read)、串行、深度锁 1。
+- **结论**: workgraph.json 是**非原子 read-modify-write** → 并发写**静默 lost-update**(非 corruption,是 **data loss**;诊断实测丢 7/8)。ledger append-only 与 sessions 分文件均安全。
 - **风险外延**: daemon 的 30s workgraph 推进线程(`daemon/mod.rs:79`)+ 并发 BG 也会互踩丢里程碑。
+- **✅ 已修复(2026-07-22)**: ADR 0035 `WorkGraph::with_lock`(fs2 咨询锁 + 独立 `workgraph.json.lock`),贯通 advance / drive_workgraph / Milestone 工具三写点;修后 8 线程并发 8/8 存活、live 4/4 存活。见 `fix/workgraph-concurrency`(已并入 master)。
 
 ### P10 · 病态输入 — safe(无 panic)+ 1 代码发现
 
@@ -101,8 +102,8 @@
 
 ### 3.1 真发现(gap / 契约偏差)
 
-1. **P8 · BG 退出码 2/3/4 经 `CODECODER_BG_TASK` 不可达**(最高影响):workgraph 分支需空 task,main.rs 禁空 task;Error 从不构造。README/ADR 0033 的 0/2/3/4 表 live 仅 0 可观测;`cc ledger --failed` 因此误报全部。**建议**:BG 入口允许空 task 走 workgraph 模式;或显式 task 也接入 gate/circuit_k;或在显式 task 失败时置 `Error`。
-2. **P9 · workgraph.json 并发 lost-update**:非原子 read-modify-write → 并发 BG(或 daemon 推进线程 + BG)静默丢里程碑。**建议**:写时文件锁 / 原子 replace / 串行化 workgraph 写。
+1. **P8 · BG 退出码 2/3/4 经 `CODECODER_BG_TASK` 不可达**(最高影响):workgraph 分支需空 task,main.rs 禁空 task;Error 从不构造。README/ADR 0033 的 0/2/3/4 表 live 仅 0 可观测;`cc ledger --failed` 因此误报全部。**建议**:BG 入口允许空 task 走 workgraph 模式;或显式 task 也接入 gate/circuit_k;或在显式 task 失败时置 `Error`。**✅ 已修复(2026-07-22)**:`CODECODER_BG_WORKGRAPH=1` 入口(`bg_mode_from_env`)+ `AgentLoop.last_error` 贯通两分支;0/2/3/4 现全 live 可达。见 `fix/bg-workgraph-entry`(已并入 master)。
+2. **P9 · workgraph.json 并发 lost-update**:非原子 read-modify-write → 并发 BG(或 daemon 推进线程 + BG)静默丢里程碑(诊断实测丢 7/8)。**建议**:写时文件锁 / 原子 replace / 串行化 workgraph 写。**✅ 已修复(2026-07-22)**:ADR 0035 `WorkGraph::with_lock`(fs2 咨询锁)。见 `fix/workgraph-concurrency`(已并入 master)。
 3. **P5 · 复合命令首-token keying 安全 quirk**:预授权良性前缀隐式授权后缀任意命令。**建议**:key 取最危险子命令 / 拒复合 / 逐子命令授权。
 4. **P10 · master 无长度截断 guard**:read_file/run_command 输出无界 → 大文件/冗长命令致内存/上下文膨胀。**建议**:合并 `feat/length-truncation-guard`。
 5. **P11 · daemon 不响应 SIGINT + `cc shutdown` 不可靠**:daemon 无 SIGINT handler,`cc shutdown` 不杀进程 → 生命周期管理脆弱。**建议**:daemon 装 SIGINT→优雅 shutdown;修 `cc shutdown`。
