@@ -449,6 +449,15 @@ pub fn record_ruling(root: &Path, causal_node_id: u64, ruling: &str) -> anyhow::
     tree.save(root)
 }
 
+/// 持久化一个因果节点(供 background runner 在 milestone 客观验收失败时记录根因)。
+/// 镜像 reason 工具 `add` action 的写入路径:CausalTree::load → add → save。
+pub fn record_cause(root: &Path, question: &str, parent: Option<u64>) -> anyhow::Result<u64> {
+    let mut tree = CausalTree::load(root);
+    let id = tree.add(question, parent);
+    tree.save(root)?;
+    Ok(id)
+}
+
 // ── Cross-Session Inference Tree Collection ─────────────────────────────
 
 /// A cross-session inference node collected from session files' `meta` fields.
@@ -890,5 +899,16 @@ mod tests {
         assert!(statuses.contains(&"locked"), "locked should be collected: {:?}", statuses);
         assert_eq!(nodes.len(), 2, "non-causal entry must be excluded: {:?}", nodes);
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn record_cause_persists_node() {
+        let dir = std::env::temp_dir().join(format!("cc_rc_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let id = record_cause(&dir, "milestone #1 验收失败: gate cargo test exit 1", None).unwrap();
+        let tree = CausalTree::load(&dir);
+        assert!(tree.nodes.iter().any(|n| n.id == id && n.question.contains("验收失败")), "causal node not persisted");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

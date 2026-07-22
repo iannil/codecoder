@@ -1,13 +1,32 @@
 // Background Agent runner (ADR 0026): drives one delegated task headless (no TUI,
 // no user present), then returns a structured outcome. Scheduling is external.
 use crate::agent::{AgentEvent, AgentLoop};
+use crate::bg_gate::MissionState;
 use crate::provider::Provider;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::mpsc::channel;
 
+/// 单个 milestone 的客观验收结论(供 BgOutcome.subgoals)。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SubgoalVerdict {
+    Pass,
+    NeedsFix,
+    Inconclusive,
+}
+
+/// 一次 BG 调用中某个 milestone 的验收结果记录。
+#[derive(Debug, Clone)]
+pub struct SubgoalOutcome {
+    pub milestone_id: u64,
+    pub verdict: SubgoalVerdict,
+    pub gate_reason: String,
+    pub tool_cap_hit: bool,
+    pub touched_files: Vec<String>,
+}
+
 /// The result of one headless Background Agent turn.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct BgOutcome {
     /// The final assistant text of the turn.
     pub final_text: String,
@@ -17,6 +36,23 @@ pub struct BgOutcome {
     pub denied: Vec<String>,
     /// Human-readable milestone lines.
     pub events: Vec<String>,
+    /// 每个 milestone 的客观验收结论(空 = 非 milestone 模式)。
+    pub subgoals: Vec<SubgoalOutcome>,
+    /// 整次 BG 调用的任务终态(spec 2026-07-22)。
+    pub mission_state: MissionState,
+}
+
+impl Default for BgOutcome {
+    fn default() -> Self {
+        Self {
+            final_text: String::new(),
+            tool_calls: vec![],
+            denied: vec![],
+            events: vec![],
+            subgoals: vec![],
+            mission_state: MissionState::Running,
+        }
+    }
 }
 
 /// Resolve the task for a background run: an explicit non-empty `task` wins;

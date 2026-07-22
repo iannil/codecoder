@@ -204,6 +204,9 @@ pub struct AgentLoop {
     temperature: f32,
     next_id: MessageId,
     cancel: CancelToken,
+    /// 单 turn 工具迭代上限(默认 MAX_TOOL_ITERATIONS;BG 单 milestone 经
+    /// `set_tool_cap` 收紧,防固着耗尽预算)。
+    tool_cap: usize,
     /// No user is present (Background Agent, ADR 0026). Changes the permission
     /// gate: an Ask-tool not in an allowlist is auto-denied instead of prompting,
     /// and ask_user/confirm/plan short-circuit — there is no one to answer.
@@ -343,6 +346,7 @@ impl AgentLoop {
             temperature,
             next_id: 0,
             cancel: CancelToken::default(),
+            tool_cap: MAX_TOOL_ITERATIONS,
             headless,
             trust,
             steer: SteerQueue::default(),
@@ -377,6 +381,11 @@ impl AgentLoop {
 
     pub fn cancel_token(&self) -> CancelToken {
         self.cancel.clone()
+    }
+
+    /// 覆盖默认工具迭代上限(ADR 0026:BG 单 milestone 用更紧预算,防固着)。
+    pub fn set_tool_cap(&mut self, n: usize) {
+        self.tool_cap = n.max(1);
     }
 
     /// A shared handle to the steering queue (ADR 0029). The TUI pushes mid-turn
@@ -778,7 +787,7 @@ impl AgentLoop {
         self.append(Role::User, vec![MessageItem::Text { text }]);
 
         let mut hit_tool_cap = true; // cleared on every non-exhaustion exit
-        for _ in 0..MAX_TOOL_ITERATIONS {
+        for _ in 0..self.tool_cap {
             if self.cancel.is_cancelled() {
                 hit_tool_cap = false;
                 break;
@@ -920,7 +929,7 @@ impl AgentLoop {
             // tools — the turn was capped, not finished. Surface it so the abrupt
             // stop isn't mistaken for completion.
             let _ = event_tx.send(AgentEvent::Notice(format!(
-                "turn stopped at the {MAX_TOOL_ITERATIONS}-tool-iteration cap; the task may be incomplete — send another message to continue."
+                "turn stopped at the {}-tool-iteration cap; the task may be incomplete — send another message to continue.", self.tool_cap
             )));
         }
 
