@@ -1355,17 +1355,18 @@ impl AgentLoop {
             let text = self.last_assistant_text();
             let outcome = crate::review::parse_review(&text);
             if !outcome.unparsed {
-                let mut g = WorkGraph::read(&self.root);
                 let (status, verdict_str) = match outcome.verdict {
                     crate::review::Verdict::Pass => (NodeStatus::Done, "pass"),
                     crate::review::Verdict::NeedsFix => (NodeStatus::NeedsFix, "needs_fix"),
                     crate::review::Verdict::Rebuild => (NodeStatus::NeedsFix, "rebuild"),
                 };
-                g.set_status(milestone_id, status);
-                if let Some(n) = g.nodes.iter_mut().find(|n| n.id == milestone_id) {
-                    n.verdict = Some(verdict_str.to_string());
-                }
-                let _ = g.save(&self.root);
+                let _ = WorkGraph::with_lock(&self.root, |g| {
+                    g.set_status(milestone_id, status);
+                    if let Some(n) = g.nodes.iter_mut().find(|n| n.id == milestone_id) {
+                        n.verdict = Some(verdict_str.to_string());
+                    }
+                    Ok(())
+                });
                 let _ = event_tx.send(AgentEvent::Notice(format!(
                     "milestone #{} ({}) auto-updated: {}",
                     milestone_id, title, verdict_str,
