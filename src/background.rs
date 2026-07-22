@@ -125,6 +125,9 @@ pub(crate) fn run_background_cfg(
         agent.run_one_turn(task, &tx);
         drop(tx);
         drain_bg_events(rx, &mut out);
+        if let Some(e) = agent.last_error() {
+            out.mission_state = crate::bg_gate::MissionState::Error(e.to_string());
+        }
         return Ok(out);
     }
 
@@ -362,6 +365,43 @@ mod tests {
 
     use crate::bg_gate::MissionState;
     use crate::workgraph::NodeStatus;
+
+    /// 总是 provider 错误(503),用于 Error(4) 路径测试(ADR 0033)。
+    struct FailingProvider;
+    impl crate::provider::Provider for FailingProvider {
+        fn name(&self) -> &str { "failing" }
+        fn complete(
+            &self,
+            _req: &crate::provider::CompletionRequest,
+        ) -> anyhow::Result<crate::provider::Completion> {
+            Err(anyhow::anyhow!("provider down: simulated 503"))
+        }
+    }
+
+    #[test]
+    fn explicit_task_provider_error_yields_error_state() {
+        let dir = std::env::temp_dir().join(format!("cc_experr_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let out = run_background_cfg(
+            Arc::new(FailingProvider),
+            "m".into(),
+            256,
+            0.0,
+            dir.clone(),
+            "do something".into(),
+            3,
+            2,
+            8,
+        )
+        .unwrap();
+        assert!(
+            matches!(out.mission_state, MissionState::Error(_)),
+            "got {:?}",
+            out.mission_state
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     fn ws(dir: &std::path::Path, nodes: &[(u64, &str, Vec<u64>)]) {
         let mut g = WorkGraph::default();
