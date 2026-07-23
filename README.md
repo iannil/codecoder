@@ -134,6 +134,7 @@ project/
 | `CODECODER_BG_MAX_AUTO` | `3` | BG workgraph 模式下，单次调用最多推进的里程碑数（ADR 0030） |
 | `CODECODER_BG_CIRCUIT_K` | `2` | BG 连续失败里程碑的熔断阈值：连续 K 个 fail 即停止（ADR 0030） |
 | `CODECODER_BG_MILESTONE_TOOL_CAP` | `8` | BG 单里程碑 turn 的工具迭代上限（< 全局 12，防固着；ADR 0030） |
+| `CODECODER_BG_MAX_FIX_ATTEMPTS` | `3` | headless workgraph 中单个 milestone 验收 `needs_fix` 后最多自动重试次数（0 = 禁用自恢复；预算耗尽才落 `StuckNeedsFix`，退出码 2；ADR 0026/0033 修订） |
 | `CODECODER_SUPERVISOR_CRASH_BUDGET` | `3` | Persistent Capability 跨重启崩溃预算：累计崩溃达此值后 daemon 重启不再 spawn（会话内仍守 ADR 0021 不自动重启；manifest 变更自动重置；ADR 0034） |
 | `CODECODER_DEFAULT_TRUST` | `never` | 无用户在场（headless）时的默认信任策略：`never`/`always`/`once`（见 ADR 0028）。未信任则不加载 `AGENTS.md`/skills/capabilities 与 `codecoder.json` allowlist |
 | `CODECODER_TRUST_FILE` | `~/.codecoder/trust.json` | 全局信任决策存储路径（就近祖先匹配，见 ADR 0028） |
@@ -148,11 +149,12 @@ project/
 |---|---|
 | `CompletedAllReady` / `Running`（正常） | 0 |
 | `BlockedAt(_)`（硬依赖断裂） | 2 |
+| `StuckNeedsFix(_)`（needs_fix 重试预算耗尽，见 `CODECODER_BG_MAX_FIX_ATTEMPTS`） | 2 |
 | `CircuitBreaker`（连续失败熔断） | 3 |
 | `Error(_)`（turn/provider 出错） | 4 |
 | SIGINT 取消 | 0（操作者主动，非故障） |
 
-> **退出码可达性**：`CODECODER_BG_TASK=<显式 task>` 产 `Running`→0（provider 错误经 `AgentLoop.last_error` 现也→`Error`→4）；`CODECODER_BG_WORKGRAPH=1` 经 workgraph 分支可达 `CompletedAllReady`/`BlockedAt(2)`/`CircuitBreaker(3)`（ADR 0033 修订）。
+> **退出码可达性**：`CODECODER_BG_TASK=<显式 task>` 产 `Running`→0（provider 错误经 `AgentLoop.last_error` 现也→`Error`→4）；`CODECODER_BG_WORKGRAPH=1` 经 workgraph 分支可达 `CompletedAllReady`/`BlockedAt(2)`/`StuckNeedsFix(2)`/`CircuitBreaker(3)`（ADR 0033 修订）。
 
 查账本（直读文件，不经 daemon——BG 运行时 daemon 常不在场）：
 
