@@ -222,6 +222,8 @@ pub(crate) fn run_background_cfg(
             crate::bg_gate::GateVerdict::NeedsFix(sg.gate_reason.clone())
         };
         let g = crate::workgraph::WorkGraph::read(&root);
+        // 这里的"预算"指 max_auto 推进预算(本次 run 还能推进多少个里程碑),
+        // 与前面按节点检查的 fix_attempts 重试预算是两回事。
         let budget_left = advanced < max_auto;
         match crate::bg_gate::next_action(
             &g, sg.milestone_id, &gv, consecutive_fail, budget_left, circuit_k,
@@ -326,12 +328,14 @@ pub fn retry_one_milestone(
         (n.id, build_repair_prompt(n, &last), n.title.clone())
     };
     // 先记账再跑:即便本次 turn 崩溃,预算也已消耗,避免无限重试。
-    let _ = WorkGraph::with_lock(&root, |g| {
+    if let Err(e) = WorkGraph::with_lock(&root, |g| {
         if let Some(n) = g.nodes.iter_mut().find(|n| n.id == milestone_id) {
             n.fix_attempts += 1;
         }
         Ok(())
-    });
+    }) {
+        eprintln!("ccd: fix_attempts bump failed for #{milestone_id}: {e}");
+    }
     run_milestone_and_gate(provider, model, max_tokens, temperature, root, milestone_id, prompt, title)
         .map(Some)
 }
@@ -773,10 +777,11 @@ mod tests {
     #[test]
     fn build_repair_prompt_injects_failure_and_title() {
         use crate::workgraph::{Milestone, NodeStatus};
+        // acceptance 刻意选一个不出现在失败字符串里的值,使两个 contains 断言互相独立。
         let m = Milestone {
             id: 7,
             title: "CRDT 核心".into(),
-            acceptance: "cargo test".into(),
+            acceptance: "cargo build --release".into(),
             deps: vec![],
             status: NodeStatus::NeedsFix,
             verdict: None,
@@ -787,7 +792,25 @@ mod tests {
         let p = build_repair_prompt(&m, "gate `cargo test` failed: 2 failed");
         assert!(p.contains("CRDT 核心"), "含标题: {p}");
         assert!(p.contains("gate `cargo test` failed: 2 failed"), "含失败原因: {p}");
-        assert!(p.contains("cargo test"), "含 acceptance: {p}");
+        assert!(p.contains("cargo build --release"), "含 acceptance: {p}");
         assert!(p.trim_end().ends_with("VERDICT: <pass|needs_fix|rebuild>"), "以 VERDICT 行结尾: {p}");
+    }
+
+    #[test]
+    fn build_repair_prompt_uses_none_for_empty_acceptance() {
+        use crate::workgraph::{Milestone, NodeStatus};
+        let m = Milestone {
+            id: 3,
+            title: "无验收命令".into(),
+            acceptance: String::new(),
+            deps: vec![],
+            status: NodeStatus::NeedsFix,
+            verdict: None,
+            touched: vec![],
+            fix_attempts: 0,
+            last_failure: Some("self-review: NeedsFix".into()),
+        };
+        let p = build_repair_prompt(&m, "self-review: NeedsFix");
+        assert!(p.contains("(none)"), "空 acceptance 应渲染为 (none): {p}");
     }
 }

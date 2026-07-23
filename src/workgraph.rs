@@ -511,6 +511,21 @@ mod tests {
     }
 
     #[test]
+    fn load_legacy_json_without_new_fields_defaults_them() {
+        // 迭代 1 之前的 workgraph.json 没有 fix_attempts / last_failure 字段;
+        // #[serde(default)] 必须让它们缺省为 0 / None(锁定向后兼容契约)。
+        let raw = format!(
+            r#"{{"schema_version": {WG_SCHEMA_VERSION},
+                 "nodes": [{{"id": 1, "title": "legacy", "acceptance": "cargo test",
+                             "deps": [], "status": "needs_fix", "touched": []}}]}}"#
+        );
+        let g = WorkGraph::load(&raw).unwrap();
+        let n = g.get(1).unwrap();
+        assert_eq!(n.fix_attempts, 0, "缺省 fix_attempts 应为 0");
+        assert_eq!(n.last_failure, None, "缺省 last_failure 应为 None");
+    }
+
+    #[test]
     fn migrates_legacy_flat_todos() {
         let raw = r#"[{"id":1,"text":"first","done":true},{"id":2,"text":"second","done":false}]"#;
         let g = migrate_todos(raw).unwrap();

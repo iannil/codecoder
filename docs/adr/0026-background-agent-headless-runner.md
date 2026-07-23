@@ -59,3 +59,4 @@ is now implemented above.)
 - **重试执行**:`retry_one_milestone` **先**递增 `fix_attempts`(即便 turn 崩溃预算也被尊重),再把 `last_failure` 注入 `build_repair_prompt` 重跑该里程碑并过同一套客观验收门。runner 主循环仅在无 `pending` 就绪里程碑时走重试分支。
 - **预算**:`CODECODER_BG_MAX_FIX_ATTEMPTS`(默认 3)。**重试不计入 `max_auto`**,也不累加 `consecutive_fail`、不走 `next_action`;`StuckNeedsFix`(退出码 2)**仅在**既无就绪、又无预算内可重试节点时才落。
 - **已知取舍**:启用自恢复(`max_fix_attempts > 0`)时,跨里程碑的 `consecutive_fail` 熔断(CircuitBreaker)实际被 per-node 重试预算 + `max_auto` 取代(重试路径不累加 `consecutive_fail`)。这符合本迭代"用有界重试替代过早熔断"的目标;未来可让耗尽预算的硬失败里程碑累加一个独立计数以恢复跨里程碑熔断。
+- **作用域**:自恢复仅限 `CODECODER_BG_WORKGRAPH` headless runner(`run_background_cfg`);交互式的 `drive_workgraph` 路径(`src/agent.rs`)与 daemon 空闲推进线程(`src/daemon/mod.rs`,裸调 `advance_one_milestone`)仍只标记 `needs_fix`,需要人工重置为 `pending` 才会重试。
