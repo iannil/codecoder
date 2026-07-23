@@ -3,6 +3,8 @@
 use crate::config::Config;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
+use std::os::unix::net::UnixStream;
 
 pub mod proto;
 pub mod session_manager;
@@ -37,6 +39,26 @@ impl Daemon {
         // 「有 turn 在跑」；turn_token 在 drain 全程持有，正是这个信号。
         let turn_token = mgr.lock().unwrap().turn_token();
         let shutdown = Arc::new(AtomicBool::new(false));
+        // 注册 SIGINT + SIGTERM → shutdown flag(ADR 0032 修订)。
+        // 复用 signal-hook(既有依赖,同 BG cancel_on_sigint),但 handler 设的是
+        // daemon 的 shutdown flag(而非 turn CancelToken),使信号触发优雅退出。
+        if let Err(e) = signal_hook::flag::register(signal_hook::consts::SIGINT, Arc::clone(&shutdown)) {
+            eprintln!("ccd: SIGINT handler not registered: {e}");
+        }
+        if let Err(e) = signal_hook::flag::register(signal_hook::consts::SIGTERM, Arc::clone(&shutdown)) {
+            eprintln!("ccd: SIGTERM handler not registered: {e}");
+        }
+        // 监控线程:每 100ms 检查 shutdown flag;被设后自连接 socket 触发 accept 退出阻塞。
+        // 这样 cc shutdown、SIGINT、SIGTERM 均能触发 daemon 退出(均设同一个 flag)。
+        let sock_path_for_monitor = socket::default_sock_path(&self.cfg);
+        let shutdown_for_monitor = shutdown.clone();
+        std::thread::spawn(move || {
+            while !shutdown_for_monitor.load(Ordering::SeqCst) {
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            // shutdown flag 被设,自连接触发 accept 退出阻塞。
+            let _ = UnixStream::connect(&sock_path_for_monitor);
+        });
         let bus = Arc::new(crate::daemon::bus::EventBus::new());
 
         let budget = self.cfg.supervisor_crash_budget;
@@ -113,16 +135,21 @@ impl Daemon {
             }
         });
 
-        // 优雅退出：SIGINT/daemon 被 shutdown 请求后，退出时杀常驻 Capability（ADR 0021）。
+        // 优雅退出: SIGINT/SIGTERM → shutdown flag → 循环退出 → shutdown_all。
+        // cc shutdown 设 shutdown flag 后,自连接 socket 触发 accept 退出阻塞。
         while !shutdown.load(Ordering::SeqCst) {
             let stream = match server.accept_one() {
                 Ok(s) => s,
                 Err(e) => {
-                    // accept 出错不致命，记录后继续（真实 daemon 会 log；此处 best-effort）。
+                    // accept 出错不致命,记录后继续。
                     eprintln!("ccd: accept error: {e}");
                     continue;
                 }
             };
+            // 收到连接后检查 flag:若已设则退出(可能是自连接唤醒)。
+            if shutdown.load(Ordering::SeqCst) {
+                break;
+            }
             let mgr = mgr.clone();
             let shutdown = shutdown.clone();
             let turn_token_c = Arc::clone(&turn_token);
@@ -133,11 +160,10 @@ impl Daemon {
                 }
             });
         }
-        let _ = sup_handle.join();
-        let _ = wg_handle.join();
-        let _ = reload_handle.join();
         crate::capability::shutdown_all();
-        Ok(())
+        // 优雅退出前清理 socket 文件(exit(0) 不执行 Drop)。
+        let _ = std::fs::remove_file(socket::default_sock_path(&self.cfg));
+        std::process::exit(0);
     }
 }
 

@@ -5,6 +5,7 @@ use std::io::BufReader;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 /// 保证连接关闭时（EOF / Err / panic）都执行：从 bus 注销 → drop 所有本地
 /// combined_tx clone → join writer。没有它，bus 持有的 combined_tx clone 会让
@@ -179,6 +180,10 @@ pub fn handle_connection(
                 shutdown.store(true, std::sync::atomic::Ordering::SeqCst);
                 let _ = body_tx.send(ServerEvent::Notice { text: "shutting down".into() });
                 let _ = body_tx.send(ServerEvent::TurnComplete);
+                // 自连接,触发 accept 循环退出阻塞(accept 检测到 flag 后 break)。
+                let _ = UnixStream::connect(
+                    crate::daemon::socket::default_sock_path(&crate::config::Config::from_env()),
+                );
             }
             ClientRequest::Status => {
                 let _ = body_tx.send(ServerEvent::Notice { text: "ccd running".into() });
