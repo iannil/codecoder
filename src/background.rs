@@ -253,7 +253,7 @@ pub(crate) fn build_repair_prompt(m: &crate::workgraph::Milestone, last_failure:
     )
 }
 
-/// 推进 workgraph 的下一个就绪里程碑：跑一个 turn、解析 verdict、写回状态。
+/// 推进 workgraph 的下一个就绪(pending)里程碑：跑一个 turn、客观门、写回状态。
 /// 无就绪里程碑时返回 `Ok(None)`。daemon 与 background runner 共用此函数。
 pub fn advance_one_milestone(
     provider: Arc<dyn Provider>,
@@ -262,17 +262,10 @@ pub fn advance_one_milestone(
     temperature: f32,
     root: PathBuf,
 ) -> anyhow::Result<Option<BgOutcome>> {
-    use crate::workgraph::{NodeStatus, WorkGraph};
-    let milestone_id = {
+    use crate::workgraph::WorkGraph;
+    let (milestone_id, task_text, title) = {
         let g = WorkGraph::read(&root);
-        match g.next_ready() {
-            Some(n) => n.id,
-            None => return Ok(None),
-        }
-    };
-    let (task_text, title) = {
-        let g = WorkGraph::read(&root);
-        let n = g.get(milestone_id).expect("just read");
+        let Some(n) = g.next_ready() else { return Ok(None); };
         let t = format!(
             "workgraph milestone #{}: {}\nacceptance: {}\n\n\
              Complete this milestone, then self-review. You MUST end your reply \
@@ -282,11 +275,26 @@ pub fn advance_one_milestone(
             n.id, n.title,
             if n.acceptance.is_empty() { "(none)" } else { &n.acceptance },
         );
-        (t, n.title.clone())
+        (n.id, t, n.title.clone())
     };
+    run_milestone_and_gate(provider, model, max_tokens, temperature, root, milestone_id, task_text, title)
+        .map(Some)
+}
+
+/// 跑一个已选定 milestone 的 turn + 客观验收门 + 写回状态。被 `advance_one_milestone`
+/// (pending 常规推进)与 `retry_one_milestone`(needs_fix 自恢复)共用。
+fn run_milestone_and_gate(
+    provider: Arc<dyn Provider>,
+    model: String,
+    max_tokens: u32,
+    temperature: f32,
+    root: PathBuf,
+    milestone_id: u64,
+    task_text: String,
+    title: String,
+) -> anyhow::Result<BgOutcome> {
+    use crate::workgraph::{NodeStatus, WorkGraph};
     let mut agent = AgentLoop::new_background(provider, model, max_tokens, temperature, root.clone());
-    // Each auto-advanced milestone runs on its own agent (own cancel token), so
-    // re-wire SIGINT here too — signal-hook stacks handlers, all tokens get set.
     if let Err(e) = agent.cancel_token().cancel_on_sigint() {
         eprintln!("ccd: SIGINT cancel not wired: {e}");
     }
@@ -299,19 +307,16 @@ pub fn advance_one_milestone(
     agent.run_one_turn(task_text, &tx);
     drop(tx);
     drain_bg_events(rx, &mut out);
-    // provider 错误:让上层 run_background_cfg catch → mission_state=Error(不再 ?逃逸成 exit 1)。
     if let Some(e) = agent.last_error() {
         return Err(anyhow::anyhow!(e.to_string()));
     }
 
-    // ── 客观验收门(覆盖 agent 自报 VERDICT)── spec 2026-07-22
+    // ── 客观验收门(覆盖 agent 自报 VERDICT)──
     let m = {
         let g = WorkGraph::read(&root);
         g.get(milestone_id).expect("just read").clone()
     };
     let tool_cap_hit = out.events.iter().any(|e| e.contains("tool-iteration cap"));
-    // v1 review 门:复用 agent 自产 VERDICT 文本(parse_review)作兜底;
-    // 真正的 review 子代理门为后续增强(spec §5.1 (b))。
     let review_runner = || -> crate::bg_gate::GateVerdict {
         let o = crate::review::parse_review(&out.final_text);
         if !o.unparsed && matches!(o.verdict, crate::review::Verdict::Pass) {
@@ -329,6 +334,10 @@ pub fn advance_one_milestone(
         crate::bg_gate::GateVerdict::NeedsFix(_) => (SubgoalVerdict::NeedsFix, NodeStatus::NeedsFix, "needs_fix"),
         crate::bg_gate::GateVerdict::Inconclusive(_) => (SubgoalVerdict::Inconclusive, NodeStatus::NeedsFix, "inconclusive"),
     };
+    let gate_reason = match &verdict {
+        crate::bg_gate::GateVerdict::Pass => "gate pass".to_string(),
+        crate::bg_gate::GateVerdict::NeedsFix(r) | crate::bg_gate::GateVerdict::Inconclusive(r) => r.clone(),
+    };
     {
         let _ = WorkGraph::with_lock(&root, |g| {
             g.set_status(milestone_id, status);
@@ -338,10 +347,6 @@ pub fn advance_one_milestone(
             Ok(())
         });
     }
-    let gate_reason = match &verdict {
-        crate::bg_gate::GateVerdict::Pass => "gate pass".to_string(),
-        crate::bg_gate::GateVerdict::NeedsFix(r) | crate::bg_gate::GateVerdict::Inconclusive(r) => r.clone(),
-    };
     if !matches!(verdict, crate::bg_gate::GateVerdict::Pass) {
         let _ = crate::tool::reason::record_cause(
             &root,
@@ -357,7 +362,7 @@ pub fn advance_one_milestone(
         touched_files: m.touched.clone(),
     });
     out.events.push(format!("milestone #{} ({}) gated: {vs_str}", milestone_id, title));
-    Ok(Some(out))
+    Ok(out)
 }
 
 #[cfg(test)]
