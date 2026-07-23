@@ -23,6 +23,7 @@
 - **权限/ask/confirm/plan/trust 弹窗**经 daemon wire protocol 往返,`cc` 在终端行内显示 `y/n` 提示(Task 9a)。
 - **无 async 运行时**:阻塞式,HTTP 用 ureq,子 agent/服务用 OS 线程/子进程。
 - **取消**是协作式:`cc` 的 `Ctrl+C`(仅当有 turn 在跑时)**直接翻转共享 `CancelToken`**。`run_command` 与 shell Capability 经同一 `run_shell_cancellable` 轮询该 token 并 kill 子进程,turn 循环在每次迭代顶部再检查一次(不硬杀线程)。
+- **daemon 整体** SIGINT/SIGTERM → shutdown flag → 监控线程自连接 socket → accept 退出 → shutdown_all 杀常驻 Capability → exit(0)(ADR 0032 修订)。
 
 ## 模块地图
 

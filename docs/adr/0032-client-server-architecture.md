@@ -88,3 +88,12 @@ The `cc` binary is invoked separately to connect to the running daemon.
 - [[0019-sub-agent-capability-boundary]]: Sub-agent read-only limits (reused for client isolation)
 - [[0020-skills-and-capabilities-registry]]: Registry shared across clients
 - [[0026-background-agent-headless-runner]]: Headless runner pattern (precedent for daemon mode)
+
+## 修订(2026-07-22):daemon 生命周期——SIGINT/SIGTERM 优雅退出
+
+- `cc shutdown` 命令 → 设 `shutdown` flag → 监控线程(100ms 轮询)自连接 socket → accept 退出阻塞 → `shutdown_all()` 杀常驻 Capability → 清理 socket 文件 → `exit(0)`。
+- SIGINT/Ctrl+C → `signal_hook::flag::register` 设 shutdown flag。监控线程同上路径。
+- SIGTERM(`kill <pid>`) → 同 SIGINT,优雅退出(此前 daemon 无 SIGINT handler,SIGINT 被已有 turn 的 CancelToken handler 吞掉;SIGTERM 默认硬杀)。
+- daemon 子进程(Persistent Capability)不被信号级联(由 `shutdown_all()` 在退出时 kill)。
+- `SocketServer` 的 `Drop` 在 `exit(0)` 时不执行 → 退出前手动 `remove_file(socket_path)`。
+- `handle_connection` 的 `Shutdown` 分支亦自连接 socket(双保险)。
