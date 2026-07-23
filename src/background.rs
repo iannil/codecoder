@@ -339,10 +339,16 @@ fn run_milestone_and_gate(
         crate::bg_gate::GateVerdict::NeedsFix(r) | crate::bg_gate::GateVerdict::Inconclusive(r) => r.clone(),
     };
     {
+        let reason_for_persist = gate_reason.clone();
         let _ = WorkGraph::with_lock(&root, |g| {
             g.set_status(milestone_id, status);
             if let Some(n) = g.nodes.iter_mut().find(|n| n.id == milestone_id) {
                 n.verdict = Some(vs_str.into());
+                if matches!(status, NodeStatus::NeedsFix) {
+                    n.last_failure = Some(reason_for_persist.clone());
+                } else {
+                    n.last_failure = None; // Pass 时清空,避免陈旧原因污染未来重试
+                }
             }
             Ok(())
         });
@@ -510,6 +516,22 @@ mod tests {
         assert!(out.subgoals[0].gate_reason.contains("rustc"), "{:?}", out.subgoals[0].gate_reason);
         let causal = std::fs::read_to_string(dir.join("causal_tree.json")).unwrap_or_default();
         assert!(causal.contains("验收失败"), "causal node not written: {causal}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn gate_failure_persists_last_failure_reason() {
+        let dir = std::env::temp_dir().join(format!("cc_lastfail_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        // prose acceptance(无命令模式)+ StubClient 无 VERDICT → 评审门 Inconclusive → NeedsFix。
+        ws(&dir, &[(1, "渲染输出正确", vec![])]);
+        let _ = advance_one_milestone(
+            Arc::new(StubClient), "gpt-4o".into(), 4096, 0.7, dir.clone(),
+        ).unwrap().unwrap();
+        let n = WorkGraph::read(&dir).get(1).unwrap().clone();
+        assert_eq!(n.status, NodeStatus::NeedsFix);
+        assert!(n.last_failure.is_some(), "needs_fix 应记录 last_failure");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
