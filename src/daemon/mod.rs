@@ -182,7 +182,8 @@ mod tests {
         let cfg = Config {
             api_key: None, model: "gpt-4o".into(), api_base: "https://api.openai.com/v1".into(),
             max_tokens: 4096, temperature: 0.7, root: dir.clone(), github_token: None,
-            bg_max_auto: 3, bg_circuit_k: 2, bg_milestone_tool_cap: 8, supervisor_crash_budget: 3,
+            bg_max_auto: 3, bg_circuit_k: 2, bg_milestone_tool_cap: 8, bg_max_fix_attempts: 3,
+            supervisor_crash_budget: 3,
             max_tool_output: 256 * 1024,
         };
         let _d = Daemon::new(cfg); // 仅构造，不 run（run 会阻塞 accept）

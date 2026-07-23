@@ -16,6 +16,9 @@ pub struct Config {
     pub bg_circuit_k: usize,
     /// BG 护栏:单 milestone turn 的工具迭代上限(< 全局 12)。
     pub bg_milestone_tool_cap: usize,
+    /// BG 自恢复:单 milestone needs_fix 后最多自动重试次数(ADR 0026 迭代 1)。
+    /// 0 = 禁用自恢复(回退到旧的一失败即停语义)。
+    pub bg_max_fix_attempts: usize,
     /// Persistent Capability 跨重启崩溃预算(ADR 0034)。
     pub supervisor_crash_budget: u32,
     /// 工具输出(read_file / run_command)字节上限,超长截断带 marker(ADR 0037)。
@@ -49,6 +52,9 @@ impl Config {
             bg_milestone_tool_cap: env("CODECODER_BG_MILESTONE_TOOL_CAP")
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(8),
+            bg_max_fix_attempts: env("CODECODER_BG_MAX_FIX_ATTEMPTS")
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(3),
             supervisor_crash_budget: env("CODECODER_SUPERVISOR_CRASH_BUDGET")
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(3),
@@ -89,6 +95,15 @@ mod tests {
             std::env::remove_var("CODECODER_BG_CIRCUIT_K");
             std::env::remove_var("CODECODER_BG_MILESTONE_TOOL_CAP");
         }
+    }
+
+    #[test]
+    fn bg_max_fix_attempts_default_and_override() {
+        unsafe { std::env::remove_var("CODECODER_BG_MAX_FIX_ATTEMPTS"); }
+        assert_eq!(Config::from_env().bg_max_fix_attempts, 3);
+        unsafe { std::env::set_var("CODECODER_BG_MAX_FIX_ATTEMPTS", "5"); }
+        assert_eq!(Config::from_env().bg_max_fix_attempts, 5);
+        unsafe { std::env::remove_var("CODECODER_BG_MAX_FIX_ATTEMPTS"); }
     }
 
     #[test]
