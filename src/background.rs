@@ -281,6 +281,38 @@ pub fn advance_one_milestone(
         .map(Some)
 }
 
+/// 自恢复一个 needs_fix 里程碑(ADR 0026 迭代 1)。选 `next_retryable`,**先**递增其
+/// `fix_attempts`(即便 turn 崩溃预算也被尊重),再注入上一轮失败原因构造修复 prompt,
+/// 跑一 turn + 客观门。无可重试项(无 needs_fix 或全部耗尽预算)时返回 `Ok(None)`。
+pub fn retry_one_milestone(
+    provider: Arc<dyn Provider>,
+    model: String,
+    max_tokens: u32,
+    temperature: f32,
+    root: PathBuf,
+    max_fix_attempts: usize,
+) -> anyhow::Result<Option<BgOutcome>> {
+    use crate::workgraph::WorkGraph;
+    let (milestone_id, prompt, title) = {
+        let g = WorkGraph::read(&root);
+        let Some(n) = g.next_retryable(max_fix_attempts) else { return Ok(None); };
+        let last = n
+            .last_failure
+            .clone()
+            .unwrap_or_else(|| "(无记录的失败原因)".to_string());
+        (n.id, build_repair_prompt(n, &last), n.title.clone())
+    };
+    // 先记账再跑:即便本次 turn 崩溃,预算也已消耗,避免无限重试。
+    let _ = WorkGraph::with_lock(&root, |g| {
+        if let Some(n) = g.nodes.iter_mut().find(|n| n.id == milestone_id) {
+            n.fix_attempts += 1;
+        }
+        Ok(())
+    });
+    run_milestone_and_gate(provider, model, max_tokens, temperature, root, milestone_id, prompt, title)
+        .map(Some)
+}
+
 /// 跑一个已选定 milestone 的 turn + 客观验收门 + 写回状态。被 `advance_one_milestone`
 /// (pending 常规推进)与 `retry_one_milestone`(needs_fix 自恢复)共用。
 fn run_milestone_and_gate(
@@ -610,6 +642,70 @@ mod tests {
             let back: MissionState = serde_json::from_str(&j).unwrap();
             assert_eq!(format!("{back:?}"), format!("{s:?}"));
         }
+    }
+
+    /// 有状态的测试 Provider:前 `fail_until` 次 `complete` 返回 `VERDICT: needs_fix`,
+    /// 其后返回 `VERDICT: pass`。供 retry_one_milestone 测试与 Task 7 共用。
+    struct FlakyProvider {
+        fail_until: usize,
+        calls: std::sync::Mutex<usize>,
+    }
+    impl crate::provider::Provider for FlakyProvider {
+        fn name(&self) -> &str { "flaky" }
+        fn complete(
+            &self,
+            _req: &crate::provider::CompletionRequest,
+        ) -> anyhow::Result<crate::provider::Completion> {
+            use crate::message::{Message, MessageItem, Role};
+            let mut c = self.calls.lock().unwrap();
+            let i = *c;
+            *c += 1;
+            let text = if i < self.fail_until { "VERDICT: needs_fix" } else { "VERDICT: pass" };
+            Ok(Message {
+                id: 0,
+                role: Role::Assistant,
+                items: vec![MessageItem::Text { text: text.into() }],
+            }
+            .into())
+        }
+    }
+
+    #[test]
+    fn retry_one_milestone_bumps_attempt_and_can_pass() {
+        let dir = std::env::temp_dir().join(format!("cc_retry1_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        // 种一个 needs_fix 里程碑(prose acceptance → 走评审门,读 Provider 的 VERDICT)。
+        let mut g = WorkGraph::default();
+        let id = g.add("core", "渲染输出正确", vec![]).unwrap();
+        g.set_status(id, NodeStatus::NeedsFix);
+        g.nodes.iter_mut().find(|n| n.id == id).unwrap().last_failure = Some("上轮失败".into());
+        g.save(&dir).unwrap();
+
+        // Provider 立即 pass(fail_until=0)。
+        let out = retry_one_milestone(
+            Arc::new(FlakyProvider { fail_until: 0, calls: std::sync::Mutex::new(0) }),
+            "m".into(), 4096, 0.0, dir.clone(), 3,
+        ).unwrap();
+        assert!(out.is_some(), "有可重试项应返回 Some");
+        let n = WorkGraph::read(&dir).get(id).unwrap().clone();
+        assert_eq!(n.status, NodeStatus::Done, "pass 后应 Done");
+        assert_eq!(n.fix_attempts, 1, "重试应递增 fix_attempts");
+        assert_eq!(n.last_failure, None, "pass 后应清空 last_failure");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn retry_one_milestone_none_when_nothing_retryable() {
+        let dir = std::env::temp_dir().join(format!("cc_retry0_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        ws(&dir, &[(1, "渲染输出正确", vec![])]); // 默认 Pending,非 needs_fix
+        let out = retry_one_milestone(
+            Arc::new(StubClient), "m".into(), 4096, 0.0, dir.clone(), 3,
+        ).unwrap();
+        assert!(out.is_none(), "无 needs_fix 时应 None");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
