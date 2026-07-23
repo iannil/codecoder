@@ -41,7 +41,7 @@ pub fn ledger_path(root: &Path) -> PathBuf {
 pub fn mission_exit_code(state: &MissionState) -> i32 {
     match state {
         MissionState::CompletedAllReady | MissionState::Running => 0,
-        MissionState::BlockedAt(_) => 2,
+        MissionState::BlockedAt(_) | MissionState::StuckNeedsFix(_) => 2,
         MissionState::CircuitBreaker => 3,
         MissionState::Error(_) => 4,
     }
@@ -66,7 +66,7 @@ pub fn counts_of(outcome: &BgOutcome) -> LedgerCounts {
 
 fn blocked_at_of(state: &MissionState) -> Option<u64> {
     match state {
-        MissionState::BlockedAt(id) => Some(*id),
+        MissionState::BlockedAt(id) | MissionState::StuckNeedsFix(id) => Some(*id),
         _ => None,
     }
 }
@@ -191,6 +191,7 @@ mod tests {
         assert_eq!(mission_exit_code(&MissionState::CompletedAllReady), 0);
         assert_eq!(mission_exit_code(&MissionState::Running), 0);
         assert_eq!(mission_exit_code(&MissionState::BlockedAt(3)), 2);
+        assert_eq!(mission_exit_code(&MissionState::StuckNeedsFix(3)), 2);
         assert_eq!(mission_exit_code(&MissionState::CircuitBreaker), 3);
         assert_eq!(mission_exit_code(&MissionState::Error("e".into())), 4);
     }

@@ -27,3 +27,11 @@
 - **入口**: 新增 `CODECODER_BG_WORKGRAPH=1`(显式 task 缺省时)→ `run_background` 传空 task → workgraph 逐里程碑分支(`main.rs::bg_mode_from_env` 路由)。`CODECODER_BG_TASK=<非空>` 仍走显式单 shot。`lib.rs` 早已把空 task 标 `"workgraph"`(原设计意图),下游 background.rs/bg_gate 全就绪,只差入口路由。
 - **退出码全可达**: 经此入口,`BlockedAt(2)`/`CircuitBreaker(3)`/`CompletedAllReady(0)` 由 `bg_gate::next_action` 产出;`Error(4)` 由 `AgentLoop.last_error`(provider 错误,进程内字段——**刻意不用新 `AgentEvent` 变体**,以免 ripple daemon→client wire 的 socket.rs/proto.rs)在显式 + workgraph 两分支置位。0/2/3/4 现全部 live 可观测。
 - **`cc ledger --failed`**(= 非 CompletedAllReady)语义随 `CompletedAllReady` 可达而回归正确(此前经显式 task 入口,每条 BG 都是 Running → 被全量误报为需关注)。
+
+## 修订(2026-07-23):needs_fix 假绿修复 + acceptance 命令门健壮化
+
+Dogfooding(用 cc/ccd/BG_WORKGRAPH 从零建一个外部 RGA CRDT 协作编辑器项目)暴露两处缺陷:
+
+- **`StuckNeedsFix(id)` 新终态(修"假绿 exit 0")**:一个 milestone 验收失败被置 `needs_fix` 后,`next_ready()` 只选 `Pending && deps_done`,故一个 **fresh 进程**发现唯一可动的里程碑是 `needs_fix`(无 pending-ready)时,`advance_one_milestone` 立即返回 `None` → 循环 `Ok(None)` 分支**无条件**置 `CompletedAllReady` → exit 0。结果:0 工具空跑却假报"全部完成",上层调度器/编排者误判成功。修法:`Ok(None)` 分支置态前读图,若存在 `needs_fix` 节点 → `MissionState::StuckNeedsFix(id)`(退出码 **2**,同 BlockedAt 语义:需人工/上层修复该里程碑并重置 `pending` 后再续跑),否则才 `CompletedAllReady`。回归测试 `background::tests::stuck_needs_fix_when_only_needs_fix_and_nothing_ready`。
+- **acceptance 命令门跳过 prose(修"假 needs_fix / 假 pass")**:`bg_gate::extract_gate_command` 原样返回首个含命令关键字的行交 `sh -c` 执行。当 agent 用 `milestone add` 写的 acceptance 是自然语言(尤其 CJK),如 `cargo init --name coedit 创建二进制项目`,整行被执行 → `unexpected argument '创建二进制项目'` → 假 `needs_fix`;或 `cargo test 通过` → 退化成过滤 "通过" 的空测试 → exit 0 假 pass。修法:仅当匹配行**为纯 ASCII 命令**时才作命令门,否则跳过该行(继续找干净命令行),找不到则返回 `None` → 交注入式 review 门。测试 `bg_gate::tests::extract_gate_command_skips_prose_acceptance_with_command_word`。
+- **配套约束**:milestone 的 acceptance 最好写**独占一行的裸命令**(`cargo test`);描述性 prose 会退到 review 门(较弱信号)。全套 227 lib + 行为测试通过,无回归。
