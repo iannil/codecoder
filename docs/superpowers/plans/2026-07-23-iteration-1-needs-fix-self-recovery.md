@@ -355,13 +355,10 @@ fn run_milestone_and_gate(
         crate::bg_gate::GateVerdict::NeedsFix(r) | crate::bg_gate::GateVerdict::Inconclusive(r) => r.clone(),
     };
     {
-        let reason_for_persist = gate_reason.clone();
         let _ = WorkGraph::with_lock(&root, |g| {
             g.set_status(milestone_id, status);
             if let Some(n) = g.nodes.iter_mut().find(|n| n.id == milestone_id) {
                 n.verdict = Some(vs_str.into());
-                // Task 5 在此持久化/清空 last_failure(先占位,Task 5 填充)。
-                let _ = &reason_for_persist;
             }
             Ok(())
         });
@@ -465,14 +462,24 @@ fn gate_failure_persists_last_failure_reason() {
 Run: `cargo test --lib background::tests::gate_failure_persists_last_failure_reason`
 Expected: FAIL — `last_failure` 为 `None`（Task 4 只占位未写）。
 
-- [ ] **Step 3: 填充写回闭包**（`src/background.rs` `run_milestone_and_gate`，把 Task 4 里 `let _ = &reason_for_persist;` 那行替换）
+- [ ] **Step 3: 填充写回闭包**（`src/background.rs` `run_milestone_and_gate`，把 Task 4 引入的 `with_lock` 写回块整体替换为下面版本——新增 `reason_for_persist` 绑定并在闭包内持久化/清空 `last_failure`）
 
 ```rust
+    {
+        let reason_for_persist = gate_reason.clone();
+        let _ = WorkGraph::with_lock(&root, |g| {
+            g.set_status(milestone_id, status);
+            if let Some(n) = g.nodes.iter_mut().find(|n| n.id == milestone_id) {
+                n.verdict = Some(vs_str.into());
                 if matches!(status, NodeStatus::NeedsFix) {
                     n.last_failure = Some(reason_for_persist.clone());
                 } else {
                     n.last_failure = None; // Pass 时清空,避免陈旧原因污染未来重试
                 }
+            }
+            Ok(())
+        });
+    }
 ```
 
 - [ ] **Step 4: 跑测试确认通过**
@@ -929,5 +936,5 @@ git commit -m "docs: sync self-recovery loop (ADR 0026/0033, README, ARCHITECTUR
 ## Self-Review
 
 - **Spec coverage**：本计划覆盖 spec 迭代 1 的四个改动点——失败原因捕获（Task 5）、重试预算持久化（Task 1/2/6）、自恢复注入（Task 3/6/7）、退出码语义（Task 7 `StuckNeedsFix` 仅预算耗尽落）。L1 验收测试对应 spec 三条：`workgraph_auto_retries_needs_fix_until_pass`、`workgraph_gives_up_after_max_fix_attempts`、`build_repair_prompt_injects_failure_and_title`。
-- **Placeholder scan**：无 TBD/TODO；每个改代码步骤均给出完整代码。Task 4 的 `let _ = &reason_for_persist;` 是**显式占位**，由 Task 5 Step 3 替换（已在文中标明）。
+- **Placeholder scan**：无 TBD/TODO；每个改代码步骤均给出完整代码。Task 4 为纯重构（`with_lock` 闭包与原实现逐字一致）；`last_failure` 的持久化在 Task 5 Step 3 连同其测试一并引入，无中间死代码。
 - **Type consistency**：`fix_attempts: usize` / `last_failure: Option<String>` / `next_retryable(usize) -> Option<&Milestone>` / `retry_one_milestone(…, max_fix_attempts: usize)` / `run_milestone_and_gate(…, milestone_id: u64, task_text: String, title: String) -> anyhow::Result<BgOutcome>` / `build_repair_prompt(&Milestone, &str) -> String` 在各 Task 间一致；`run_background_cfg` 新第 10 参数 `max_fix_attempts: usize` 在 Task 7 统一落定并更新全部 callsite。
