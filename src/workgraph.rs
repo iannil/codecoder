@@ -70,6 +70,12 @@ pub struct Milestone {
     /// Files / commits touched — a human-readable trail, not load-bearing.
     #[serde(default)]
     pub touched: Vec<String>,
+    /// 自恢复循环:该 milestone 已消耗的 needs_fix 重试次数(ADR 0026 迭代 1)。
+    #[serde(default)]
+    pub fix_attempts: usize,
+    /// 最近一次验收失败原因,供重试 prompt 注入;跨进程持久化。Pass 时清空。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_failure: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -194,6 +200,8 @@ impl WorkGraph {
             status: NodeStatus::Pending,
             verdict: None,
             touched: Vec::new(),
+            fix_attempts: 0,
+            last_failure: None,
         });
         if let Err(e) = self.validate() {
             self.nodes.pop();
@@ -234,6 +242,20 @@ impl WorkGraph {
         self.nodes
             .iter()
             .filter(|n| n.status == NodeStatus::Pending && self.deps_done(n))
+            .min_by_key(|n| n.id)
+    }
+
+    /// 下一个可重试的 needs_fix milestone:状态 NeedsFix、deps 全 Done、且重试预算
+    /// 未耗尽(`fix_attempts < max_attempts`),取最低 id。`max_attempts == 0` 恒返回
+    /// None(禁用自恢复)。`None` 表示无可重试项。
+    pub fn next_retryable(&self, max_attempts: usize) -> Option<&Milestone> {
+        self.nodes
+            .iter()
+            .filter(|n| {
+                n.status == NodeStatus::NeedsFix
+                    && self.deps_done(n)
+                    && n.fix_attempts < max_attempts
+            })
             .min_by_key(|n| n.id)
     }
 
@@ -402,6 +424,8 @@ fn migrate_todos(raw: &str) -> Option<WorkGraph> {
             status: if t.done { NodeStatus::Done } else { NodeStatus::Pending },
             verdict: None,
             touched: Vec::new(),
+            fix_attempts: 0,
+            last_failure: None,
         })
         .collect();
     Some(WorkGraph { schema_version: WG_SCHEMA_VERSION, nodes })
@@ -454,8 +478,8 @@ mod tests {
         let g = WorkGraph {
             schema_version: WG_SCHEMA_VERSION,
             nodes: vec![
-                Milestone { id: 1, title: "a".into(), acceptance: String::new(), deps: vec![2], status: NodeStatus::Pending, verdict: None, touched: vec![] },
-                Milestone { id: 2, title: "b".into(), acceptance: String::new(), deps: vec![1], status: NodeStatus::Pending, verdict: None, touched: vec![] },
+                Milestone { id: 1, title: "a".into(), acceptance: String::new(), deps: vec![2], status: NodeStatus::Pending, verdict: None, touched: vec![], fix_attempts: 0, last_failure: None },
+                Milestone { id: 2, title: "b".into(), acceptance: String::new(), deps: vec![1], status: NodeStatus::Pending, verdict: None, touched: vec![], fix_attempts: 0, last_failure: None },
             ],
         };
         assert!(g.validate().is_err());
@@ -583,6 +607,46 @@ mod tests {
             "large graph should elide the tail: {prompt}"
         );
         assert!(prompt.contains("▶ready"), "ready node must survive the cap: {prompt}");
+    }
+
+    #[test]
+    fn next_retryable_picks_lowest_needs_fix_within_budget() {
+        let mut g = WorkGraph::default();
+        let a = g.add("a", "acc", vec![]).unwrap();
+        let b = g.add("b", "acc", vec![]).unwrap();
+        g.set_status(a, NodeStatus::NeedsFix);
+        g.set_status(b, NodeStatus::NeedsFix);
+        // 两个都在预算内 → 取最低 id。
+        assert_eq!(g.next_retryable(3).map(|n| n.id), Some(a));
+        // a 耗尽预算 → 取 b。
+        g.nodes.iter_mut().find(|n| n.id == a).unwrap().fix_attempts = 3;
+        assert_eq!(g.next_retryable(3).map(|n| n.id), Some(b));
+        // 都耗尽 → None。
+        g.nodes.iter_mut().find(|n| n.id == b).unwrap().fix_attempts = 3;
+        assert_eq!(g.next_retryable(3), None);
+    }
+
+    #[test]
+    fn next_retryable_skips_pending_and_blocked_and_respects_deps() {
+        let mut g = WorkGraph::default();
+        let a = g.add("a", "acc", vec![]).unwrap();
+        let b = g.add("b", "acc", vec![a]).unwrap(); // 依赖 a
+        g.set_status(b, NodeStatus::NeedsFix);        // b needs_fix 但 dep a 未 Done
+        // a 仍 Pending（非 needs_fix）→ 不可重试；b 的 dep 未 Done → 不可重试。
+        assert_eq!(g.next_retryable(3), None);
+        // 关闭预算 → 即便 needs_fix 也不选。
+        g.set_status(a, NodeStatus::Done);            // 现在 b 的 dep 满足
+        assert_eq!(g.next_retryable(3).map(|n| n.id), Some(b));
+        assert_eq!(g.next_retryable(0), None);        // max_attempts=0 → 禁用
+    }
+
+    #[test]
+    fn new_milestone_defaults_retry_state() {
+        let mut g = WorkGraph::default();
+        let a = g.add("a", "acc", vec![]).unwrap();
+        let n = g.get(a).unwrap();
+        assert_eq!(n.fix_attempts, 0);
+        assert_eq!(n.last_failure, None);
     }
 
     #[test]

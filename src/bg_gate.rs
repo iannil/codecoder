@@ -179,6 +179,8 @@ mod tests {
             status: NodeStatus::Pending,
             verdict: None,
             touched: vec![],
+            fix_attempts: 0,
+            last_failure: None,
         }
     }
 
