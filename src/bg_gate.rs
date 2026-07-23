@@ -20,8 +20,12 @@ pub enum GateVerdict {
 }
 
 /// 从 acceptance 文本提取可执行的验收命令(若有)。按行扫描,返回首个含已知
-/// 测试/构建命令模式的行(原样,含其修饰)。已知模式:cargo test/build/check/clippy、
+/// 测试/构建命令模式**且为纯 ASCII 命令行**的行。已知模式:cargo test/build/check/clippy、
 /// pytest、npm/yarn test、make、go test、rustc。
+///
+/// 含命令关键字但混有 prose(尤其 CJK 描述,如 `cargo init ... 创建二进制项目`)的行**不**
+/// 视为可运行命令——原样交 `sh -c` 执行要么因 prose 报错(假 needs_fix),要么退化成
+/// 空过滤(假 pass)。这类描述性 acceptance 跳过命令门,改由注入式 review 门评判。
 pub fn extract_gate_command(acceptance: &str) -> Option<String> {
     const PATTERNS: &[&str] = &[
         "cargo test",
@@ -37,9 +41,14 @@ pub fn extract_gate_command(acceptance: &str) -> Option<String> {
         "make ",
     ];
     for line in acceptance.lines() {
-        let low = line.to_lowercase();
+        let trimmed = line.trim();
+        let low = trimmed.to_lowercase();
         if PATTERNS.iter().any(|p| low.contains(p)) {
-            return Some(line.trim().to_string());
+            // 仅当整行是纯 ASCII 命令(无 prose)时才作为 shell 门执行;否则继续扫描,
+            // 找不到干净命令行则返回 None → 交 review 门。
+            if trimmed.is_ascii() {
+                return Some(trimmed.to_string());
+            }
         }
     }
     None
@@ -100,6 +109,10 @@ pub enum MissionState {
     BlockedAt(u64),
     /// 连续 K 个 milestone 失败,熔断。
     CircuitBreaker,
+    /// 无就绪 milestone,但图中仍有 `needs_fix`(及被其阻塞的下游)——任务未完成,
+    /// 需人工/上层修复该 milestone 后重置为 pending 再续跑。区别于 CompletedAllReady
+    /// 的"真完成",避免 headless 空跑一轮却 exit 0 假报成功。
+    StuckNeedsFix(u64),
     /// turn/provider 自身错误(不动 workgraph 状态)。
     Error(String),
 }
@@ -179,10 +192,26 @@ mod tests {
 
     // ── extract_gate_command ──
     #[test]
-    fn extract_gate_command_finds_known_patterns() {
-        assert_eq!(extract_gate_command("cargo test 通过"), Some("cargo test 通过".into()));
+    fn extract_gate_command_finds_clean_ascii_commands() {
+        assert_eq!(extract_gate_command("cargo build"), Some("cargo build".into()));
+        assert_eq!(extract_gate_command("cargo test"), Some("cargo test".into()));
         assert_eq!(extract_gate_command("runs: pytest -q"), Some("runs: pytest -q".into()));
         assert_eq!(extract_gate_command("make test"), Some("make test".into()));
+    }
+
+    #[test]
+    fn extract_gate_command_skips_prose_acceptance_with_command_word() {
+        // 描述性 acceptance(命令关键字 + CJK prose)不当作可运行命令,交 review 门。
+        assert_eq!(extract_gate_command("cargo test 通过"), None);
+        assert_eq!(
+            extract_gate_command("cargo init --name coedit 创建二进制项目；cargo build 通过"),
+            None
+        );
+        // 多行:跳过 prose 行,取后续干净命令行。
+        assert_eq!(
+            extract_gate_command("完成 CRDT 核心后 cargo build 应通过\ncargo test"),
+            Some("cargo test".into())
+        );
     }
 
     #[test]

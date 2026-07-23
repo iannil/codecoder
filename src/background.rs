@@ -149,9 +149,19 @@ pub(crate) fn run_background_cfg(
         ) {
             Ok(Some(s)) => s,
             Ok(None) => {
-                // 无就绪 milestone(空图或全部完成/阻塞)。
+                // 无就绪 milestone。区分"真完成"与"卡在 needs_fix":后者是一个 fresh
+                // 进程发现唯一可动的 milestone 是 needs_fix(无 pending-ready),不能
+                // 假报 CompletedAllReady/exit 0,否则上层误判成功(见回归测试)。
                 if out.mission_state == crate::bg_gate::MissionState::Running {
-                    out.mission_state = crate::bg_gate::MissionState::CompletedAllReady;
+                    let g = crate::workgraph::WorkGraph::read(&root);
+                    let needs_fix = g
+                        .nodes
+                        .iter()
+                        .find(|n| n.status == crate::workgraph::NodeStatus::NeedsFix);
+                    out.mission_state = match needs_fix {
+                        Some(n) => crate::bg_gate::MissionState::StuckNeedsFix(n.id),
+                        None => crate::bg_gate::MissionState::CompletedAllReady,
+                    };
                 }
                 break;
             }
@@ -504,6 +514,29 @@ mod tests {
             Arc::new(StubClient), "gpt-4o".into(), 4096, 0.7, dir.clone(), "".into(), 3, 2, 8,
         ).unwrap();
         assert_eq!(out.mission_state, MissionState::CircuitBreaker, "{:?}", out.mission_state);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn stuck_needs_fix_when_only_needs_fix_and_nothing_ready() {
+        // 回归:一个 fresh 进程发现唯一可动的 milestone 是 needs_fix(无 pending-ready),
+        // 过去会走 Ok(None)→CompletedAllReady→exit 0 假报成功。现在应报 StuckNeedsFix。
+        let dir = std::env::temp_dir().join(format!("cc_stuck_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut g = WorkGraph::default();
+        let id = g.add("core", "cargo build", vec![]).unwrap();
+        g.set_status(id, NodeStatus::NeedsFix);
+        g.save(&dir).unwrap();
+        let out = run_background_cfg(
+            Arc::new(StubClient), "gpt-4o".into(), 256, 0.0, dir.clone(), "".into(), 3, 2, 8,
+        ).unwrap();
+        assert_eq!(
+            out.mission_state,
+            MissionState::StuckNeedsFix(id),
+            "needs_fix-only graph must not report success; got {:?}",
+            out.mission_state
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
