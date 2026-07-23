@@ -235,6 +235,24 @@ fn drain_bg_events(rx: std::sync::mpsc::Receiver<AgentEvent>, out: &mut BgOutcom
     }
 }
 
+/// 构造 needs_fix 重试的修复 prompt:注入上一轮失败原因 + acceptance,要求先针对
+/// 失败做实际改动,再自评,并以内核可解析的 VERDICT 行结尾。纯函数,便于单测。
+pub(crate) fn build_repair_prompt(m: &crate::workgraph::Milestone, last_failure: &str) -> String {
+    format!(
+        "workgraph milestone #{} ({}) 上一轮验收未通过,需要修复后重试。\n\
+         上一轮失败原因:\n{}\n\n\
+         acceptance: {}\n\n\
+         请针对上述失败原因做出实际代码改动来修复它(不要只解释),然后自评。\
+         你必须以下面这行精确格式结尾(其后不要有任何内容),以便内核解析并自动更新\
+         里程碑状态:\n\
+         VERDICT: <pass|needs_fix|rebuild>",
+        m.id,
+        m.title,
+        last_failure.trim(),
+        if m.acceptance.is_empty() { "(none)" } else { &m.acceptance },
+    )
+}
+
 /// 推进 workgraph 的下一个就绪里程碑：跑一个 turn、解析 verdict、写回状态。
 /// 无就绪里程碑时返回 `Ok(None)`。daemon 与 background runner 共用此函数。
 pub fn advance_one_milestone(
@@ -565,5 +583,26 @@ mod tests {
             let back: MissionState = serde_json::from_str(&j).unwrap();
             assert_eq!(format!("{back:?}"), format!("{s:?}"));
         }
+    }
+
+    #[test]
+    fn build_repair_prompt_injects_failure_and_title() {
+        use crate::workgraph::{Milestone, NodeStatus};
+        let m = Milestone {
+            id: 7,
+            title: "CRDT 核心".into(),
+            acceptance: "cargo test".into(),
+            deps: vec![],
+            status: NodeStatus::NeedsFix,
+            verdict: None,
+            touched: vec![],
+            fix_attempts: 1,
+            last_failure: Some("gate `cargo test` failed: 2 failed".into()),
+        };
+        let p = build_repair_prompt(&m, "gate `cargo test` failed: 2 failed");
+        assert!(p.contains("CRDT 核心"), "含标题: {p}");
+        assert!(p.contains("gate `cargo test` failed: 2 failed"), "含失败原因: {p}");
+        assert!(p.contains("cargo test"), "含 acceptance: {p}");
+        assert!(p.trim_end().ends_with("VERDICT: <pass|needs_fix|rebuild>"), "以 VERDICT 行结尾: {p}");
     }
 }
