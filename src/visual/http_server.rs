@@ -1,7 +1,7 @@
 use crate::daemon::proto::ServerEvent;
 use crate::visual::event_router::EventRouter;
 use std::io::{BufWriter, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::mpsc::RecvTimeoutError;
 use std::time::Duration;
@@ -73,6 +73,18 @@ impl HttpServer {
                 }
                 ("GET", "/api/v1/workgraph/stream") => {
                     self.serve_workgraph_stream(request);
+                }
+                ("GET", "/api/v1/sessions") => {
+                    self.serve_sessions(request, &self.root_path);
+                }
+                ("GET", path) if path.starts_with("/api/v1/sessions/") && !path.contains("/events") => {
+                    let id = path.trim_start_matches("/api/v1/sessions/");
+                    self.serve_session_by_id(request, &self.root_path, id);
+                }
+                ("GET", path) if path.starts_with("/api/v1/sessions/") && path.ends_with("/events") => {
+                    let id = path.trim_start_matches("/api/v1/sessions/")
+                               .trim_end_matches("/events");
+                    self.serve_session_events(request, &self.root_path, id);
                 }
                 ("GET", path) if path.starts_with("/api/v1/") => {
                     // Other API endpoints (Phases 2-4): respond 404 for now
@@ -157,6 +169,49 @@ impl HttpServer {
         }
 
         router.remove_sse(id);
+    }
+
+    fn serve_sessions(&self, request: tiny_http::Request, root: &Path) {
+        let sessions_dir = root.join("sessions");
+        let mut ids: Vec<String> = Vec::new();
+        if let Ok(entries) = std::fs::read_dir(&sessions_dir) {
+            for entry in entries.flatten() {
+                if let Some(name) = entry.file_name().to_str() {
+                    if name.ends_with(".json") {
+                        ids.push(name.trim_end_matches(".json").to_owned());
+                    }
+                }
+            }
+        }
+        ids.sort();
+        let json = serde_json::to_string(&ids).unwrap_or_else(|_| "[]".to_string());
+        let resp = Response::from_string(json)
+            .with_header(Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap());
+        let _ = request.respond(resp);
+    }
+
+    fn serve_session_by_id(&self, request: tiny_http::Request, root: &Path, id: &str) {
+        let path = root.join("sessions").join(format!("{id}.json"));
+        match std::fs::read_to_string(&path) {
+            Ok(json) => {
+                let resp = Response::from_string(json)
+                    .with_header(Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap());
+                let _ = request.respond(resp);
+            }
+            Err(_) => {
+                let resp = Response::from_string("{}")
+                    .with_status_code(StatusCode(404))
+                    .with_header(Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap());
+                let _ = request.respond(resp);
+            }
+        }
+    }
+
+    fn serve_session_events(&self, request: tiny_http::Request, _root: &Path, _id: &str) {
+        // Phase 3 enhancement: parse session JSON and extract event-like sequence
+        let resp = Response::from_string("[]")
+            .with_header(Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap());
+        let _ = request.respond(resp);
     }
 
     fn serve_static(&self, request: tiny_http::Request, dir: &str, file: &str) {
