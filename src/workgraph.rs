@@ -76,6 +76,10 @@ pub struct Milestone {
     /// 最近一次验收失败原因,供重试 prompt 注入;跨进程持久化。Pass 时清空。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_failure: Option<String>,
+    /// 可选客观验收命令(迭代 3):独占一行裸命令(如 `cargo test`)。存在→bg_gate 走命令门;
+    /// 缺失→回退 extract_gate_command(acceptance) 启发式,再回退 review 门。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -202,6 +206,7 @@ impl WorkGraph {
             touched: Vec::new(),
             fix_attempts: 0,
             last_failure: None,
+            command: None,
         });
         if let Err(e) = self.validate() {
             self.nodes.pop();
@@ -334,6 +339,9 @@ impl WorkGraph {
             if let Some(v) = &n.verdict {
                 line.push_str(&format!("  ✓{v}"));
             }
+            if let Some(c) = &n.command {
+                line.push_str(&format!("  cmd:{c}"));
+            }
             lines.push(line);
         }
         lines.join("\n")
@@ -426,6 +434,7 @@ fn migrate_todos(raw: &str) -> Option<WorkGraph> {
             touched: Vec::new(),
             fix_attempts: 0,
             last_failure: None,
+            command: None,
         })
         .collect();
     Some(WorkGraph { schema_version: WG_SCHEMA_VERSION, nodes })
@@ -478,8 +487,8 @@ mod tests {
         let g = WorkGraph {
             schema_version: WG_SCHEMA_VERSION,
             nodes: vec![
-                Milestone { id: 1, title: "a".into(), acceptance: String::new(), deps: vec![2], status: NodeStatus::Pending, verdict: None, touched: vec![], fix_attempts: 0, last_failure: None },
-                Milestone { id: 2, title: "b".into(), acceptance: String::new(), deps: vec![1], status: NodeStatus::Pending, verdict: None, touched: vec![], fix_attempts: 0, last_failure: None },
+                Milestone { id: 1, title: "a".into(), acceptance: String::new(), deps: vec![2], status: NodeStatus::Pending, verdict: None, touched: vec![], fix_attempts: 0, last_failure: None, command: None },
+                Milestone { id: 2, title: "b".into(), acceptance: String::new(), deps: vec![1], status: NodeStatus::Pending, verdict: None, touched: vec![], fix_attempts: 0, last_failure: None, command: None },
             ],
         };
         assert!(g.validate().is_err());
@@ -662,6 +671,31 @@ mod tests {
         let n = g.get(a).unwrap();
         assert_eq!(n.fix_attempts, 0);
         assert_eq!(n.last_failure, None);
+    }
+
+    #[test]
+    fn new_milestone_command_defaults_none() {
+        let mut g = WorkGraph::default();
+        let a = g.add("a", "acc", vec![]).unwrap();
+        assert_eq!(g.get(a).unwrap().command, None);
+    }
+
+    #[test]
+    fn render_shows_command_when_present() {
+        let mut g = WorkGraph::default();
+        let a = g.add("core", "acc", vec![]).unwrap();
+        g.nodes.iter_mut().find(|n| n.id == a).unwrap().command = Some("cargo test".into());
+        let r = g.render();
+        assert!(r.contains("cmd:cargo test"), "render should show command: {r}");
+    }
+
+    #[test]
+    fn load_legacy_json_without_command_defaults_none() {
+        let raw = format!(
+            r#"{{"schema_version":{WG_SCHEMA_VERSION},"nodes":[{{"id":1,"title":"t","acceptance":"a","deps":[],"status":"pending","touched":[]}}]}}"#
+        );
+        let g = WorkGraph::load(&raw).unwrap();
+        assert_eq!(g.get(1).unwrap().command, None);
     }
 
     #[test]

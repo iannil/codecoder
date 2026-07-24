@@ -35,7 +35,7 @@
 | `provider/{mod,openai,stub}` | `Provider` trait;`OpenAiClient`(chat-completions)/`StubClient` | 0017 |
 | `agent.rs` | `AgentLoop`、turn 循环、工具分派、子 agent、ask_user、reload、**workgraph 自动推进(`drive_workgraph`)** | 0016 0019 |
 | `background.rs` | Background Agent headless one-shot runner;`run_background` 驱动一个 turn 到结束,汇总为 `BgOutcome`;**无显式 task 时从 workgraph 取就绪里程碑推进**;**客观验收门覆盖自报 + 失败写回 + continue/stop 策略**;**needs_fix 自恢复循环**(迭代 1):验收 `needs_fix` 后 runner 在预算内(`CODECODER_BG_MAX_FIX_ATTEMPTS`,默认 3,0=禁用)自动把 `last_failure` 注入修复 prompt 重试(`retry_one_milestone`,重试不计入 max_auto/连败熔断);预算耗尽仍 `needs_fix` 才落 `StuckNeedsFix`(退出码 2);重试计数 `fix_attempts` 持久化在 `workgraph.json` 的里程碑上,跨进程尊重预算 | 0026 0030 0033 |
-| `bg_gate.rs` | **BG 客观验收门 + 任务策略**(ADR 0030):`GateVerdict`/命令门/`evaluate`/`next_action`(BlockedAt/CircuitBreaker/CompletedAllReady);纯函数 + 可取消 shell,hermetic 可测 | 0030 |
+| `bg_gate.rs` | **BG 客观验收门 + 任务策略**(ADR 0030):`GateVerdict`/命令门/`evaluate`/`next_action`(BlockedAt/CircuitBreaker/CompletedAllReady);纯函数 + 可取消 shell,hermetic 可测;**迭代 3 契约化**:acceptance 支持结构化 `Milestone.command` 通道(显式 command 优先、旧数据启发式兜底),`gate_kind` 单一路由事实源并随 `SubgoalOutcome` 记入账本(强/弱门可观测) | 0030 |
 | `bg_ledger.rs` | **BG 任务账本**(ADR 0033):`append`/`read_recent`/`mission_exit_code`/`format_utc`;JSONL 持久化 + 退出码告警 | 0033 |
 | `permission.rs` | `PermScope`/`Permission`/`PermissionKey`/`SessionAllowlist` | 0005 0018 |
 | `tool/mod.rs` | `Tool` trait、`Toolbox`(父/子 read-only)、wire schema | 0018 0019 |

@@ -23,6 +23,9 @@ pub struct SubgoalOutcome {
     pub gate_reason: String,
     pub tool_cap_hit: bool,
     pub touched_files: Vec<String>,
+    /// 本里程碑实际走的验收门类型(迭代 3 可观测)。旧账本记录缺此字段 → 默认 None。
+    #[serde(default)]
+    pub gate_kind: crate::bg_gate::GateKind,
 }
 
 /// The result of one headless Background Agent turn.
@@ -425,6 +428,7 @@ fn run_milestone_and_gate(
         gate_reason,
         tool_cap_hit,
         touched_files: m.touched.clone(),
+        gate_kind: crate::bg_gate::gate_kind(&m),
     });
     out.events.push(format!("milestone #{} ({}) gated: {vs_str}", milestone_id, title));
     Ok(out)
@@ -655,6 +659,7 @@ mod tests {
             gate_reason: "gate failed".into(),
             tool_cap_hit: true,
             touched_files: vec!["a.rs".into()],
+            gate_kind: crate::bg_gate::GateKind::None,
         };
         let j = serde_json::to_string(&sg).unwrap();
         assert!(j.contains("NeedsFix") && j.contains("a.rs"), "{j}");
@@ -788,6 +793,7 @@ mod tests {
             touched: vec![],
             fix_attempts: 1,
             last_failure: Some("gate `cargo test` failed: 2 failed".into()),
+            command: None,
         };
         let p = build_repair_prompt(&m, "gate `cargo test` failed: 2 failed");
         assert!(p.contains("CRDT 核心"), "含标题: {p}");
@@ -809,6 +815,7 @@ mod tests {
             touched: vec![],
             fix_attempts: 0,
             last_failure: Some("self-review: NeedsFix".into()),
+            command: None,
         };
         let p = build_repair_prompt(&m, "self-review: NeedsFix");
         assert!(p.contains("(none)"), "空 acceptance 应渲染为 (none): {p}");

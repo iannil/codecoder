@@ -57,7 +57,7 @@ cargo run --bin cc            # 连接 (cc 客户端)
 | `commit` | Git 提交 |
 | `review` | 架构审查(只读子 agent → 结构化 Verdict + 漂移 rubric) |
 | `plan` | 任务计划 |
-| `milestone` | 工作图管理（list/add/start/done/needs_fix/next/remove，持久依赖有序） |
+| `milestone` | 工作图管理（list/add/start/done/needs_fix/next/remove，持久依赖有序；`add` 可带结构化 `command` 作客观验收门，见 ADR 0030 修订） |
 | `memory` | 持久化 key-value 记忆读写（**跨 session 共享**） |
 | `ask_user` | 用户交互 |
 | `confirm` | yes/no 确认对话 |
@@ -172,7 +172,7 @@ systemd `OnFailure=` / cron 邮件可按非 0 退出码触发告警；账本文�
 
 ```bash
 cargo build      # 编译
-cargo test       # 运行 317 个测试（314 通过 + 3 个 #[ignore]：2 Docker e2e + L3 LLM 冒烟）
+cargo test       # 运行 329 个测试（326 通过 + 3 个 #[ignore]：2 Docker e2e + L3 LLM 冒烟）
                  # tests/ 下为黑盒行为验证分层（L1 默认；L2/L3 门控，见 docs/testing/behavioral-validation.md）
 CODECODER_DAEMON=1 cargo run  # 启动 ccd daemon
 cargo run --bin cc            # 启动 cc 客户端

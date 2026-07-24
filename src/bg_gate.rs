@@ -79,7 +79,38 @@ fn truncate(s: String, n: usize) -> String {
     }
 }
 
+/// 本里程碑将走哪种验收门(迭代 3 可观测)。默认 None(旧账本记录无门类信息时最保守)。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum GateKind {
+    Command,
+    Review,
+    None,
+}
+
+impl Default for GateKind {
+    fn default() -> Self {
+        GateKind::None
+    }
+}
+
+/// 客观命令门要跑的命令:显式 `command` 优先,旧数据裸命令启发式(extract_gate_command)兜底。
+pub fn gate_command(m: &Milestone) -> Option<String> {
+    m.command.clone().or_else(|| extract_gate_command(&m.acceptance))
+}
+
+/// 门路由决策(单一事实源):有命令→Command;否则 acceptance 空→None;否则→Review。
+pub fn gate_kind(m: &Milestone) -> GateKind {
+    if gate_command(m).is_some() {
+        GateKind::Command
+    } else if m.acceptance.trim().is_empty() {
+        GateKind::None
+    } else {
+        GateKind::Review
+    }
+}
+
 /// 顶层验收:命令门优先(客观);否则注入式 review 门;acceptance 空 → Inconclusive。
+/// 路由决策统一走 `gate_kind`(单一事实源)。
 /// `review_runner` 注入便于纯策略测试;prod 由 background.rs 注入调用 review 工具的闭包。
 pub fn evaluate(
     m: &Milestone,
@@ -87,13 +118,14 @@ pub fn evaluate(
     cancel: Option<&CancelToken>,
     review_runner: &dyn Fn() -> GateVerdict,
 ) -> GateVerdict {
-    if let Some(cmd) = extract_gate_command(&m.acceptance) {
-        return run_command_gate(&cmd, root, cancel);
+    match gate_kind(m) {
+        GateKind::Command => {
+            let cmd = gate_command(m).expect("gate_kind==Command ⇒ gate_command is Some");
+            run_command_gate(&cmd, root, cancel)
+        }
+        GateKind::None => GateVerdict::Inconclusive("no acceptance criterion (weak signal)".into()),
+        GateKind::Review => review_runner(),
     }
-    if m.acceptance.trim().is_empty() {
-        return GateVerdict::Inconclusive("no acceptance criterion (weak signal)".into());
-    }
-    review_runner()
 }
 
 // ── continue/stop 策略 ─────────────────────────────────────────────────────
@@ -181,6 +213,7 @@ mod tests {
             touched: vec![],
             fix_attempts: 0,
             last_failure: None,
+            command: None,
         }
     }
 
@@ -278,6 +311,42 @@ mod tests {
         let m = ms(1, "");
         let v = evaluate(&m, dir.path(), None, &|| GateVerdict::Pass);
         assert!(matches!(v, GateVerdict::Inconclusive(_)));
+    }
+
+    // ── gate_command / gate_kind ──
+    #[test]
+    fn gate_command_prefers_explicit_over_extract() {
+        let mut m = ms(1, "cargo test"); // acceptance 含可提取命令
+        assert_eq!(gate_command(&m), Some("cargo test".into())); // 无显式 command → 用 extract
+        m.command = Some("cargo build".into());
+        assert_eq!(gate_command(&m), Some("cargo build".into())); // 显式 command 优先
+    }
+
+    #[test]
+    fn gate_kind_classifies() {
+        let mut m = ms(1, "cargo test");
+        assert_eq!(gate_kind(&m), GateKind::Command); // 裸命令 acceptance → 兜底命令门
+        m.command = Some("cargo build".into());
+        assert_eq!(gate_kind(&m), GateKind::Command); // 显式 command
+        let prose = ms(2, "渲染输出正确");
+        assert_eq!(gate_kind(&prose), GateKind::Review); // prose
+        let empty = ms(3, "");
+        assert_eq!(gate_kind(&empty), GateKind::None); // 空
+    }
+
+    #[test]
+    fn evaluate_uses_explicit_command_over_review() {
+        let dir = tempdir().unwrap();
+        let mut m = ms(1, "渲染输出正确"); // prose acceptance
+        m.command = Some("rustc --version".into()); // 显式命令(纯 ASCII,exit 0)
+        // review_runner 若被调用会返回独特标记;命令门应先生效 → 不应等于该标记。
+        let v = evaluate(&m, dir.path(), None, &|| GateVerdict::NeedsFix("REVIEW_RAN".into()));
+        assert_ne!(v, GateVerdict::NeedsFix("REVIEW_RAN".into()), "explicit command gate should fire, not review");
+    }
+
+    #[test]
+    fn gate_kind_default_is_none() {
+        assert_eq!(GateKind::default(), GateKind::None);
     }
 
     // ── next_action ──

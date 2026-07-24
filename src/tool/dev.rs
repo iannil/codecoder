@@ -145,7 +145,7 @@ impl Tool for Milestone {
     fn description(&self) -> &str {
         "Manage the durable Work Graph of milestones (dependency-ordered work that \
          survives context resets): action = list | add | start | done | needs_fix | \
-         next | remove. `add` takes title (+ optional acceptance, deps); `done` may \
+         next | remove. `add` takes title (+ optional acceptance, command, deps); `done` may \
          carry a review verdict. `next` returns the next ready milestone to work on."
     }
     fn schema(&self) -> Value {
@@ -156,6 +156,7 @@ impl Tool for Milestone {
                 "id": { "type": "integer" },
                 "title": { "type": "string" },
                 "acceptance": { "type": "string", "description": "Acceptance criteria — the contract, written before coding." },
+                "command": { "type": "string", "description": "Bare runnable acceptance command (e.g. `cargo test`) — objective gate; prefer over prose acceptance." },
                 "deps": { "type": "array", "items": { "type": "integer" }, "description": "Milestone ids that must be done first." },
                 "verdict": { "type": "string", "enum": ["pass", "needs_fix", "rebuild"], "description": "Review Verdict to attach on `done`." }
             },
@@ -199,13 +200,34 @@ impl Milestone {
             "add" => {
                 let title = args.get("title").and_then(Value::as_str).unwrap_or_default();
                 let acceptance = args.get("acceptance").and_then(Value::as_str).unwrap_or_default();
+                let command = args
+                    .get("command")
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty());
                 let deps: Vec<u64> = args
                     .get("deps")
                     .and_then(Value::as_array)
                     .map(|a| a.iter().filter_map(Value::as_u64).collect())
                     .unwrap_or_default();
                 match g.add(title, acceptance, deps) {
-                    Ok(new) => ToolOutput::ok(format!("added #{new}\n{}", g.render())),
+                    Ok(new) => {
+                        if let Some(cmd) = command {
+                            if let Some(n) = g.nodes.iter_mut().find(|n| n.id == new) {
+                                n.command = Some(cmd.to_string());
+                            }
+                        }
+                        let mut msg = format!("added #{new}\n{}", g.render());
+                        // 写入引导:无强门(既无显式 command 也无可提取命令)且 acceptance 非空 → 提示。
+                        let node = g.get(new).expect("just added");
+                        if crate::bg_gate::gate_command(node).is_none() && !node.acceptance.trim().is_empty() {
+                            msg.push_str(
+                                "\nnote: no runnable command; this milestone will use the weaker \
+                                 review gate. Pass `command` (e.g. \"cargo test\") for an objective gate.",
+                            );
+                        }
+                        ToolOutput::ok(msg)
+                    }
                     Err(e) => ToolOutput::err(e.to_string()),
                 }
             }
@@ -358,6 +380,46 @@ mod tests {
         // Acceptance gate: a non-pass verdict does NOT mark done.
         assert!(list.content.contains("[!] #1 risky"), "got: {}", list.content);
         assert!(list.content.contains("✓rebuild"));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn milestone_add_with_command_sets_and_renders() {
+        let dir = ctx_dir();
+        let mut ctx = ToolCtx::new(&dir);
+        let out = Milestone
+            .run(
+                json!({"action":"add","title":"core","acceptance":"渲染正确","command":"cargo test"}),
+                &mut ctx,
+            )
+            .unwrap();
+        assert!(!out.is_error);
+        assert!(out.content.contains("cmd:cargo test"), "render should show command: {}", out.content);
+        // 有强门 → 不提示。
+        assert!(!out.content.contains("review gate"), "should not warn when command present: {}", out.content);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn milestone_add_prose_only_emits_guidance() {
+        let dir = ctx_dir();
+        let mut ctx = ToolCtx::new(&dir);
+        let out = Milestone
+            .run(json!({"action":"add","title":"ui","acceptance":"渲染输出正确"}), &mut ctx)
+            .unwrap();
+        assert!(out.content.contains("review gate"), "prose-only acceptance should warn: {}", out.content);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn milestone_add_bare_command_acceptance_no_guidance() {
+        let dir = ctx_dir();
+        let mut ctx = ToolCtx::new(&dir);
+        let out = Milestone
+            .run(json!({"action":"add","title":"core","acceptance":"cargo test"}), &mut ctx)
+            .unwrap();
+        // acceptance 是裸命令 → extract 兜底给强门 → 不提示。
+        assert!(!out.content.contains("review gate"), "bare-command acceptance should not warn: {}", out.content);
         std::fs::remove_dir_all(&dir).ok();
     }
 

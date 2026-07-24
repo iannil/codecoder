@@ -182,8 +182,31 @@ mod tests {
             gate_reason: "gate failed".into(),
             tool_cap_hit: false,
             touched_files: vec!["a.rs".into()],
+            gate_kind: crate::bg_gate::GateKind::None,
         }];
         o
+    }
+
+    #[test]
+    fn subgoal_outcome_serializes_gate_kind() {
+        let sg = SubgoalOutcome {
+            milestone_id: 1,
+            verdict: SubgoalVerdict::Pass,
+            gate_reason: "gate pass".into(),
+            tool_cap_hit: false,
+            touched_files: vec![],
+            gate_kind: crate::bg_gate::GateKind::Command,
+        };
+        let j = serde_json::to_string(&sg).unwrap();
+        assert!(j.contains("Command"), "gate_kind should serialize: {j}");
+    }
+
+    #[test]
+    fn legacy_subgoal_json_without_gate_kind_defaults_none() {
+        // 旧账本记录缺 gate_kind 字段 → 反序列化落 GateKind::None。
+        let j = r#"{"milestone_id":1,"verdict":"Pass","gate_reason":"x","tool_cap_hit":false,"touched_files":[]}"#;
+        let sg: SubgoalOutcome = serde_json::from_str(j).unwrap();
+        assert_eq!(sg.gate_kind, crate::bg_gate::GateKind::None);
     }
 
     #[test]
