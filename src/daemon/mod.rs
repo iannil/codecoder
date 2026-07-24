@@ -185,6 +185,7 @@ mod tests {
             bg_max_auto: 3, bg_circuit_k: 2, bg_milestone_tool_cap: 8, bg_max_fix_attempts: 3,
             supervisor_crash_budget: 3,
             max_tool_output: 256 * 1024,
+            max_tokens_ceiling: 32768,
         };
         let _d = Daemon::new(cfg); // 仅构造，不 run（run 会阻塞 accept）
         let _ = std::fs::remove_dir_all(&dir);
