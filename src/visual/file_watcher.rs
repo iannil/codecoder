@@ -72,10 +72,7 @@ impl FileWatcher {
                         text: "workgraph changed".into(),
                     };
                     self.router.ingest(ev);
-                    // Also send the full JSON as an SSE event
-                    self.router.ingest(ServerEvent::Error {
-                        message: format!("__wg_update__:{content}"),
-                    });
+                    // No need for __wg_update__ hack — bus_notice already triggers loadWorkgraph()
                 }
                 Err(_) => {}
             }

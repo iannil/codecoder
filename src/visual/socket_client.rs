@@ -2,11 +2,11 @@
 ///
 /// Reads `ServerEvent` lines from the daemon and dispatches them to a callback.
 /// Writes `ClientRequest` lines to the daemon.
-use crate::daemon::proto::{self, ClientRequest, ServerEvent};
+use crate::daemon::proto::ClientRequest;
+use crate::daemon::proto::ServerEvent;
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
 use std::path::Path;
-use std::sync::mpsc::{self, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 
@@ -16,7 +16,6 @@ pub struct SocketClient {
     stream: Option<UnixStream>,
     daemon_path: String,
     cb: Arc<Mutex<Option<EventCallback>>>,
-    cmd_tx: Sender<ClientRequest>,
     stop_flag: Arc<Mutex<bool>>,
     thread_handle: Option<JoinHandle<()>>,
 }
@@ -26,12 +25,10 @@ impl SocketClient {
     pub fn connect(daemon_path: &Path) -> anyhow::Result<Self> {
         let stream = UnixStream::connect(daemon_path)?;
         stream.set_read_timeout(Some(std::time::Duration::from_millis(500)))?;
-        let (cmd_tx, _cmd_rx) = mpsc::channel();
         Ok(Self {
             stream: Some(stream),
             daemon_path: daemon_path.to_string_lossy().into_owned(),
             cb: Arc::new(Mutex::new(None)),
-            cmd_tx,
             stop_flag: Arc::new(Mutex::new(false)),
             thread_handle: None,
         })
@@ -40,12 +37,10 @@ impl SocketClient {
     /// For testing: wrap an already-connected stream (pair).
     #[doc(hidden)]
     pub fn connect_unchecked(stream: UnixStream) -> Self {
-        let (cmd_tx, _cmd_rx) = mpsc::channel();
         Self {
             stream: Some(stream),
             daemon_path: String::new(),
             cb: Arc::new(Mutex::new(None)),
-            cmd_tx,
             stop_flag: Arc::new(Mutex::new(false)),
             thread_handle: None,
         }
@@ -145,7 +140,7 @@ impl Drop for SocketClient {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::daemon::proto::{ClientRequest, ServerEvent};
+    use crate::daemon::proto::{self, ClientRequest, ServerEvent};
     use std::sync::mpsc;
 
     #[test]

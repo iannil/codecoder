@@ -99,19 +99,6 @@ body {
 <script>
 'use strict';
 
-// Tab switching
-document.querySelectorAll('#tab-bar .tab').forEach(tab => {
-  tab.addEventListener('click', () => {
-    document.querySelectorAll('#tab-bar .tab').forEach(t => t.classList.remove('active'));
-    document.querySelectorAll('.tab-content').forEach(tc => tc.classList.remove('active'));
-    tab.classList.add('active');
-    document.getElementById(tab.dataset.tab).classList.add('active');
-    if (tab.dataset.tab === 'workgraph') {
-      loadWorkgraph();
-    }
-  });
-});
-
 const timeline = document.getElementById('timeline');
 const badge = document.getElementById('connection-badge');
 const ctxStat = document.getElementById('context-stat');
@@ -160,11 +147,6 @@ evtSource.addEventListener('tool_finished', e => {
     }
     delete pendingTools[data.name];
   }
-});
-
-evtSource.addEventListener('reasoning', e => {
-  const data = JSON.parse(e.data);
-  if (data.text) appendReasoning(data.text);
 });
 
 evtSource.addEventListener('turn_complete', e => {
@@ -240,11 +222,6 @@ function appendNotice(text) {
   el.className = 'notice';
   el.textContent = text;
   timeline.appendChild(el);
-}
-
-function truncateOutput(s) {
-  const max = 2000;
-  return s.length > max ? s.slice(0, max) + '\n... (truncated)' : s;
 }
 
 function escapeHtml(s) {
