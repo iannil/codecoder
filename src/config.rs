@@ -14,6 +14,9 @@ pub struct Config {
     /// 自适应截断根治:命中 StopReason::Length 时,单 turn 有效 max_tokens 翻倍上调的封顶值
     /// (迭代 2)。env CODECODER_MAX_TOKENS_CEILING,默认 32768。
     pub max_tokens_ceiling: u32,
+    /// no-op 探索兜底(迭代 4):单 turn 内连续多少个「纯探索」迭代后注入一次 steering nudge。
+    /// 0 = 禁用。env CODECODER_NOOP_NUDGE_THRESHOLD,默认 3。
+    pub noop_nudge_threshold: usize,
     pub temperature: f32,
     pub root: PathBuf,
     pub github_token: Option<String>,
@@ -46,6 +49,9 @@ impl Config {
             max_tokens_ceiling: env("CODECODER_MAX_TOKENS_CEILING")
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(32768),
+            noop_nudge_threshold: env("CODECODER_NOOP_NUDGE_THRESHOLD")
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(3),
             temperature: env("CODECODER_TEMPERATURE")
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(0.7),
@@ -130,6 +136,15 @@ mod tests {
         unsafe { std::env::set_var("CODECODER_MAX_TOKENS_CEILING", "16384"); }
         assert_eq!(Config::from_env().max_tokens_ceiling, 16384);
         unsafe { std::env::remove_var("CODECODER_MAX_TOKENS_CEILING"); }
+    }
+
+    #[test]
+    fn noop_nudge_threshold_default_and_override() {
+        unsafe { std::env::remove_var("CODECODER_NOOP_NUDGE_THRESHOLD"); }
+        assert_eq!(Config::from_env().noop_nudge_threshold, 3);
+        unsafe { std::env::set_var("CODECODER_NOOP_NUDGE_THRESHOLD", "5"); }
+        assert_eq!(Config::from_env().noop_nudge_threshold, 5);
+        unsafe { std::env::remove_var("CODECODER_NOOP_NUDGE_THRESHOLD"); }
     }
 
     #[test]
