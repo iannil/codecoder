@@ -5,6 +5,7 @@ use codecoder::visual::http_server::HttpServer;
 use codecoder::visual::socket_client::SocketClient;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 use std::thread;
 use std::time::Duration;
 
@@ -109,9 +110,21 @@ fn main() {
             std::process::exit(1);
         });
 
+    // Graceful shutdown: SIGINT/SIGTERM → shutdown flag → accept loop unblocks and
+    // serve() returns cleanly (mirrors the daemon, ADR 0026/0032). No SIGKILL needed.
+    let shutdown = Arc::new(AtomicBool::new(false));
+    if let Err(e) = signal_hook::flag::register(signal_hook::consts::SIGINT, Arc::clone(&shutdown)) {
+        eprintln!("cc-web: SIGINT handler not registered: {e}");
+    }
+    if let Err(e) = signal_hook::flag::register(signal_hook::consts::SIGTERM, Arc::clone(&shutdown)) {
+        eprintln!("cc-web: SIGTERM handler not registered: {e}");
+    }
+
     println!("cc-web: listening on http://localhost:{port}");
     println!("cc-web: press Ctrl+C to stop");
 
-    // Serve HTTP (blocking)
-    Arc::new(http).serve();
+    // Serve HTTP (blocks until shutdown flag is set).
+    Arc::new(http).serve(Arc::clone(&shutdown));
+
+    println!("cc-web: shut down gracefully");
 }

@@ -3,6 +3,7 @@ use crate::visual::event_router::EventRouter;
 use std::io::{BufRead, BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::RecvTimeoutError;
 use std::time::Duration;
 use tiny_http::{Header, Response, Server, StatusCode};
@@ -56,15 +57,35 @@ impl HttpServer {
         })
     }
 
-    /// Serve requests in a blocking loop. Run on a dedicated thread.
+    /// Serve requests in a blocking loop until `shutdown` is set. Run on a
+    /// dedicated thread (or the main thread — it blocks until shutdown).
     ///
     /// Each request is dispatched onto its own thread. This is essential because
     /// the SSE handlers (`/api/v1/events`, `/api/v1/workgraph/stream`) block for
     /// the lifetime of the connection; handling requests inline would let a single
     /// open SSE stream monopolize the server and starve every other request
     /// (index, REST endpoints, the second SSE stream) — freezing the whole UI.
-    pub fn serve(self: Arc<Self>) {
+    ///
+    /// Graceful shutdown mirrors the daemon (ADR 0026/0032): a signal handler sets
+    /// the shared `shutdown` flag, a monitor thread observes it and calls
+    /// `Server::unblock()`, which makes `incoming_requests()` return so the accept
+    /// loop exits cleanly instead of requiring SIGKILL.
+    pub fn serve(self: Arc<Self>, shutdown: Arc<AtomicBool>) {
+        // Monitor thread: when the shutdown flag is set, unblock the accept loop.
+        let this = Arc::clone(&self);
+        let shutdown_for_monitor = Arc::clone(&shutdown);
+        std::thread::spawn(move || {
+            while !shutdown_for_monitor.load(Ordering::SeqCst) {
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            this.server.unblock();
+        });
+
         for request in self.server.incoming_requests() {
+            // `unblock()` ends the iterator; guard against a racing spurious wake.
+            if shutdown.load(Ordering::SeqCst) {
+                break;
+            }
             let this = Arc::clone(&self);
             std::thread::spawn(move || this.handle(request));
         }
@@ -355,7 +376,8 @@ mod tests {
         // Bind an ephemeral port on a throwaway root (workgraph.json absent → fallback).
         let server = Arc::new(HttpServer::new(0, router, "static", Some(PathBuf::from("."))).unwrap());
         let addr = server.server.server_addr().to_ip().unwrap();
-        std::thread::spawn(move || server.serve());
+        let shutdown = Arc::new(AtomicBool::new(false));
+        std::thread::spawn(move || server.serve(shutdown));
 
         let mut stream = TcpStream::connect(addr).unwrap();
         stream
@@ -389,7 +411,8 @@ mod tests {
         let router = Arc::new(EventRouter::new());
         let server = Arc::new(HttpServer::new(0, router, "static", Some(PathBuf::from("."))).unwrap());
         let addr = server.server.server_addr().to_ip().unwrap();
-        std::thread::spawn(move || server.serve());
+        let shutdown = Arc::new(AtomicBool::new(false));
+        std::thread::spawn(move || server.serve(shutdown));
 
         // Give the accept loop a moment to come up, then hold an SSE stream open.
         std::thread::sleep(Duration::from_millis(100));
@@ -411,6 +434,32 @@ mod tests {
             head.starts_with("HTTP/1.1 200"),
             "index/REST must respond while an SSE stream is open, got:\n{head:?}"
         );
+    }
+
+    /// Setting the shutdown flag must unblock the accept loop so `serve()` returns
+    /// — the basis for graceful shutdown on SIGINT/SIGTERM (no SIGKILL needed).
+    #[test]
+    fn shutdown_flag_stops_serve_loop() {
+        let router = Arc::new(EventRouter::new());
+        let server = Arc::new(HttpServer::new(0, router, "static", Some(PathBuf::from("."))).unwrap());
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let shutdown_c = Arc::clone(&shutdown);
+        let handle = std::thread::spawn(move || server.serve(shutdown_c));
+
+        std::thread::sleep(Duration::from_millis(150));
+        shutdown.store(true, Ordering::SeqCst);
+
+        // The monitor polls every 100ms; give it a generous window to unblock.
+        let deadline = Duration::from_secs(3);
+        let start = std::time::Instant::now();
+        while !handle.is_finished() && start.elapsed() < deadline {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(
+            handle.is_finished(),
+            "serve() must return after the shutdown flag is set"
+        );
+        handle.join().unwrap();
     }
 }
 
