@@ -17,6 +17,11 @@ use std::time::{SystemTime, UNIX_EPOCH};
 /// Guard against a model that never stops calling tools.
 const MAX_TOOL_ITERATIONS: usize = 12;
 
+/// 纯探索工具(迭代 4 no-op 兜底):只读/查、不推进交付物。turn 内连续多轮全是这些
+/// → 注入一次 steering nudge。write_file/edit_file/run_command/commit/reason/milestone/
+/// memory/plan 等都不在此集,算「动了」。
+const EXPLORATION_TOOLS: &[&str] = &["read_file", "glob", "grep", "diff"];
+
 /// TUI → agent over `cmd_tx`. Only user-initiated intents. A permission/ask reply
 /// is NOT here — it travels back over the reply_tx carried by an AgentEvent.
 pub enum AgentCommand {
@@ -205,6 +210,8 @@ pub struct AgentLoop {
     /// 翻倍上调的封顶值。build 内由 Config::from_env() 注入,故所有构造点(交互/BG/
     /// daemon/sub-agent/verify)统一遵守 CODECODER_MAX_TOKENS_CEILING。
     max_tokens_ceiling: u32,
+    /// no-op 探索兜底阈值(迭代 4)。build 内由 Config::from_env() 注入;0 = 禁用。
+    noop_nudge_threshold: usize,
     temperature: f32,
     next_id: MessageId,
     cancel: CancelToken,
@@ -350,6 +357,7 @@ impl AgentLoop {
             model,
             max_tokens,
             max_tokens_ceiling: crate::config::Config::from_env().max_tokens_ceiling,
+            noop_nudge_threshold: crate::config::Config::from_env().noop_nudge_threshold,
             temperature,
             next_id: 0,
             cancel: CancelToken::default(),
@@ -399,6 +407,11 @@ impl AgentLoop {
     /// 覆盖自适应截断的 max_tokens 封顶(测试/特殊场景)。默认由 build 从 env 注入。
     pub fn set_max_tokens_ceiling(&mut self, n: u32) {
         self.max_tokens_ceiling = n;
+    }
+
+    /// 覆盖 no-op 兜底阈值(测试/特殊场景)。
+    pub fn set_noop_nudge_threshold(&mut self, n: usize) {
+        self.noop_nudge_threshold = n;
     }
 
     /// 最近一次 turn 是否因 provider 错误失败(ADR 0033:BG 据此置 mission_state=Error)。
@@ -807,6 +820,9 @@ impl AgentLoop {
         let mut hit_tool_cap = true; // cleared on every non-exhaustion exit
         // 自适应截断根治(迭代 2):有效 max_tokens 每 turn 从配置值起,命中 Length 翻倍上调。
         let mut effective_max_tokens = self.max_tokens;
+        // no-op 探索兜底(迭代 4):统计连续「纯探索」迭代,达阈值注入一次 nudge。
+        let mut consecutive_explore_iters = 0usize;
+        let mut nudged_this_turn = false;
         for _ in 0..self.tool_cap {
             if self.cancel.is_cancelled() {
                 hit_tool_cap = false;
@@ -938,6 +954,11 @@ impl AgentLoop {
                 break; // no tools requested and nothing steered → turn is done
             }
 
+            // 分类本迭代是否「纯探索」(tool_calls 非空且全部 ∈ EXPLORATION_TOOLS)。tool_calls
+            // 随后在 dispatch 循环被移动,故先算。
+            let all_exploration = !tool_calls.is_empty()
+                && tool_calls.iter().all(|(_, name, _)| EXPLORATION_TOOLS.contains(&name.as_str()));
+
             // Execute each tool call, gating on permission, and collect results.
             let mut results = Vec::new();
             let mut cancelled = false;
@@ -953,6 +974,29 @@ impl AgentLoop {
             }
             if !results.is_empty() {
                 self.append(Role::Tool, results);
+            }
+            // no-op 兜底:更新连续纯探索计数;达阈值且本 turn 未 nudge 过 → 注入一次 steering。
+            if all_exploration {
+                consecutive_explore_iters += 1;
+            } else {
+                consecutive_explore_iters = 0;
+            }
+            if self.noop_nudge_threshold > 0
+                && consecutive_explore_iters >= self.noop_nudge_threshold
+                && !nudged_this_turn
+            {
+                let n = self.noop_nudge_threshold;
+                self.append(Role::User, vec![MessageItem::Text {
+                    text: format!(
+                        "You have only explored (read/glob/grep/diff) for {n} tool steps without \
+                         making a change. Make a concrete edit or run a command now, or explicitly \
+                         state that you are blocked and why."
+                    ),
+                }]);
+                let _ = event_tx.send(AgentEvent::Notice(format!(
+                    "no-op backstop: nudged to act after {n} exploration-only steps"
+                )));
+                nudged_this_turn = true;
             }
             if cancelled {
                 hit_tool_cap = false;
@@ -1993,6 +2037,79 @@ mod tests {
         assert_eq!(seen[0], 256); // turn1 起点
         assert_eq!(seen[1], 512); // turn1 bump
         assert_eq!(seen[2], 256, "turn2 应从 self.max_tokens 重置, seen={seen:?}");
+    }
+
+    // --- no-op 探索兜底(迭代 4)---
+    use std::sync::Mutex as StdMutex2;
+
+    /// 按脚本逐次产出工具调用或结束文本:Some(name)→ToolCall,None→纯文本(结束 turn)。
+    struct ScriptedTools {
+        script: Vec<Option<&'static str>>,
+        calls: StdMutex2<usize>,
+    }
+    impl Provider for ScriptedTools {
+        fn name(&self) -> &str { "scripted-tools" }
+        fn complete(&self, _req: &CompletionRequest) -> anyhow::Result<Completion> {
+            use crate::message::{Message, MessageItem, Role};
+            let mut c = self.calls.lock().unwrap();
+            let i = *c; *c += 1;
+            let step = self.script.get(i).copied().flatten();
+            let msg = match step {
+                Some(name) => Message {
+                    id: 0, role: Role::Assistant,
+                    items: vec![MessageItem::ToolCall {
+                        id: format!("t{i}"), name: name.to_string(),
+                        args: serde_json::json!({"pattern": "*"}),
+                    }],
+                },
+                None => Message {
+                    id: 0, role: Role::Assistant,
+                    items: vec![MessageItem::Text { text: "done".into() }],
+                },
+            };
+            Ok(msg.into())
+        }
+    }
+
+    fn count_noop_notices(rx: std::sync::mpsc::Receiver<AgentEvent>) -> usize {
+        rx.into_iter().filter(|e| matches!(e, AgentEvent::Notice(m) if m.contains("no-op backstop"))).count()
+    }
+
+    fn run_scripted(script: Vec<Option<&'static str>>, threshold: usize) -> usize {
+        let dir = tempfile::tempdir().unwrap();
+        let p = Arc::new(ScriptedTools { script, calls: StdMutex2::new(0) });
+        let mut agent = AgentLoop::new(p as Arc<dyn Provider>, "m", 256, 0.0, dir.path().to_path_buf());
+        agent.set_noop_nudge_threshold(threshold);
+        let (tx, rx) = std::sync::mpsc::channel();
+        agent.run_one_turn("go".into(), &tx);
+        drop(tx);
+        count_noop_notices(rx)
+    }
+
+    #[test]
+    fn noop_backstop_nudges_after_threshold_explore_steps() {
+        // glob×3 → 达阈值 3 → 恰一次 nudge;随后 text 结束。
+        let n = run_scripted(vec![Some("glob"), Some("glob"), Some("glob"), None], 3);
+        assert_eq!(n, 1, "expected exactly one no-op nudge, got {n}");
+    }
+
+    #[test]
+    fn noop_backstop_no_nudge_under_threshold() {
+        let n = run_scripted(vec![Some("glob"), Some("glob"), None], 3);
+        assert_eq!(n, 0);
+    }
+
+    #[test]
+    fn noop_backstop_disabled_when_threshold_zero() {
+        let n = run_scripted(vec![Some("glob"), Some("glob"), Some("glob"), Some("glob"), None], 0);
+        assert_eq!(n, 0);
+    }
+
+    #[test]
+    fn noop_backstop_resets_on_non_exploration_tool() {
+        // glob,glob,milestone(重置),glob,glob → 连续从不达 3 → 不 nudge。
+        let n = run_scripted(vec![Some("glob"), Some("glob"), Some("milestone"), Some("glob"), Some("glob"), None], 3);
+        assert_eq!(n, 0);
     }
 
     /// Errors with a transient 503 on the first call, then succeeds — exercises
