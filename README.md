@@ -125,7 +125,8 @@ project/
 | `CODECODER_API_KEY` | — | LLM API key（必需） |
 | `CODECODER_MODEL` | `gpt-4o` | 模型名称 |
 | `CODECODER_API_BASE` | `https://api.openai.com/v1` | API 端点 |
-| `CODECODER_MAX_TOKENS` | `4096` | 最大 token 数 |
+| `CODECODER_MAX_TOKENS` | `8192` | 单次生成的 max_tokens。命中截断时按 `CODECODER_MAX_TOKENS_CEILING` 自适应上调（ADR 0038） |
+| `CODECODER_MAX_TOKENS_CEILING` | `32768` | 截断自适应上调的封顶值：命中 `StopReason::Length` 时该 turn 有效 max_tokens 翻倍直至此上限（ADR 0038） |
 | `CODECODER_TEMPERATURE` | `0.7` | 温度参数 |
 | `CODECODER_ROOT` | 当前目录 | 项目根目录 |
 | `CODECODER_DAEMON` | — | 设置后以 daemon 模式启动长驻服务（client-server 架构，无 TUI；见 ADR 0032） |
@@ -171,7 +172,7 @@ systemd `OnFailure=` / cron 邮件可按非 0 退出码触发告警；账本文�
 
 ```bash
 cargo build      # 编译
-cargo test       # 运行 202 个测试（202 通过 + 3 个 #[ignore]：2 Docker e2e + L3 LLM 冒烟）
+cargo test       # 运行 317 个测试（314 通过 + 3 个 #[ignore]：2 Docker e2e + L3 LLM 冒烟）
                  # tests/ 下为黑盒行为验证分层（L1 默认；L2/L3 门控，见 docs/testing/behavioral-validation.md）
 CODECODER_DAEMON=1 cargo run  # 启动 ccd daemon
 cargo run --bin cc            # 启动 cc 客户端

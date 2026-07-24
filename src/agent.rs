@@ -201,6 +201,10 @@ pub struct AgentLoop {
     model: String,
     model_window: u64,
     max_tokens: u32,
+    /// 自适应截断根治(迭代 2):命中 StopReason::Length 时,单 turn 有效 max_tokens
+    /// 翻倍上调的封顶值。build 内由 Config::from_env() 注入,故所有构造点(交互/BG/
+    /// daemon/sub-agent/verify)统一遵守 CODECODER_MAX_TOKENS_CEILING。
+    max_tokens_ceiling: u32,
     temperature: f32,
     next_id: MessageId,
     cancel: CancelToken,
@@ -345,6 +349,7 @@ impl AgentLoop {
             model_window: crate::tokenizer::model_window(&model),
             model,
             max_tokens,
+            max_tokens_ceiling: crate::config::Config::from_env().max_tokens_ceiling,
             temperature,
             next_id: 0,
             cancel: CancelToken::default(),
@@ -389,6 +394,11 @@ impl AgentLoop {
     /// 覆盖默认工具迭代上限(ADR 0026:BG 单 milestone 用更紧预算,防固着)。
     pub fn set_tool_cap(&mut self, n: usize) {
         self.tool_cap = n.max(1);
+    }
+
+    /// 覆盖自适应截断的 max_tokens 封顶(测试/特殊场景)。默认由 build 从 env 注入。
+    pub fn set_max_tokens_ceiling(&mut self, n: u32) {
+        self.max_tokens_ceiling = n;
     }
 
     /// 最近一次 turn 是否因 provider 错误失败(ADR 0033:BG 据此置 mission_state=Error)。
@@ -795,6 +805,8 @@ impl AgentLoop {
         self.append(Role::User, vec![MessageItem::Text { text }]);
 
         let mut hit_tool_cap = true; // cleared on every non-exhaustion exit
+        // 自适应截断根治(迭代 2):有效 max_tokens 每 turn 从配置值起,命中 Length 翻倍上调。
+        let mut effective_max_tokens = self.max_tokens;
         for _ in 0..self.tool_cap {
             if self.cancel.is_cancelled() {
                 hit_tool_cap = false;
@@ -833,7 +845,7 @@ impl AgentLoop {
             let req = CompletionRequest {
                 model: self.session.model.clone(),
                 messages,
-                max_tokens: self.max_tokens,
+                max_tokens: effective_max_tokens,
                 temperature: self.temperature,
                 tools: self.toolbox.wire_schemas(),
             };
@@ -874,6 +886,48 @@ impl AgentLoop {
             }
             self.append(Role::Assistant, reply.items);
 
+            // 截断根治(迭代 2 / ADR 0038):响应在 max_tokens 处被截断时,先 neutralize 任何
+            // 半序列化的 tool call(绝不执行),再自适应上调本 turn 的有效预算重试;达封顶
+            // 仍截断则收尾。此判定必须在 `tool_calls.is_empty()` 收尾之前——否则截断的纯
+            // 文本响应会被当成 turn 正常结束而静默收尾。
+            if stop_reason == StopReason::Length {
+                if !tool_calls.is_empty() {
+                    let results = tool_calls
+                        .iter()
+                        .map(|(call_id, name, _)| {
+                            let output = "tool call truncated: the response hit max_tokens before the \
+                                 arguments finished; not executed. Retry with a shorter response or \
+                                 split the work."
+                                .to_string();
+                            let _ = event_tx.send(AgentEvent::ToolFinished {
+                                name: name.clone(),
+                                is_error: true,
+                                output: output.clone(),
+                            });
+                            MessageItem::ToolResult {
+                                call_id: call_id.clone(),
+                                output,
+                                is_error: true,
+                            }
+                        })
+                        .collect();
+                    self.append(Role::Tool, results);
+                }
+                if effective_max_tokens < self.max_tokens_ceiling {
+                    effective_max_tokens = effective_max_tokens.saturating_mul(2).min(self.max_tokens_ceiling);
+                    let _ = event_tx.send(AgentEvent::Notice(format!(
+                        "response truncated at max_tokens; raising to {effective_max_tokens} and retrying"
+                    )));
+                    continue; // 带更大预算重试
+                }
+                // 已达封顶:tool_calls 情形已追加 is_error(交模型重试);空 tool_calls 情形收尾。
+                if tool_calls.is_empty() {
+                    hit_tool_cap = false;
+                    break;
+                }
+                continue;
+            }
+
             if tool_calls.is_empty() {
                 // The turn would end here. If the user steered in the meantime
                 // (ADR 0029), restart the loop with that input instead of stopping.
@@ -882,34 +936,6 @@ impl AgentLoop {
                 }
                 hit_tool_cap = false;
                 break; // no tools requested and nothing steered → turn is done
-            }
-
-            // Truncation guard (roadmap #1 / ADR 0027): if the response was cut off
-            // at max_tokens, the last tool call's arguments may be half-serialized —
-            // parsing can silently yield wrong/empty args. Fail the WHOLE batch with
-            // an error result (never execute) and loop so the model retries.
-            if stop_reason == StopReason::Length {
-                let results = tool_calls
-                    .iter()
-                    .map(|(call_id, name, _)| {
-                        let output = "tool call truncated: the response hit max_tokens before the \
-                             arguments finished; not executed. Retry with a shorter response or \
-                             split the work."
-                            .to_string();
-                        let _ = event_tx.send(AgentEvent::ToolFinished {
-                            name: name.clone(),
-                            is_error: true,
-                            output: output.clone(),
-                        });
-                        MessageItem::ToolResult {
-                            call_id: call_id.clone(),
-                            output,
-                            is_error: true,
-                        }
-                    })
-                    .collect();
-                self.append(Role::Tool, results);
-                continue; // retry: feed the errors back, don't dispatch
             }
 
             // Execute each tool call, gating on permission, and collect results.
@@ -1390,6 +1416,13 @@ impl AgentLoop {
     }
 }
 
+/// 小步写纪律(迭代 2):始终注入,减少单次巨量 write_file 被 max_tokens 截断。
+const SMALL_STEP_WRITE_GUIDANCE: &str =
+    "When writing a large file, prefer building it up in smaller chunks \
+     (multiple append-style edit_file / write_file calls) rather than one \
+     giant write_file — a single oversized tool call can be cut off at \
+     max_tokens and fail.";
+
 /// Build the System prompt from AGENTS.md (identity) + the already-rendered
 /// catalog string (ADR 0020). "Filesystem as self": both come from disk, not
 /// hardcoded. The caller renders the catalog under a brief Registry read-lock
@@ -1399,6 +1432,7 @@ impl AgentLoop {
 /// during I/O would poison the lock).
 fn build_system_prompt_with_catalog(root: &std::path::Path, catalog: &str) -> String {
     let mut parts = Vec::new();
+    parts.push(SMALL_STEP_WRITE_GUIDANCE.to_string());
     if let Ok(agents) = std::fs::read_to_string(root.join("AGENTS.md")) {
         let agents = agents.trim();
         if !agents.is_empty() {
@@ -1875,6 +1909,92 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
+    /// 记录每次请求的 max_tokens;前 fail_times 次以 Length 截断(空 tool_calls),其后正常 Stop。
+    struct RecordingLengthProvider {
+        fail_times: usize,
+        calls: Mutex<usize>,
+        seen_max_tokens: Mutex<Vec<u32>>,
+    }
+    impl Provider for RecordingLengthProvider {
+        fn name(&self) -> &str {
+            "recording-length"
+        }
+        fn complete(&self, req: &CompletionRequest) -> anyhow::Result<Completion> {
+            self.seen_max_tokens.lock().unwrap().push(req.max_tokens);
+            let mut c = self.calls.lock().unwrap();
+            let i = *c;
+            *c += 1;
+            let msg = Message {
+                id: 0,
+                role: Role::Assistant,
+                items: vec![MessageItem::Text {
+                    text: if i < self.fail_times { "partial".into() } else { "done".into() },
+                }],
+            };
+            let stop = if i < self.fail_times { StopReason::Length } else { StopReason::Stop };
+            Ok(Completion { message: msg, stop_reason: stop })
+        }
+    }
+
+    #[test]
+    fn length_stop_bumps_effective_max_tokens_on_retry() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = Arc::new(RecordingLengthProvider {
+            fail_times: 2,
+            calls: Mutex::new(0),
+            seen_max_tokens: Mutex::new(vec![]),
+        });
+        let mut agent =
+            AgentLoop::new(p.clone() as Arc<dyn Provider>, "m", 256, 0.0, dir.path().to_path_buf());
+        agent.set_max_tokens_ceiling(4096);
+        let (tx, _rx) = std::sync::mpsc::channel();
+        agent.run_one_turn("go".into(), &tx);
+        let seen = p.seen_max_tokens.lock().unwrap().clone();
+        // 256 → 截断 → 512 → 截断 → 1024 → Stop。翻倍链可见。
+        assert_eq!(seen, vec![256, 512, 1024], "seen={seen:?}");
+    }
+
+    #[test]
+    fn effective_max_tokens_caps_at_ceiling() {
+        let dir = tempfile::tempdir().unwrap();
+        // 恒截断(fail_times 极大),空 tool_calls → 达 ceiling 后收尾。
+        let p = Arc::new(RecordingLengthProvider {
+            fail_times: 99,
+            calls: Mutex::new(0),
+            seen_max_tokens: Mutex::new(vec![]),
+        });
+        let mut agent =
+            AgentLoop::new(p.clone() as Arc<dyn Provider>, "m", 256, 0.0, dir.path().to_path_buf());
+        agent.set_max_tokens_ceiling(1024);
+        let (tx, _rx) = std::sync::mpsc::channel();
+        agent.run_one_turn("go".into(), &tx);
+        let seen = p.seen_max_tokens.lock().unwrap().clone();
+        // 256 → 512 → 1024(封顶,空 tool_calls → 不再翻倍,收尾)。绝不超过 1024。
+        assert_eq!(seen, vec![256, 512, 1024], "seen={seen:?}");
+        assert!(seen.iter().all(|&m| m <= 1024));
+    }
+
+    #[test]
+    fn bump_resets_per_turn() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = Arc::new(RecordingLengthProvider {
+            fail_times: 1,
+            calls: Mutex::new(0),
+            seen_max_tokens: Mutex::new(vec![]),
+        });
+        let mut agent =
+            AgentLoop::new(p.clone() as Arc<dyn Provider>, "m", 256, 0.0, dir.path().to_path_buf());
+        agent.set_max_tokens_ceiling(4096);
+        let (tx, _rx) = std::sync::mpsc::channel();
+        agent.run_one_turn("t1".into(), &tx); // 256 → 截断 → 512 → Stop
+        // 下一 turn 让它立即 Stop:重置 calls 让 fail_times 已过。
+        agent.run_one_turn("t2".into(), &tx); // 首个请求应回到 256(重置),非 512
+        let seen = p.seen_max_tokens.lock().unwrap().clone();
+        assert_eq!(seen[0], 256); // turn1 起点
+        assert_eq!(seen[1], 512); // turn1 bump
+        assert_eq!(seen[2], 256, "turn2 应从 self.max_tokens 重置, seen={seen:?}");
+    }
+
     /// Errors with a transient 503 on the first call, then succeeds — exercises
     /// the retry loop (ADR 0027 #3).
     struct FlakyProvider {
@@ -2157,6 +2277,18 @@ mod tests {
     }
 
     #[test]
+    fn max_tokens_ceiling_defaults_and_setter_overrides() {
+        let _g = crate::config::MAX_TOKENS_CEILING_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        unsafe { std::env::remove_var("CODECODER_MAX_TOKENS_CEILING"); }
+        let dir = tempfile::tempdir().unwrap();
+        let mut agent = AgentLoop::new(stub_provider(), "m", 256, 0.0, dir.path().to_path_buf());
+        // 默认来自 Config::from_env()(env 未设 → 32768)。
+        assert_eq!(agent.max_tokens_ceiling, 32768);
+        agent.set_max_tokens_ceiling(1024);
+        assert_eq!(agent.max_tokens_ceiling, 1024);
+    }
+
+    #[test]
     fn untrusted_project_skips_agents_md_and_allowlist() {
         let _g = TRUST_ENV.lock().unwrap_or_else(|e| e.into_inner());
         let base = std::env::temp_dir().join(format!("cc_untrust_{}", std::process::id()));
@@ -2287,6 +2419,14 @@ mod tests {
         let prompt = build_system_prompt_with_catalog(&dir, &catalog);
         assert!(prompt.contains("shared-skill — a shared skill"));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn system_prompt_includes_small_step_write_guidance() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = build_system_prompt(dir.path());
+        assert!(p.contains("append"), "应含小步写引导, prompt={p}");
+        assert!(p.to_lowercase().contains("max_tokens"), "应解释原因, prompt={p}");
     }
 
     #[test]

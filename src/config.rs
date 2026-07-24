@@ -1,12 +1,19 @@
 // Runtime configuration from CODECODER_* env vars (see README.md env table).
 use std::path::PathBuf;
 
+/// Serializes tests (across modules in this lib test binary) that read/mutate the
+/// process-global `CODECODER_MAX_TOKENS_CEILING` env var.
+pub(crate) static MAX_TOKENS_CEILING_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 #[derive(Debug, Clone)]
 pub struct Config {
     pub api_key: Option<String>,
     pub model: String,
     pub api_base: String,
     pub max_tokens: u32,
+    /// 自适应截断根治:命中 StopReason::Length 时,单 turn 有效 max_tokens 翻倍上调的封顶值
+    /// (迭代 2)。env CODECODER_MAX_TOKENS_CEILING,默认 32768。
+    pub max_tokens_ceiling: u32,
     pub temperature: f32,
     pub root: PathBuf,
     pub github_token: Option<String>,
@@ -35,7 +42,10 @@ impl Config {
                 .unwrap_or_else(|| "https://api.openai.com/v1".into()),
             max_tokens: env("CODECODER_MAX_TOKENS")
                 .and_then(|v| v.parse().ok())
-                .unwrap_or(4096),
+                .unwrap_or(8192),
+            max_tokens_ceiling: env("CODECODER_MAX_TOKENS_CEILING")
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(32768),
             temperature: env("CODECODER_TEMPERATURE")
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(0.7),
@@ -104,6 +114,22 @@ mod tests {
         unsafe { std::env::set_var("CODECODER_BG_MAX_FIX_ATTEMPTS", "5"); }
         assert_eq!(Config::from_env().bg_max_fix_attempts, 5);
         unsafe { std::env::remove_var("CODECODER_BG_MAX_FIX_ATTEMPTS"); }
+    }
+
+    #[test]
+    fn max_tokens_default_is_8192() {
+        unsafe { std::env::remove_var("CODECODER_MAX_TOKENS"); }
+        assert_eq!(Config::from_env().max_tokens, 8192);
+    }
+
+    #[test]
+    fn max_tokens_ceiling_default_and_override() {
+        let _g = MAX_TOKENS_CEILING_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        unsafe { std::env::remove_var("CODECODER_MAX_TOKENS_CEILING"); }
+        assert_eq!(Config::from_env().max_tokens_ceiling, 32768);
+        unsafe { std::env::set_var("CODECODER_MAX_TOKENS_CEILING", "16384"); }
+        assert_eq!(Config::from_env().max_tokens_ceiling, 16384);
+        unsafe { std::env::remove_var("CODECODER_MAX_TOKENS_CEILING"); }
     }
 
     #[test]

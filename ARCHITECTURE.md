@@ -60,13 +60,14 @@
 3. 取 **Context Working Set**(0023,派生自全量 messages)+ 前置 **System prompt**(AGENTS.md + 目录 + **workgraph 状态摘要**,0020)。
 4. `tokenizer` 精确计 token → `AgentEvent::Context{pct}` 驱动状态栏 `ctx%`。
 5. `Provider::complete`:中立消息 ↔ OpenAI 线格式翻译(0017);`Reasoning` 不回灌(0004)。
-6. 回复含 `ToolCall` → 逐个**串行**分派(0016):
+6. **自适应 max_tokens 预算**(0038):命中截断(`StopReason::Length`)时,先把任何半序列化的 tool call 置为 `is_error` 的 `ToolResult`(**绝不执行**),再把该 turn 的有效 max_tokens 翻倍上调(初值 `CODECODER_MAX_TOKENS`,默认 8192;封顶 `CODECODER_MAX_TOKENS_CEILING`,默认 32768;每 turn 重置)并发 `Notice` 重试;达封顶仍截断则收尾,交里程碑客观门 → needs_fix 自恢复循环接手。该判定在 `tool_calls.is_empty()` 收尾**之前**——截断的纯文本响应不再被静默当作正常结束。
+7. 回复含 `ToolCall` → 逐个**串行**分派(0016):
    - 权限闸门(0018):`None` 直跑;`Ask{key}` 查 allowlist,否则发 `PermissionRequest` **阻塞等 oneshot**。
    - `agent`/`review`/`ask_user` 被 `AgentLoop` **拦截**(需 provider/事件通道)。
    - 执行 → `ToolResult` 回灌 → 再问 LLM,直到无工具调用或触及 `MAX_TOOL_ITERATIONS`。
-7. 无工具调用 → `TurnComplete` → `run()` 循环自动调用 `drive_workgraph()` 推进 workgraph 就绪里程碑(**Plan #2 自动驱动**)。
+8. 无工具调用 → `TurnComplete` → `run()` 循环自动调用 `drive_workgraph()` 推进 workgraph 就绪里程碑(**Plan #2 自动驱动**)。
 
-## 工具体系(25 内置)
+## 工具体系(26 内置)
 
 `Tool` 自报 `Permission`(0018):`None`(只读免问)/ `Ask{key}`(细粒度 key,命令类/前缀甜点区)。**子 agent 只能用 `Permission::None` 的一个只读子集(9 个),且无 `agent`——深度锁 1(0019)。**
 
@@ -144,11 +145,11 @@ codecoder 的「文件系统即自我」覆盖了三层身份与工作/推理层
 
 ## ADR 索引
 
-`0001` TUI 键位与 Mode 语义(已废弃)· `0002` slash 本地派发 · `0003` 中心 Theme(已废弃)· `0004` Session 持久化与迁移 · `0005` 权限 scope 与 allowlist · `0007` prompt 注入 slash · `0015` 统一消息模型 · `0016` channel 拓扑与事件模型 · `0017` provider 中立消息模型 · `0018` Tool trait 与 PermissionKey · `0019` 子 agent 能力边界 · `0020` Skills/Capabilities Registry · `0021` Capability 环境与生命周期 · `0022` 自撰安全回路 · `0023` 上下文压缩 · `0024` TUI 视口与渲染循环(已废弃)· `0025` Prompt 作为 Skill 草稿层 · `0026` Background Agent · `0027` pi 对照分析 · `0028` 项目信任加载门禁 · `0029` turn steering 与 follow-up · `0031` 拦截中间件边界论证(不做)· `0032` client-server 架构 · `0030` BG 客观验收门与失败写回 · `0033` BG 任务账本与退出码告警 · `0034` Persistent Capability 跨重启韧性 ·
+`0001` TUI 键位与 Mode 语义(已废弃)· `0002` slash 本地派发 · `0003` 中心 Theme(已废弃)· `0004` Session 持久化与迁移 · `0005` 权限 scope 与 allowlist · `0007` prompt 注入 slash · `0015` 统一消息模型 · `0016` channel 拓扑与事件模型 · `0017` provider 中立消息模型 · `0018` Tool trait 与 PermissionKey · `0019` 子 agent 能力边界 · `0020` Skills/Capabilities Registry · `0021` Capability 环境与生命周期 · `0022` 自撰安全回路 · `0023` 上下文压缩 · `0024` TUI 视口与渲染循环(已废弃)· `0025` Prompt 作为 Skill 草稿层 · `0026` Background Agent · `0027` pi 对照分析 · `0028` 项目信任加载门禁 · `0029` turn steering 与 follow-up · `0031` 拦截中间件边界论证(不做)· `0032` client-server 架构 · `0030` BG 客观验收门与失败写回 · `0033` BG 任务账本与退出码告警 · `0034` Persistent Capability 跨重启韧性 · `0035` workgraph 并发写保护 · `0036` 复合命令 keying · `0037` 工具输出长度截断 · `0038` 自适应 max_tokens 预算
 
 ## 测试与验证边界
 
-- **202 个离线单元/集成测试**(默认套件,hermetic)+ **3 个 `#[ignore]`**(2 Docker e2e + L3 真实 LLM 冒烟;`cargo test -- --ignored`,部分另需门控 env)。Wasm e2e 在默认套件内(纯进程内)。
+- **314 个离线单元/集成测试**(默认套件,hermetic)+ **3 个 `#[ignore]`**(2 Docker e2e + L3 真实 LLM 冒烟;`cargo test -- --ignored`,部分另需门控 env)。Wasm e2e 在默认套件内(纯进程内)。
 - `tests/` 下为**黑盒行为验证分层**:只编译于 `src/lib.rs` 公共 API,驱动真实 `AgentLoop`+真实工具,断言只落三面(`AgentEvent` 流 / 文件系统+git / `ScriptedProvider` 记录的 `CompletionRequest`)。分层与门控开关见 `docs/testing/behavioral-validation.md`。
 - **L2 pty 冒烟测试已删除**(原 TUI 交互验证);client-server 交互由 daemon+`cc` 的手动验收覆盖。
 - token 计数用 tiktoken(准确);`run_command`/`commit` 走真实 `git`/shell(运行期生效)。
