@@ -113,5 +113,5 @@ fn main() {
     println!("cc-web: press Ctrl+C to stop");
 
     // Serve HTTP (blocking)
-    http.serve();
+    Arc::new(http).serve();
 }

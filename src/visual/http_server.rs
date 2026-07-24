@@ -16,6 +16,21 @@ const SSE_HEADERS: &[(&str, &str)] = &[
 
 const SSE_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(15);
 
+/// Write a complete raw HTTP response head for an SSE stream.
+///
+/// `tiny_http`'s `into_writer()` returns the raw socket and writes nothing on its
+/// own — no status line, no headers. For a streaming response we must emit the full
+/// head ourselves (status line + headers + terminating blank line), all with CRLF
+/// line endings per RFC 7230, before any SSE frame. Omitting it yields an invalid
+/// HTTP response that browsers' EventSource rejects.
+fn write_sse_head<W: Write>(writer: &mut W) -> std::io::Result<()> {
+    write!(writer, "HTTP/1.1 200 OK\r\n")?;
+    for (name, val) in SSE_HEADERS {
+        write!(writer, "{name}: {val}\r\n")?;
+    }
+    write!(writer, "\r\n")
+}
+
 pub struct HttpServer {
     server: Server,
     router: Arc<EventRouter>,
@@ -42,26 +57,38 @@ impl HttpServer {
     }
 
     /// Serve requests in a blocking loop. Run on a dedicated thread.
-    pub fn serve(&self) {
+    ///
+    /// Each request is dispatched onto its own thread. This is essential because
+    /// the SSE handlers (`/api/v1/events`, `/api/v1/workgraph/stream`) block for
+    /// the lifetime of the connection; handling requests inline would let a single
+    /// open SSE stream monopolize the server and starve every other request
+    /// (index, REST endpoints, the second SSE stream) — freezing the whole UI.
+    pub fn serve(self: Arc<Self>) {
         for request in self.server.incoming_requests() {
-            let url = request.url().to_owned();
-            let method = request.method().as_str().to_owned();
+            let this = Arc::clone(&self);
+            std::thread::spawn(move || this.handle(request));
+        }
+    }
 
-            // CORS preflight
-            if method == "OPTIONS" {
-                let resp = Response::from_string("")
-                    .with_status_code(StatusCode(204))
-                    .with_header(
-                        Header::from_bytes(
-                            &b"Access-Control-Allow-Origin"[..],
-                            &b"*"[..],
-                        ).unwrap()
-                    );
-                let _ = request.respond(resp);
-                continue;
-            }
+    fn handle(&self, request: tiny_http::Request) {
+        let url = request.url().to_owned();
+        let method = request.method().as_str().to_owned();
 
-            match (method.as_str(), url.as_str()) {
+        // CORS preflight
+        if method == "OPTIONS" {
+            let resp = Response::from_string("")
+                .with_status_code(StatusCode(204))
+                .with_header(
+                    Header::from_bytes(
+                        &b"Access-Control-Allow-Origin"[..],
+                        &b"*"[..],
+                    ).unwrap()
+                );
+            let _ = request.respond(resp);
+            return;
+        }
+
+        match (method.as_str(), url.as_str()) {
                 ("GET", "/") | ("GET", "/index.html") => {
                     self.serve_static(request, &self.static_dir, "index.html");
                 }
@@ -103,7 +130,6 @@ impl HttpServer {
                         .with_status_code(StatusCode(404));
                     let _ = request.respond(resp);
                 }
-            }
         }
     }
 
@@ -131,13 +157,12 @@ impl HttpServer {
         let router = self.router.clone();
         let (id, rx) = router.register_sse();
 
+        // into_writer() hands back the raw socket; we must write the HTTP head.
         let mut writer = BufWriter::new(request.into_writer());
-
-        // Write SSE headers
-        for (name, val) in SSE_HEADERS {
-            let _ = writeln!(&mut writer, "{name}: {val}");
+        if write_sse_head(&mut writer).is_err() {
+            router.remove_sse(id);
+            return;
         }
-        let _ = writeln!(&mut writer); // blank line after headers
 
         // Read and emit current workgraph
         let wg_path = self.root_path.join("workgraph.json");
@@ -269,13 +294,12 @@ impl HttpServer {
         let router = self.router.clone();
         let (id, rx) = router.register_sse();
 
+        // into_writer() hands back the raw socket; we must write the HTTP head.
         let mut writer = BufWriter::new(request.into_writer());
-
-        // Write SSE headers manually
-        for (name, val) in SSE_HEADERS {
-            let _ = writeln!(&mut writer, "{name}: {val}");
+        if write_sse_head(&mut writer).is_err() {
+            router.remove_sse(id);
+            return;
         }
-        let _ = writeln!(&mut writer); // blank line after headers
 
         // Catch-up events
         let catch_up = router.catch_up();
@@ -311,6 +335,82 @@ impl HttpServer {
         }
 
         router.remove_sse(id);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Read;
+    use std::net::TcpStream;
+
+    /// An SSE endpoint opened via `into_writer()` must emit a complete raw HTTP
+    /// response head — status line + headers + blank line — before any SSE frame.
+    /// `tiny_http`'s `into_writer()` hands back the raw socket and writes NOTHING
+    /// on its own, so omitting the head produces an invalid response the browser's
+    /// EventSource rejects (the "web won't start" symptom).
+    #[test]
+    fn sse_stream_emits_valid_http_response_head() {
+        let router = Arc::new(EventRouter::new());
+        // Bind an ephemeral port on a throwaway root (workgraph.json absent → fallback).
+        let server = Arc::new(HttpServer::new(0, router, "static", Some(PathBuf::from("."))).unwrap());
+        let addr = server.server.server_addr().to_ip().unwrap();
+        std::thread::spawn(move || server.serve());
+
+        let mut stream = TcpStream::connect(addr).unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        write!(
+            stream,
+            "GET /api/v1/workgraph/stream HTTP/1.1\r\nHost: localhost\r\n\r\n"
+        )
+        .unwrap();
+
+        let mut buf = [0u8; 256];
+        let n = stream.read(&mut buf).unwrap();
+        let head = String::from_utf8_lossy(&buf[..n]);
+
+        assert!(
+            head.starts_with("HTTP/1.1 200"),
+            "SSE response must begin with an HTTP status line, got:\n{head:?}"
+        );
+        assert!(
+            head.to_ascii_lowercase().contains("content-type: text/event-stream"),
+            "SSE response must declare the event-stream content type, got:\n{head:?}"
+        );
+    }
+
+    /// A long-lived SSE stream must not block other requests. The server handles
+    /// each request on its own thread, so an open `/api/v1/events` connection must
+    /// not starve the index route (the frozen-UI symptom).
+    #[test]
+    fn open_sse_stream_does_not_block_other_requests() {
+        let router = Arc::new(EventRouter::new());
+        let server = Arc::new(HttpServer::new(0, router, "static", Some(PathBuf::from("."))).unwrap());
+        let addr = server.server.server_addr().to_ip().unwrap();
+        std::thread::spawn(move || server.serve());
+
+        // Give the accept loop a moment to come up, then hold an SSE stream open.
+        std::thread::sleep(Duration::from_millis(100));
+        let mut sse = TcpStream::connect(addr).unwrap();
+        write!(sse, "GET /api/v1/events HTTP/1.1\r\nHost: localhost\r\n\r\n").unwrap();
+        // Read its head so the handler has entered its blocking forward loop.
+        sse.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+        let mut b = [0u8; 64];
+        let _ = sse.read(&mut b).unwrap();
+
+        // A separate request must still be served promptly.
+        let mut other = TcpStream::connect(addr).unwrap();
+        other.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+        write!(other, "GET /api/v1/workgraph HTTP/1.1\r\nHost: localhost\r\n\r\n").unwrap();
+        let mut buf = [0u8; 64];
+        let n = other.read(&mut buf).unwrap();
+        let head = String::from_utf8_lossy(&buf[..n]);
+        assert!(
+            head.starts_with("HTTP/1.1 200"),
+            "index/REST must respond while an SSE stream is open, got:\n{head:?}"
+        );
     }
 }
 
