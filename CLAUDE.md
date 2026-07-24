@@ -4,7 +4,7 @@
 
 ## 项目状态
 
-CodeCoder 是一个**已落地**的自主 AI agent，使用 Rust 编写。仓库已有 Cargo 项目、43 个源文件(`src/`,含 `background.rs`、`trust.rs`、`retry.rs`、`review.rs`、`workgraph.rs`、`daemon/`、`client/`)、26 个内置工具、329 个测试(326 通过 + 3 个 `#[ignore]`:2 Docker e2e + L3 真实 LLM 冒烟),以及 30 份 ADR(`docs/adr/`)。`tests/` 下为黑盒行为验证分层(L1 默认;L2/L3 门控),见 `docs/testing/behavioral-validation.md`。架构总览见 `ARCHITECTURE.md`;领域术语以 `CONTEXT.md` 为准。
+CodeCoder 是一个**已落地**的自主 AI agent，使用 Rust 编写。仓库已有 Cargo 项目、43 个源文件(`src/`,含 `background.rs`、`trust.rs`、`retry.rs`、`review.rs`、`workgraph.rs`、`daemon/`、`client/`)、26 个内置工具、339 个测试(336 通过 + 3 个 `#[ignore]`:2 Docker e2e + L3 真实 LLM 冒烟),以及 30 份 ADR(`docs/adr/`)。`tests/` 下为黑盒行为验证分层(L1 默认;L2/L3 门控),见 `docs/testing/behavioral-validation.md`。架构总览见 `ARCHITECTURE.md`;领域术语以 `CONTEXT.md` 为准。
 
 **已知未实现的部分(文档中已标注,勿误以为已就绪):**
 
@@ -13,7 +13,7 @@ CodeCoder 是一个**已落地**的自主 AI agent，使用 Rust 编写。仓库
 - **内置调度器 / 多 runner 资源上限**:调度外置,并发由外置调度器限制(ADR 0026)。
 - **margin/leverage/terminal 仅为字符串元数据**:"关键节点 = 余量 × 杠杆"的排序未内核化,靠 agent/skill 判断(reason 工具;rc 纪律 skill 待写)。
 
-> **Background Agent 已落地 headless one-shot runner**(见 ADR 0026):由 `CODECODER_BG_TASK=<task>` 触发,无用户在场地跑完一个 task 即退出;另有 `CODECODER_BG_WORKGRAPH=1` 走 **workgraph 逐里程碑模式**(无显式 task,产出 mission_state→退出码 0/2/3/4,见 ADR 0033 修订)——优先推进 `pending` 就绪里程碑;里程碑验收 `needs_fix` 时 runner 在预算内(`CODECODER_BG_MAX_FIX_ATTEMPTS`,默认 3,0=禁用)自动把上轮失败原因注入修复 prompt 重试(重试不计入 max_auto),预算耗尽仍 `needs_fix` 才报 `StuckNeedsFix`(退出码 2,此时需人工/上层介入)——**自恢复仅限该 headless runner**(`run_background_cfg`),交互式 `drive_workgraph` 与 daemon 空闲推进线程仍只标记 `needs_fix`、需人工重置 `pending`;权限走 `codecoder.json` 预授权,任何未授权的 Ask 工具被自动拒绝(记入 `BgOutcome.denied`、发 `ToolFinished{is_error}` 事件),从不弹 prompt。调度外置;**SIGINT 优雅取消已实现**(`Ctrl+C`/`kill -INT` 经 signal-hook 接 `CancelToken`,见 ADR 0026);内置调度器/多 runner 资源上限仍属延后项。
+> **Background Agent 已落地 headless one-shot runner**(见 ADR 0026):由 `CODECODER_BG_TASK=<task>` 触发,无用户在场地跑完一个 task 即退出;另有 `CODECODER_BG_WORKGRAPH=1` 走 **workgraph 逐里程碑模式**(无显式 task,产出 mission_state→退出码 0/2/3/4,见 ADR 0033 修订)——优先推进 `pending` 就绪里程碑;里程碑验收 `needs_fix` 时 runner 在预算内(`CODECODER_BG_MAX_FIX_ATTEMPTS`,默认 3,0=禁用)自动把上轮失败原因注入修复 prompt 重试(重试不计入 max_auto),预算耗尽仍 `needs_fix` 才报 `StuckNeedsFix`(退出码 2,此时需人工/上层介入)——**自恢复仅限该 headless runner**(`run_background_cfg`),交互式 `drive_workgraph` 与 daemon 空闲推进线程仍只标记 `needs_fix`、需人工重置 `pending`;权限走 `codecoder.json` 预授权,任何未授权的 Ask 工具被自动拒绝(记入 `BgOutcome.denied`、发 `ToolFinished{is_error}` 事件),从不弹 prompt。调度外置;**SIGINT 优雅取消已实现**(`Ctrl+C`/`kill -INT` 经 signal-hook 接 `CancelToken`,见 ADR 0026);内置调度器/多 runner 资源上限仍属延后项。**编排纪律**:切忌向同一常驻 daemon **并发**发消息(共享 session 历史 + 异步写 → 文件版本竞争);并发工作请用独立 root/daemon 或串行化(ADR 0035 已护 workgraph 并发写,session 历史无此保护)。
 
 > **Compaction 已全量实现**(tier-1 + tier-2,见 ADR 0023):tier-1 超阈值时丢 `Reasoning` + 占位化旧 `ToolResult` 正文,保护 anchor 与近端 tail;tier-1 后仍超阈值时,`AgentLoop::context_working_set` 用一次带缓存的 LLM 调用把最旧跨度摘要为合成 `System` 消息,摘要失败/为空则降级回 tier-1。tier-2 摘要采用结构化模板、迭代式合并(span 增长只摘增量并带入上一版摘要),并累积追踪 read/modified 文件路径附于摘要末尾(见 docs/adr/0023 增强说明)。
 

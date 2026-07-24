@@ -336,8 +336,10 @@ impl AgentLoop {
             WARN_ONCE.call_once(|| {
                 eprintln!(
                     "ccd: codecoder.json found but project is untrusted → allowlist not loaded; \
-                     every pre-authorized Ask tool will be auto-denied. Set \
-                     CODECODER_DEFAULT_TRUST=always or add ~/.codecoder/trust.json to load it."
+                     every pre-authorized Ask tool will be auto-denied. Trust the project to \
+                     load it (CODECODER_DEFAULT_TRUST=always for undecided projects, or a \
+                     ~/.codecoder/trust.json entry; an explicitly-untrusted recorded decision \
+                     must be changed there)."
                 );
             });
         }
