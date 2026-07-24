@@ -157,6 +157,12 @@ pub fn has_config_resources(root: &Path) -> bool {
         || DIRS.iter().any(|d| root.join(d).is_dir())
 }
 
+/// headless 且未 trusted 且磁盘存在 codecoder.json(有预授权 allowlist)→ 应 stderr 引导:
+/// allowlist 未加载会导致预授权 Ask 工具被静默自动拒绝。仅提示,不放松 trust 门。
+pub fn should_warn_untrusted_allowlist(root: &std::path::Path, trusted: bool, headless: bool) -> bool {
+    headless && !trusted && root.join("codecoder.json").exists()
+}
+
 /// The fallback when no user can be prompted (headless), from
 /// `CODECODER_DEFAULT_TRUST`. `never` (or unset) → Untrusted; `always`/`once` →
 /// Trusted. Never persisted — a default is per-run, not a recorded decision.
@@ -214,6 +220,19 @@ mod tests {
         assert_eq!(decide_in(&store, &parent), Some(TrustDecision::Trusted));
 
         std::fs::remove_dir_all(&base).ok();
+    }
+
+    #[test]
+    fn should_warn_untrusted_allowlist_truth_table() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        // 无 codecoder.json → 任何情况都不提示。
+        assert!(!should_warn_untrusted_allowlist(root, false, true));
+        // 有 codecoder.json:
+        std::fs::write(root.join("codecoder.json"), "{}").unwrap();
+        assert!(should_warn_untrusted_allowlist(root, false, true));   // headless + 未 trusted + 有文件 → 提示
+        assert!(!should_warn_untrusted_allowlist(root, true, true));    // 已 trusted → 不提示
+        assert!(!should_warn_untrusted_allowlist(root, false, false));  // 交互 → 不提示
     }
 
     #[test]

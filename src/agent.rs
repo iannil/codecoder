@@ -330,6 +330,17 @@ impl AgentLoop {
         // The disk "self" loads only when trusted; otherwise the agent runs on its
         // compiled-in base identity + native tools, with an empty allowlist.
         let trusted = trust == TrustState::Trusted;
+        if crate::trust::should_warn_untrusted_allowlist(&root, trusted, headless) {
+            use std::sync::Once;
+            static WARN_ONCE: Once = Once::new();
+            WARN_ONCE.call_once(|| {
+                eprintln!(
+                    "ccd: codecoder.json found but project is untrusted → allowlist not loaded; \
+                     every pre-authorized Ask tool will be auto-denied. Set \
+                     CODECODER_DEFAULT_TRUST=always or add ~/.codecoder/trust.json to load it."
+                );
+            });
+        }
         let system_prompt = if trusted {
             match &shared_registry {
                 // Render the catalog under a brief read-lock, then DROP the lock
