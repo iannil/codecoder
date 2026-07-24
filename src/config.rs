@@ -124,7 +124,7 @@ mod tests {
 
     #[test]
     fn max_tokens_ceiling_default_and_override() {
-        let _g = MAX_TOKENS_CEILING_ENV_LOCK.lock().unwrap();
+        let _g = MAX_TOKENS_CEILING_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         unsafe { std::env::remove_var("CODECODER_MAX_TOKENS_CEILING"); }
         assert_eq!(Config::from_env().max_tokens_ceiling, 32768);
         unsafe { std::env::set_var("CODECODER_MAX_TOKENS_CEILING", "16384"); }

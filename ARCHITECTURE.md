@@ -67,7 +67,7 @@
    - 执行 → `ToolResult` 回灌 → 再问 LLM,直到无工具调用或触及 `MAX_TOOL_ITERATIONS`。
 8. 无工具调用 → `TurnComplete` → `run()` 循环自动调用 `drive_workgraph()` 推进 workgraph 就绪里程碑(**Plan #2 自动驱动**)。
 
-## 工具体系(25 内置)
+## 工具体系(26 内置)
 
 `Tool` 自报 `Permission`(0018):`None`(只读免问)/ `Ask{key}`(细粒度 key,命令类/前缀甜点区)。**子 agent 只能用 `Permission::None` 的一个只读子集(9 个),且无 `agent`——深度锁 1(0019)。**
 

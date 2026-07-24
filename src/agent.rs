@@ -2278,7 +2278,7 @@ mod tests {
 
     #[test]
     fn max_tokens_ceiling_defaults_and_setter_overrides() {
-        let _g = crate::config::MAX_TOKENS_CEILING_ENV_LOCK.lock().unwrap();
+        let _g = crate::config::MAX_TOKENS_CEILING_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         unsafe { std::env::remove_var("CODECODER_MAX_TOKENS_CEILING"); }
         let dir = tempfile::tempdir().unwrap();
         let mut agent = AgentLoop::new(stub_provider(), "m", 256, 0.0, dir.path().to_path_buf());
