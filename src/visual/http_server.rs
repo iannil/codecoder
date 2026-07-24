@@ -88,9 +88,12 @@ impl HttpServer {
                     );
                 let _ = request.respond(resp);
             }
-            Err(e) => {
-                let resp = Response::from_string(format!("404: {e}"))
-                    .with_status_code(StatusCode(404));
+            Err(_) => {
+                // Fallback to embedded
+                let resp = Response::from_string(crate::visual::embedded::INDEX_HTML)
+                    .with_header(
+                        Header::from_bytes(&b"Content-Type"[..], &b"text/html"[..]).unwrap()
+                    );
                 let _ = request.respond(resp);
             }
         }
