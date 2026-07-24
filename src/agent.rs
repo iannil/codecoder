@@ -201,6 +201,10 @@ pub struct AgentLoop {
     model: String,
     model_window: u64,
     max_tokens: u32,
+    /// 自适应截断根治(迭代 2):命中 StopReason::Length 时,单 turn 有效 max_tokens
+    /// 翻倍上调的封顶值。build 内由 Config::from_env() 注入,故所有构造点(交互/BG/
+    /// daemon/sub-agent/verify)统一遵守 CODECODER_MAX_TOKENS_CEILING。
+    max_tokens_ceiling: u32,
     temperature: f32,
     next_id: MessageId,
     cancel: CancelToken,
@@ -345,6 +349,7 @@ impl AgentLoop {
             model_window: crate::tokenizer::model_window(&model),
             model,
             max_tokens,
+            max_tokens_ceiling: crate::config::Config::from_env().max_tokens_ceiling,
             temperature,
             next_id: 0,
             cancel: CancelToken::default(),
@@ -389,6 +394,11 @@ impl AgentLoop {
     /// 覆盖默认工具迭代上限(ADR 0026:BG 单 milestone 用更紧预算,防固着)。
     pub fn set_tool_cap(&mut self, n: usize) {
         self.tool_cap = n.max(1);
+    }
+
+    /// 覆盖自适应截断的 max_tokens 封顶(测试/特殊场景)。默认由 build 从 env 注入。
+    pub fn set_max_tokens_ceiling(&mut self, n: u32) {
+        self.max_tokens_ceiling = n;
     }
 
     /// 最近一次 turn 是否因 provider 错误失败(ADR 0033:BG 据此置 mission_state=Error)。
@@ -2154,6 +2164,16 @@ mod tests {
 
     fn stub_provider() -> Arc<dyn Provider> {
         Arc::new(crate::provider::stub::StubClient)
+    }
+
+    #[test]
+    fn max_tokens_ceiling_defaults_and_setter_overrides() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut agent = AgentLoop::new(stub_provider(), "m", 256, 0.0, dir.path().to_path_buf());
+        // 默认来自 Config::from_env()(env 未设 → 32768)。
+        assert_eq!(agent.max_tokens_ceiling, 32768);
+        agent.set_max_tokens_ceiling(1024);
+        assert_eq!(agent.max_tokens_ceiling, 1024);
     }
 
     #[test]
