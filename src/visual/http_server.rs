@@ -1,6 +1,6 @@
 use crate::daemon::proto::ServerEvent;
 use crate::visual::event_router::EventRouter;
-use std::io::{BufWriter, Write};
+use std::io::{BufRead, BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::mpsc::RecvTimeoutError;
@@ -76,6 +76,9 @@ impl HttpServer {
                 }
                 ("GET", "/api/v1/sessions") => {
                     self.serve_sessions(request, &self.root_path);
+                }
+                ("GET", "/api/v1/tests") => {
+                    self.serve_tests(request, &self.root_path);
                 }
                 ("GET", path) if path.starts_with("/api/v1/sessions/") && !path.contains("/events") => {
                     let id = path.trim_start_matches("/api/v1/sessions/");
@@ -210,6 +213,33 @@ impl HttpServer {
     fn serve_session_events(&self, request: tiny_http::Request, _root: &Path, _id: &str) {
         // Phase 3 enhancement: parse session JSON and extract event-like sequence
         let resp = Response::from_string("[]")
+            .with_header(Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap());
+        let _ = request.respond(resp);
+    }
+
+    fn serve_tests(&self, request: tiny_http::Request, root: &Path) {
+        let output = std::process::Command::new("cargo")
+            .args(["test", "--no-run", "--message-format", "json"])
+            .current_dir(root)
+            .output();
+
+        let mut tests = Vec::new();
+        if let Ok(out) = output {
+            for line in std::io::BufReader::new(&out.stdout as &[u8]).lines() {
+                if let Ok(line) = line {
+                    if let Ok(msg) = serde_json::from_str::<serde_json::Value>(&line) {
+                        if msg.get("type").and_then(|t| t.as_str()) == Some("test") {
+                            if let Some(name) = msg.get("name").and_then(|n| n.as_str()) {
+                                tests.push(name.to_owned());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        let json = serde_json::to_string(&tests).unwrap_or_else(|_| "[]".to_string());
+        let resp = Response::from_string(json)
             .with_header(Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap());
         let _ = request.respond(resp);
     }
