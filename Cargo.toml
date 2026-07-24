@@ -40,6 +40,10 @@ wasmtime = "27"
 wasmtime-wasi = "27"
 # Advisory file lock for WorkGraph concurrent-write protection (ADR 0035).
 fs2 = "0.4"
+# File-watcher for cc-web: live-reload on skill/capability changes (Task 1)
+notify = { version = "6", features = [] }
+# Lightweight HTTP server for cc-web (Task 1)
+tiny_http = "0.12"
 
 [dev-dependencies]
 insta = { version = "1", features = ["colors"] }
