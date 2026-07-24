@@ -26,6 +26,7 @@ pub mod tool;
 pub mod verify;
 pub mod daemon;
 pub mod client;
+pub mod visual;
 
 use std::sync::Arc;
 
