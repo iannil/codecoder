@@ -78,10 +78,14 @@ fn main() {
     };
 
     // Start HTTP server
-    let static_dir = {
+    let static_dir = if cfg!(debug_assertions) {
+        let mut p = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        p.push("static");
+        p
+    } else {
         let mut p = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("."));
         p.pop(); // remove binary name
-        p.push("../../static");
+        p.push("static");
         p
     };
     let http = HttpServer::new(port, router.clone(), &static_dir.to_string_lossy())
