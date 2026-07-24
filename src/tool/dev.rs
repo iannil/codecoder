@@ -145,7 +145,7 @@ impl Tool for Milestone {
     fn description(&self) -> &str {
         "Manage the durable Work Graph of milestones (dependency-ordered work that \
          survives context resets): action = list | add | start | done | needs_fix | \
-         next | remove. `add` takes title (+ optional acceptance, deps); `done` may \
+         next | remove. `add` takes title (+ optional acceptance, command, deps); `done` may \
          carry a review verdict. `next` returns the next ready milestone to work on."
     }
     fn schema(&self) -> Value {

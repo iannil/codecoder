@@ -69,7 +69,7 @@ codecoder **确实用自己的能力建成了一个可运行、可收敛、双�
 
 ### 🟡 Issue A — milestone acceptance 的 prose 被当 shell 命令执行
 - **现象**:`bg_gate::extract_gate_command` 原样返回首个含命令关键字的行交 `sh -c`。agent 用 `milestone add` 写的自然语言 acceptance(尤其 CJK),如 `cargo init --name coedit 创建二进制项目`,整行被执行 → `unexpected argument '创建二进制项目'` → 假 `needs_fix`;或 `cargo test 通过` → 退化成空过滤 → 假 pass。**agent 用自己的工具写的 acceptance,却过不了自己的 gate**,是闭环缺口。
-- **修复**:仅当匹配行为**纯 ASCII 命令**时才作命令门,prose 行跳过 → 交注入式 review 门。测试 `extract_gate_command_skips_prose_acceptance_with_command_word`。
+- **修复**:仅当匹配行为**纯 ASCII 命令**时才作命令门,prose 行跳过 → 交注入式 review 门。测试 `extract_gate_command_skips_prose_acceptance_with_command_word`。（迭代 3 已契约化：结构化 command 通道 + 写入引导 + gate_kind 可观测）
 
 ### 附:非 codecoder bug(澄清)
 - **模型谎报测试通过** → deepseek-flash 行为;codecoder 的客观 gate **正确覆盖**了它(设计奏效的证明,非缺陷)。
