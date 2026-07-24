@@ -181,6 +181,7 @@ mod tests {
             touched: vec![],
             fix_attempts: 0,
             last_failure: None,
+            command: None,
         }
     }
 

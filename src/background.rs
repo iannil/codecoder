@@ -788,6 +788,7 @@ mod tests {
             touched: vec![],
             fix_attempts: 1,
             last_failure: Some("gate `cargo test` failed: 2 failed".into()),
+            command: None,
         };
         let p = build_repair_prompt(&m, "gate `cargo test` failed: 2 failed");
         assert!(p.contains("CRDT 核心"), "含标题: {p}");
@@ -809,6 +810,7 @@ mod tests {
             touched: vec![],
             fix_attempts: 0,
             last_failure: Some("self-review: NeedsFix".into()),
+            command: None,
         };
         let p = build_repair_prompt(&m, "self-review: NeedsFix");
         assert!(p.contains("(none)"), "空 acceptance 应渲染为 (none): {p}");
