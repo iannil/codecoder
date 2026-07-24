@@ -5,6 +5,8 @@ use codecoder::visual::http_server::HttpServer;
 use codecoder::visual::socket_client::SocketClient;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::thread;
+use std::time::Duration;
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
@@ -68,14 +70,22 @@ fn main() {
     // Start receiving events
     client.start();
 
-    // Set up file watcher (skeleton)
-    let _file_watcher = match FileWatcher::new(&root, router.clone()) {
+    // Set up file watcher (Phase 2: full implementation with poll loop)
+    let mut file_watcher = match FileWatcher::new(&root, router.clone()) {
         Ok(w) => w,
         Err(e) => {
             eprintln!("cc-web: file watcher init failed (non-fatal): {e}");
             FileWatcher::dummy()
         }
     };
+
+    // Spawn a polling thread for file watcher
+    thread::spawn(move || {
+        loop {
+            file_watcher.poll();
+            thread::sleep(Duration::from_millis(100));
+        }
+    });
 
     // Start HTTP server
     let static_dir = if cfg!(debug_assertions) {
@@ -88,8 +98,13 @@ fn main() {
         p.push("static");
         p
     };
-    let http = HttpServer::new(port, router.clone(), &static_dir.to_string_lossy())
-        .unwrap_or_else(|e| {
+    let http = HttpServer::new(
+        port,
+        router.clone(),
+        &static_dir.to_string_lossy(),
+        Some(root.clone()),
+    )
+    .unwrap_or_else(|e| {
             eprintln!("cc-web: failed to start HTTP server: {e}");
             std::process::exit(1);
         });

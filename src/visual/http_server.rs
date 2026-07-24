@@ -1,6 +1,7 @@
 use crate::daemon::proto::ServerEvent;
 use crate::visual::event_router::EventRouter;
 use std::io::{BufWriter, Write};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::mpsc::RecvTimeoutError;
 use std::time::Duration;
@@ -19,10 +20,16 @@ pub struct HttpServer {
     server: Server,
     router: Arc<EventRouter>,
     static_dir: String,
+    root_path: PathBuf,
 }
 
 impl HttpServer {
-    pub fn new(port: u16, router: Arc<EventRouter>, static_dir: &str) -> anyhow::Result<Self> {
+    pub fn new(
+        port: u16,
+        router: Arc<EventRouter>,
+        static_dir: &str,
+        root_path: Option<PathBuf>,
+    ) -> anyhow::Result<Self> {
         let addr = format!("127.0.0.1:{port}");
         let server = Server::http(&addr)
             .map_err(|e| anyhow::anyhow!("failed to bind {addr}: {e}"))?;
@@ -30,6 +37,7 @@ impl HttpServer {
             server,
             router,
             static_dir: static_dir.to_owned(),
+            root_path: root_path.unwrap_or_else(|| PathBuf::from(".")),
         })
     }
 
@@ -60,6 +68,12 @@ impl HttpServer {
                 ("GET", "/api/v1/events") => {
                     self.serve_sse(request);
                 }
+                ("GET", "/api/v1/workgraph") => {
+                    self.serve_workgraph(request);
+                }
+                ("GET", "/api/v1/workgraph/stream") => {
+                    self.serve_workgraph_stream(request);
+                }
                 ("GET", path) if path.starts_with("/api/v1/") => {
                     // Other API endpoints (Phases 2-4): respond 404 for now
                     let resp = Response::from_string("{\"error\":\"not_implemented\"}")
@@ -76,6 +90,73 @@ impl HttpServer {
                 }
             }
         }
+    }
+
+    fn serve_workgraph(&self, request: tiny_http::Request) {
+        let wg_path = self.root_path.join("workgraph.json");
+        match std::fs::read_to_string(&wg_path) {
+            Ok(json) => {
+                let resp = Response::from_string(json)
+                    .with_header(
+                        Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap()
+                    );
+                let _ = request.respond(resp);
+            }
+            Err(_) => {
+                let resp = Response::from_string("{\"nodes\":[]}")
+                    .with_header(
+                        Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap()
+                    );
+                let _ = request.respond(resp);
+            }
+        }
+    }
+
+    fn serve_workgraph_stream(&self, request: tiny_http::Request) {
+        let router = self.router.clone();
+        let (id, rx) = router.register_sse();
+
+        let mut writer = BufWriter::new(request.into_writer());
+
+        // Write SSE headers
+        for (name, val) in SSE_HEADERS {
+            let _ = writeln!(&mut writer, "{name}: {val}");
+        }
+        let _ = writeln!(&mut writer); // blank line after headers
+
+        // Read and emit current workgraph
+        let wg_path = self.root_path.join("workgraph.json");
+        let initial = match std::fs::read_to_string(&wg_path) {
+            Ok(json) => json,
+            Err(_) => "{\"nodes\":[]}".to_string(),
+        };
+        let _ = write!(&mut writer, "event: wg_update\n");
+        let _ = write!(&mut writer, "data: {initial}\n\n");
+        let _ = writer.flush();
+
+        // Forward events with keepalive
+        loop {
+            match rx.recv_timeout(SSE_KEEPALIVE_INTERVAL) {
+                Ok(ev) => {
+                    let json = match serde_json::to_string(&ev) {
+                        Ok(j) => j,
+                        Err(_) => continue,
+                    };
+                    let ev_type = sse_event_type(&ev);
+                    let _ = write!(&mut writer, "event: {ev_type}\n");
+                    let _ = write!(&mut writer, "data: {json}\n\n");
+                }
+                Err(RecvTimeoutError::Timeout) => {
+                    let _ = write!(&mut writer, ": keepalive\n\n");
+                }
+                Err(RecvTimeoutError::Disconnected) => break,
+            }
+            if let Err(_) = writer.flush() {
+                break;
+            }
+        }
+
+        router.remove_sse(id);
     }
 
     fn serve_static(&self, request: tiny_http::Request, dir: &str, file: &str) {
