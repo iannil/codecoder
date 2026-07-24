@@ -1,6 +1,6 @@
 # CodeCoder 架构
 
-自主 AI agent,Rust 编写,**事件驱动、文件系统即自我**。本文串起 40 个源文件 ↔ 23 个 ADR ↔ 26 个内置工具 ↔ 6 点自我进化诉求,供人与未来 agent 导航。术语以 `CONTEXT.md` 为准,决策依据见 `docs/adr/`。
+自主 AI agent,Rust 编写,**事件驱动、文件系统即自我**。本文串起 43 个源文件 ↔ 29 个 ADR ↔ 26 个内置工具 ↔ 6 点自我进化诉求,供人与未来 agent 导航。术语以 `CONTEXT.md` 为准,决策依据见 `docs/adr/`。
 
 ## 一句话
 
@@ -34,7 +34,7 @@
 | `message.rs` | `Message`/`MessageItem`/`MessageId`/`Role`(provider 中立) | 0015 0017 |
 | `provider/{mod,openai,stub}` | `Provider` trait;`OpenAiClient`(chat-completions)/`StubClient` | 0017 |
 | `agent.rs` | `AgentLoop`、turn 循环、工具分派、子 agent、ask_user、reload、**workgraph 自动推进(`drive_workgraph`)** | 0016 0019 |
-| `background.rs` | Background Agent headless one-shot runner;`run_background` 驱动一个 turn 到结束,汇总为 `BgOutcome`;**无显式 task 时从 workgraph 取就绪里程碑推进**;**客观验收门覆盖自报 + 失败写回 + continue/stop 策略** | 0026 0030 |
+| `background.rs` | Background Agent headless one-shot runner;`run_background` 驱动一个 turn 到结束,汇总为 `BgOutcome`;**无显式 task 时从 workgraph 取就绪里程碑推进**;**客观验收门覆盖自报 + 失败写回 + continue/stop 策略**;**needs_fix 自恢复循环**(迭代 1):验收 `needs_fix` 后 runner 在预算内(`CODECODER_BG_MAX_FIX_ATTEMPTS`,默认 3,0=禁用)自动把 `last_failure` 注入修复 prompt 重试(`retry_one_milestone`,重试不计入 max_auto/连败熔断);预算耗尽仍 `needs_fix` 才落 `StuckNeedsFix`(退出码 2);重试计数 `fix_attempts` 持久化在 `workgraph.json` 的里程碑上,跨进程尊重预算 | 0026 0030 0033 |
 | `bg_gate.rs` | **BG 客观验收门 + 任务策略**(ADR 0030):`GateVerdict`/命令门/`evaluate`/`next_action`(BlockedAt/CircuitBreaker/CompletedAllReady);纯函数 + 可取消 shell,hermetic 可测 | 0030 |
 | `bg_ledger.rs` | **BG 任务账本**(ADR 0033):`append`/`read_recent`/`mission_exit_code`/`format_utc`;JSONL 持久化 + 退出码告警 | 0033 |
 | `permission.rs` | `PermScope`/`Permission`/`PermissionKey`/`SessionAllowlist` | 0005 0018 |
@@ -48,7 +48,7 @@
 | `capability.rs` | `Environment`/`Lifecycle`/manifest/`RunningServiceTable`、`Supervisor`(Persistent 服务崩溃→标记 Failed 可见,**不自动重启**,0021;**跨重启持久化判定状态 + 崩溃预算**,0034) | 0021 0034 |
 | `supervisor_state.rs` | **Persistent 跨重启监督状态**(ADR 0034):`supervisor_state.json` 持久化 gave_up/crash_count/manifest mtime;load/save/reset/should_skip/record_crash | 0034 |
 | `memory.rs` | `memory/<key>` 文件级 KV + 数据索引(**跨 session 共享**) | — |
-| `workgraph.rs` | **Work Graph(一等公民 #2)**:持久化、依赖有序的里程碑图,`Milestone` 节点含 `NodeStatus`(含 `Hypothesis`/`Locked`)、`next_ready()` 调度、`render_for_prompt()` 摘要;**fs2-locked RMW**(`with_lock`,ADR 0035,防并发 lost-update) | 设计文档 0035 |
+| `workgraph.rs` | **Work Graph(一等公民 #2)**:持久化、依赖有序的里程碑图,`Milestone` 节点含 `NodeStatus`(含 `Hypothesis`/`Locked`)、`next_ready()` 调度、`render_for_prompt()` 摘要;**fs2-locked RMW**(`with_lock`,ADR 0035,防并发 lost-update);节点带 `fix_attempts`/`last_failure` 重试状态,`next_retryable(max)` 选预算内最低 id 的 needs_fix | 设计文档 0035 |
 | `review.rs` | **结构化验收裁决(一等公民 #4)**:`Verdict`(pass/needs_fix/rebuild)+ 四信号(`foundation`/`over_engineering`/`volume`/`terminology`),纯函数解析 | 设计文档 |
 | `daemon/{mod,bus,proto,session_manager,socket}` | **Daemon(长驻服务)**:Unix socket 监听、多 client 复用、session 管理、permission/ask/confirm/plan/trust 往返 wire protocol | 0032 |
 | `client/mod.rs` | **cc 客户端**:daemon 连接、stdin→消息、消息→stdout 格式化、permission 弹窗行内 `y/n` | 0032 |

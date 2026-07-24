@@ -83,7 +83,7 @@ codecoder **确实用自己的能力建成了一个可运行、可收敛、双�
 1. `codecoder.json` 权限 allowlist 仅在 root 被 trust 时加载(需 `CODECODER_DEFAULT_TRUST=always` 或预写 `~/.codecoder/trust.json`)。
 2. 权限 key 粒度:简单命令按 head(`run_command:cargo`),复合命令(`&&`/`|`/`2>&1`)按整串——headless 下复合命令被拒,agent 会自动降级为简单命令(韧性 ✓)。
 3. milestone acceptance 应写**独占一行的裸命令**;prose 退到 review 门(弱信号)。
-4. headless 只跑 `pending`;`needs_fix` 需手动重置 pending 才重试。
+4. headless 只跑 `pending`;`needs_fix` 需手动重置 pending 才重试。（已修：迭代 1 自恢复循环——runner 在 `CODECODER_BG_MAX_FIX_ATTEMPTS` 预算内自动重试 needs_fix，耗尽才落 `StuckNeedsFix`）
 5. `max_tokens` 默认 4096,写大文件会截断(已检测但需人为提高或引导小步写)。
 6. 单 turn 12 工具上限;弱模型易在 headless 下"整轮只探索不动手"。
 7. 二进制不自动读 `.ccd.env`,启动前须 `source`;裸跑无 mode env 会阻塞。

@@ -35,3 +35,11 @@ Dogfooding(用 cc/ccd/BG_WORKGRAPH 从零建一个外部 RGA CRDT 协作编辑�
 - **`StuckNeedsFix(id)` 新终态(修"假绿 exit 0")**:一个 milestone 验收失败被置 `needs_fix` 后,`next_ready()` 只选 `Pending && deps_done`,故一个 **fresh 进程**发现唯一可动的里程碑是 `needs_fix`(无 pending-ready)时,`advance_one_milestone` 立即返回 `None` → 循环 `Ok(None)` 分支**无条件**置 `CompletedAllReady` → exit 0。结果:0 工具空跑却假报"全部完成",上层调度器/编排者误判成功。修法:`Ok(None)` 分支置态前读图,若存在 `needs_fix` 节点 → `MissionState::StuckNeedsFix(id)`(退出码 **2**,同 BlockedAt 语义:需人工/上层修复该里程碑并重置 `pending` 后再续跑),否则才 `CompletedAllReady`。回归测试 `background::tests::stuck_needs_fix_when_only_needs_fix_and_nothing_ready`。
 - **acceptance 命令门跳过 prose(修"假 needs_fix / 假 pass")**:`bg_gate::extract_gate_command` 原样返回首个含命令关键字的行交 `sh -c` 执行。当 agent 用 `milestone add` 写的 acceptance 是自然语言(尤其 CJK),如 `cargo init --name coedit 创建二进制项目`,整行被执行 → `unexpected argument '创建二进制项目'` → 假 `needs_fix`;或 `cargo test 通过` → 退化成过滤 "通过" 的空测试 → exit 0 假 pass。修法:仅当匹配行**为纯 ASCII 命令**时才作命令门,否则跳过该行(继续找干净命令行),找不到则返回 `None` → 交注入式 review 门。测试 `bg_gate::tests::extract_gate_command_skips_prose_acceptance_with_command_word`。
 - **配套约束**:milestone 的 acceptance 最好写**独占一行的裸命令**(`cargo test`);描述性 prose 会退到 review 门(较弱信号)。全套 227 lib + 行为测试通过,无回归。
+
+## 修订(2026-07-24,迭代 1):needs_fix 自恢复循环收窄 StuckNeedsFix 语义
+
+上一修订的 `StuckNeedsFix(2)` 语义是"存在 needs_fix 即卡住,需人工重置 pending"。迭代 1 给 runner 补了**有界自恢复**(详见 ADR 0026 同日修订),本 ADR 关联的退出码语义随之收窄:
+
+- **`StuckNeedsFix(id)`(退出码 2)仅在重试预算耗尽时落**:里程碑验收 `needs_fix` 后,runner 先在预算内(`CODECODER_BG_MAX_FIX_ATTEMPTS`,默认 3,0=禁用)经 `retry_one_milestone` 把 `Milestone.last_failure`(gate 失败原因)注入修复 prompt 自动重试;`WorkGraph::next_retryable` 只选 `fix_attempts < max` 的 needs_fix 节点。既无就绪又无预算内可重试节点时才置 `StuckNeedsFix` → exit 2(此时才需人工/上层介入)。
+- **重试不计入 `max_auto`**:重试的成败由 per-node `fix_attempts` 预算约束,不占推进配额、不累加 `consecutive_fail`、不走 `next_action`。`fix_attempts`/`last_failure` 持久化在 `workgraph.json`,跨进程(fresh BG 调用)尊重预算。
+- **已知取舍**:启用自恢复时,`CircuitBreaker(3)` 的跨里程碑连败熔断实际被 per-node 重试预算 + `max_auto` 取代(重试路径不累加 `consecutive_fail`);未来可让耗尽预算的硬失败里程碑累加独立计数以恢复该熔断。

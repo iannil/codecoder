@@ -94,7 +94,7 @@ pub fn run_background(
     let cfg = crate::config::Config::from_env();
     run_background_cfg(
         provider, model, max_tokens, temperature, root, task,
-        cfg.bg_max_auto, cfg.bg_circuit_k, cfg.bg_milestone_tool_cap,
+        cfg.bg_max_auto, cfg.bg_circuit_k, cfg.bg_milestone_tool_cap, cfg.bg_max_fix_attempts,
     )
 }
 
@@ -109,6 +109,7 @@ pub(crate) fn run_background_cfg(
     max_auto: usize,
     circuit_k: usize,
     tool_cap: usize,
+    max_fix_attempts: usize,
 ) -> anyhow::Result<BgOutcome> {
     let mut out = BgOutcome::default();
 
@@ -140,47 +141,74 @@ pub(crate) fn run_background_cfg(
             out.mission_state = crate::bg_gate::MissionState::CompletedAllReady;
             break;
         }
-        let step = match advance_one_milestone(
-            provider.clone(),
-            model.clone(),
-            max_tokens,
-            temperature,
-            root.clone(),
-        ) {
-            Ok(Some(s)) => s,
-            Ok(None) => {
-                // 无就绪 milestone。区分"真完成"与"卡在 needs_fix":后者是一个 fresh
-                // 进程发现唯一可动的 milestone 是 needs_fix(无 pending-ready),不能
-                // 假报 CompletedAllReady/exit 0,否则上层误判成功(见回归测试)。
-                if out.mission_state == crate::bg_gate::MissionState::Running {
-                    let g = crate::workgraph::WorkGraph::read(&root);
-                    let needs_fix = g
-                        .nodes
-                        .iter()
-                        .find(|n| n.status == crate::workgraph::NodeStatus::NeedsFix);
-                    out.mission_state = match needs_fix {
-                        Some(n) => crate::bg_gate::MissionState::StuckNeedsFix(n.id),
-                        None => crate::bg_gate::MissionState::CompletedAllReady,
-                    };
+        // 选取:优先就绪(pending)里程碑;无就绪则尝试自恢复一个 needs_fix。
+        let ready_id = { crate::workgraph::WorkGraph::read(&root).next_ready().map(|n| n.id) };
+        let (step, from_retry) = if ready_id.is_some() {
+            match advance_one_milestone(
+                provider.clone(), model.clone(), max_tokens, temperature, root.clone(),
+            ) {
+                Ok(Some(s)) => (s, false),
+                Ok(None) => break, // race-safe:重读后已无就绪
+                Err(e) => {
+                    out.mission_state = crate::bg_gate::MissionState::Error(e.to_string());
+                    break;
                 }
-                break;
             }
-            Err(e) => {
-                // provider 错误:置 Error(ADR 0033),不 ?逃逸成 anyhow Err→exit 1。
-                out.mission_state = crate::bg_gate::MissionState::Error(e.to_string());
-                break;
+        } else {
+            match retry_one_milestone(
+                provider.clone(), model.clone(), max_tokens, temperature, root.clone(), max_fix_attempts,
+            ) {
+                Ok(Some(s)) => (s, true),
+                Ok(None) => {
+                    // 既无就绪、也无可重试 needs_fix → 终态。仅在仍 Running 时置态,
+                    // 区分"真完成"与"卡在 needs_fix(预算耗尽)"。
+                    if out.mission_state == crate::bg_gate::MissionState::Running {
+                        let g = crate::workgraph::WorkGraph::read(&root);
+                        let needs_fix = g
+                            .nodes
+                            .iter()
+                            .find(|n| n.status == crate::workgraph::NodeStatus::NeedsFix);
+                        out.mission_state = match needs_fix {
+                            Some(n) => crate::bg_gate::MissionState::StuckNeedsFix(n.id),
+                            None => crate::bg_gate::MissionState::CompletedAllReady,
+                        };
+                    }
+                    break;
+                }
+                Err(e) => {
+                    out.mission_state = crate::bg_gate::MissionState::Error(e.to_string());
+                    break;
+                }
             }
         };
+
+        // 累积输出(先取 last 再 extend,避免所有权移动)。
         let last = step.subgoals.last().cloned();
         out.final_text.push_str(&step.final_text);
         out.tool_calls.extend(step.tool_calls);
         out.denied.extend(step.denied);
         out.events.extend(step.events);
         out.subgoals.extend(step.subgoals);
-        advanced += 1;
-
         let Some(sg) = last else { break; };
+
+        if from_retry {
+            // 重试的成败由 fix_attempts 预算约束,不计入 max_auto / consecutive_fail /
+            // next_action;下一轮 selection 会再重试(若仍有预算)或落 StuckNeedsFix。
+            continue;
+        }
+        advanced += 1;
         let passed = matches!(sg.verdict, SubgoalVerdict::Pass);
+        if !passed {
+            // 该 milestone 仍有重试预算 → 交给下一轮 selection 自恢复,不计 cf、不走 next_action。
+            let has_budget = {
+                let g = crate::workgraph::WorkGraph::read(&root);
+                g.get(sg.milestone_id).map(|n| n.fix_attempts < max_fix_attempts).unwrap_or(false)
+            };
+            if has_budget {
+                continue;
+            }
+        }
+        // pass,或失败且预算耗尽(硬失败)→ 沿用既有 next_action 语义(BlockedAt/CircuitBreaker/…)。
         if passed {
             consecutive_fail = 0;
         } else {
@@ -194,14 +222,11 @@ pub(crate) fn run_background_cfg(
             crate::bg_gate::GateVerdict::NeedsFix(sg.gate_reason.clone())
         };
         let g = crate::workgraph::WorkGraph::read(&root);
+        // 这里的"预算"指 max_auto 推进预算(本次 run 还能推进多少个里程碑),
+        // 与前面按节点检查的 fix_attempts 重试预算是两回事。
         let budget_left = advanced < max_auto;
         match crate::bg_gate::next_action(
-            &g,
-            sg.milestone_id,
-            &gv,
-            consecutive_fail,
-            budget_left,
-            circuit_k,
+            &g, sg.milestone_id, &gv, consecutive_fail, budget_left, circuit_k,
         ) {
             crate::bg_gate::NextAction::Advance(_) => continue,
             crate::bg_gate::NextAction::Stop(st) => {
@@ -235,7 +260,25 @@ fn drain_bg_events(rx: std::sync::mpsc::Receiver<AgentEvent>, out: &mut BgOutcom
     }
 }
 
-/// 推进 workgraph 的下一个就绪里程碑：跑一个 turn、解析 verdict、写回状态。
+/// 构造 needs_fix 重试的修复 prompt:注入上一轮失败原因 + acceptance,要求先针对
+/// 失败做实际改动,再自评,并以内核可解析的 VERDICT 行结尾。纯函数,便于单测。
+pub(crate) fn build_repair_prompt(m: &crate::workgraph::Milestone, last_failure: &str) -> String {
+    format!(
+        "workgraph milestone #{} ({}) 上一轮验收未通过,需要修复后重试。\n\
+         上一轮失败原因:\n{}\n\n\
+         acceptance: {}\n\n\
+         请针对上述失败原因做出实际代码改动来修复它(不要只解释),然后自评。\
+         你必须以下面这行精确格式结尾(其后不要有任何内容),以便内核解析并自动更新\
+         里程碑状态:\n\
+         VERDICT: <pass|needs_fix|rebuild>",
+        m.id,
+        m.title,
+        last_failure.trim(),
+        if m.acceptance.is_empty() { "(none)" } else { &m.acceptance },
+    )
+}
+
+/// 推进 workgraph 的下一个就绪(pending)里程碑：跑一个 turn、客观门、写回状态。
 /// 无就绪里程碑时返回 `Ok(None)`。daemon 与 background runner 共用此函数。
 pub fn advance_one_milestone(
     provider: Arc<dyn Provider>,
@@ -244,17 +287,10 @@ pub fn advance_one_milestone(
     temperature: f32,
     root: PathBuf,
 ) -> anyhow::Result<Option<BgOutcome>> {
-    use crate::workgraph::{NodeStatus, WorkGraph};
-    let milestone_id = {
+    use crate::workgraph::WorkGraph;
+    let (milestone_id, task_text, title) = {
         let g = WorkGraph::read(&root);
-        match g.next_ready() {
-            Some(n) => n.id,
-            None => return Ok(None),
-        }
-    };
-    let (task_text, title) = {
-        let g = WorkGraph::read(&root);
-        let n = g.get(milestone_id).expect("just read");
+        let Some(n) = g.next_ready() else { return Ok(None); };
         let t = format!(
             "workgraph milestone #{}: {}\nacceptance: {}\n\n\
              Complete this milestone, then self-review. You MUST end your reply \
@@ -264,11 +300,60 @@ pub fn advance_one_milestone(
             n.id, n.title,
             if n.acceptance.is_empty() { "(none)" } else { &n.acceptance },
         );
-        (t, n.title.clone())
+        (n.id, t, n.title.clone())
     };
+    run_milestone_and_gate(provider, model, max_tokens, temperature, root, milestone_id, task_text, title)
+        .map(Some)
+}
+
+/// 自恢复一个 needs_fix 里程碑(ADR 0026 迭代 1)。选 `next_retryable`,**先**递增其
+/// `fix_attempts`(即便 turn 崩溃预算也被尊重),再注入上一轮失败原因构造修复 prompt,
+/// 跑一 turn + 客观门。无可重试项(无 needs_fix 或全部耗尽预算)时返回 `Ok(None)`。
+pub fn retry_one_milestone(
+    provider: Arc<dyn Provider>,
+    model: String,
+    max_tokens: u32,
+    temperature: f32,
+    root: PathBuf,
+    max_fix_attempts: usize,
+) -> anyhow::Result<Option<BgOutcome>> {
+    use crate::workgraph::WorkGraph;
+    let (milestone_id, prompt, title) = {
+        let g = WorkGraph::read(&root);
+        let Some(n) = g.next_retryable(max_fix_attempts) else { return Ok(None); };
+        let last = n
+            .last_failure
+            .clone()
+            .unwrap_or_else(|| "(无记录的失败原因)".to_string());
+        (n.id, build_repair_prompt(n, &last), n.title.clone())
+    };
+    // 先记账再跑:即便本次 turn 崩溃,预算也已消耗,避免无限重试。
+    if let Err(e) = WorkGraph::with_lock(&root, |g| {
+        if let Some(n) = g.nodes.iter_mut().find(|n| n.id == milestone_id) {
+            n.fix_attempts += 1;
+        }
+        Ok(())
+    }) {
+        eprintln!("ccd: fix_attempts bump failed for #{milestone_id}: {e}");
+    }
+    run_milestone_and_gate(provider, model, max_tokens, temperature, root, milestone_id, prompt, title)
+        .map(Some)
+}
+
+/// 跑一个已选定 milestone 的 turn + 客观验收门 + 写回状态。被 `advance_one_milestone`
+/// (pending 常规推进)与 `retry_one_milestone`(needs_fix 自恢复)共用。
+fn run_milestone_and_gate(
+    provider: Arc<dyn Provider>,
+    model: String,
+    max_tokens: u32,
+    temperature: f32,
+    root: PathBuf,
+    milestone_id: u64,
+    task_text: String,
+    title: String,
+) -> anyhow::Result<BgOutcome> {
+    use crate::workgraph::{NodeStatus, WorkGraph};
     let mut agent = AgentLoop::new_background(provider, model, max_tokens, temperature, root.clone());
-    // Each auto-advanced milestone runs on its own agent (own cancel token), so
-    // re-wire SIGINT here too — signal-hook stacks handlers, all tokens get set.
     if let Err(e) = agent.cancel_token().cancel_on_sigint() {
         eprintln!("ccd: SIGINT cancel not wired: {e}");
     }
@@ -281,19 +366,16 @@ pub fn advance_one_milestone(
     agent.run_one_turn(task_text, &tx);
     drop(tx);
     drain_bg_events(rx, &mut out);
-    // provider 错误:让上层 run_background_cfg catch → mission_state=Error(不再 ?逃逸成 exit 1)。
     if let Some(e) = agent.last_error() {
         return Err(anyhow::anyhow!(e.to_string()));
     }
 
-    // ── 客观验收门(覆盖 agent 自报 VERDICT)── spec 2026-07-22
+    // ── 客观验收门(覆盖 agent 自报 VERDICT)──
     let m = {
         let g = WorkGraph::read(&root);
         g.get(milestone_id).expect("just read").clone()
     };
     let tool_cap_hit = out.events.iter().any(|e| e.contains("tool-iteration cap"));
-    // v1 review 门:复用 agent 自产 VERDICT 文本(parse_review)作兜底;
-    // 真正的 review 子代理门为后续增强(spec §5.1 (b))。
     let review_runner = || -> crate::bg_gate::GateVerdict {
         let o = crate::review::parse_review(&out.final_text);
         if !o.unparsed && matches!(o.verdict, crate::review::Verdict::Pass) {
@@ -311,19 +393,25 @@ pub fn advance_one_milestone(
         crate::bg_gate::GateVerdict::NeedsFix(_) => (SubgoalVerdict::NeedsFix, NodeStatus::NeedsFix, "needs_fix"),
         crate::bg_gate::GateVerdict::Inconclusive(_) => (SubgoalVerdict::Inconclusive, NodeStatus::NeedsFix, "inconclusive"),
     };
-    {
-        let _ = WorkGraph::with_lock(&root, |g| {
-            g.set_status(milestone_id, status);
-            if let Some(n) = g.nodes.iter_mut().find(|n| n.id == milestone_id) {
-                n.verdict = Some(vs_str.into());
-            }
-            Ok(())
-        });
-    }
     let gate_reason = match &verdict {
         crate::bg_gate::GateVerdict::Pass => "gate pass".to_string(),
         crate::bg_gate::GateVerdict::NeedsFix(r) | crate::bg_gate::GateVerdict::Inconclusive(r) => r.clone(),
     };
+    {
+        let reason_for_persist = gate_reason.clone();
+        let _ = WorkGraph::with_lock(&root, |g| {
+            g.set_status(milestone_id, status);
+            if let Some(n) = g.nodes.iter_mut().find(|n| n.id == milestone_id) {
+                n.verdict = Some(vs_str.into());
+                if matches!(status, NodeStatus::NeedsFix) {
+                    n.last_failure = Some(reason_for_persist.clone());
+                } else {
+                    n.last_failure = None; // Pass 时清空,避免陈旧原因污染未来重试
+                }
+            }
+            Ok(())
+        });
+    }
     if !matches!(verdict, crate::bg_gate::GateVerdict::Pass) {
         let _ = crate::tool::reason::record_cause(
             &root,
@@ -339,7 +427,7 @@ pub fn advance_one_milestone(
         touched_files: m.touched.clone(),
     });
     out.events.push(format!("milestone #{} ({}) gated: {vs_str}", milestone_id, title));
-    Ok(Some(out))
+    Ok(out)
 }
 
 #[cfg(test)]
@@ -413,6 +501,7 @@ mod tests {
             3,
             2,
             8,
+            0,
         )
         .unwrap();
         assert!(
@@ -439,6 +528,7 @@ mod tests {
             3,
             2,
             8,
+            0,
         )
         .unwrap();
         assert!(
@@ -491,13 +581,29 @@ mod tests {
     }
 
     #[test]
+    fn gate_failure_persists_last_failure_reason() {
+        let dir = std::env::temp_dir().join(format!("cc_lastfail_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        // prose acceptance(无命令模式)+ StubClient 无 VERDICT → 评审门 Inconclusive → NeedsFix。
+        ws(&dir, &[(1, "渲染输出正确", vec![])]);
+        let _ = advance_one_milestone(
+            Arc::new(StubClient), "gpt-4o".into(), 4096, 0.7, dir.clone(),
+        ).unwrap().unwrap();
+        let n = WorkGraph::read(&dir).get(1).unwrap().clone();
+        assert_eq!(n.status, NodeStatus::NeedsFix);
+        assert!(n.last_failure.is_some(), "needs_fix 应记录 last_failure");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn t4_blocked_at_when_dependent_blocked() {
         let dir = std::env::temp_dir().join(format!("cc_t4_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         ws(&dir, &[(1, "false", vec![]), (2, "echo ok", vec![1])]);
         let out = run_background_cfg(
-            Arc::new(StubClient), "gpt-4o".into(), 4096, 0.7, dir.clone(), "".into(), 3, 2, 8,
+            Arc::new(StubClient), "gpt-4o".into(), 4096, 0.7, dir.clone(), "".into(), 3, 2, 8, 0,
         ).unwrap();
         assert_eq!(out.mission_state, MissionState::BlockedAt(1), "{:?}", out.mission_state);
         let _ = std::fs::remove_dir_all(&dir);
@@ -511,7 +617,7 @@ mod tests {
         // 两个独立 milestone,都 fail(false)→ 连续 2 fail → CircuitBreaker。
         ws(&dir, &[(1, "false", vec![]), (2, "false", vec![])]);
         let out = run_background_cfg(
-            Arc::new(StubClient), "gpt-4o".into(), 4096, 0.7, dir.clone(), "".into(), 3, 2, 8,
+            Arc::new(StubClient), "gpt-4o".into(), 4096, 0.7, dir.clone(), "".into(), 3, 2, 8, 0,
         ).unwrap();
         assert_eq!(out.mission_state, MissionState::CircuitBreaker, "{:?}", out.mission_state);
         let _ = std::fs::remove_dir_all(&dir);
@@ -529,7 +635,7 @@ mod tests {
         g.set_status(id, NodeStatus::NeedsFix);
         g.save(&dir).unwrap();
         let out = run_background_cfg(
-            Arc::new(StubClient), "gpt-4o".into(), 256, 0.0, dir.clone(), "".into(), 3, 2, 8,
+            Arc::new(StubClient), "gpt-4o".into(), 256, 0.0, dir.clone(), "".into(), 3, 2, 8, 0,
         ).unwrap();
         assert_eq!(
             out.mission_state,
@@ -565,5 +671,146 @@ mod tests {
             let back: MissionState = serde_json::from_str(&j).unwrap();
             assert_eq!(format!("{back:?}"), format!("{s:?}"));
         }
+    }
+
+    /// 有状态的测试 Provider:前 `fail_until` 次 `complete` 返回 `VERDICT: needs_fix`,
+    /// 其后返回 `VERDICT: pass`。供 retry_one_milestone 测试与 Task 7 共用。
+    struct FlakyProvider {
+        fail_until: usize,
+        calls: std::sync::Mutex<usize>,
+    }
+    impl crate::provider::Provider for FlakyProvider {
+        fn name(&self) -> &str { "flaky" }
+        fn complete(
+            &self,
+            _req: &crate::provider::CompletionRequest,
+        ) -> anyhow::Result<crate::provider::Completion> {
+            use crate::message::{Message, MessageItem, Role};
+            let mut c = self.calls.lock().unwrap();
+            let i = *c;
+            *c += 1;
+            let text = if i < self.fail_until { "VERDICT: needs_fix" } else { "VERDICT: pass" };
+            Ok(Message {
+                id: 0,
+                role: Role::Assistant,
+                items: vec![MessageItem::Text { text: text.into() }],
+            }
+            .into())
+        }
+    }
+
+    #[test]
+    fn retry_one_milestone_bumps_attempt_and_can_pass() {
+        let dir = std::env::temp_dir().join(format!("cc_retry1_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        // 种一个 needs_fix 里程碑(prose acceptance → 走评审门,读 Provider 的 VERDICT)。
+        let mut g = WorkGraph::default();
+        let id = g.add("core", "渲染输出正确", vec![]).unwrap();
+        g.set_status(id, NodeStatus::NeedsFix);
+        g.nodes.iter_mut().find(|n| n.id == id).unwrap().last_failure = Some("上轮失败".into());
+        g.save(&dir).unwrap();
+
+        // Provider 立即 pass(fail_until=0)。
+        let out = retry_one_milestone(
+            Arc::new(FlakyProvider { fail_until: 0, calls: std::sync::Mutex::new(0) }),
+            "m".into(), 4096, 0.0, dir.clone(), 3,
+        ).unwrap();
+        assert!(out.is_some(), "有可重试项应返回 Some");
+        let n = WorkGraph::read(&dir).get(id).unwrap().clone();
+        assert_eq!(n.status, NodeStatus::Done, "pass 后应 Done");
+        assert_eq!(n.fix_attempts, 1, "重试应递增 fix_attempts");
+        assert_eq!(n.last_failure, None, "pass 后应清空 last_failure");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn retry_one_milestone_none_when_nothing_retryable() {
+        let dir = std::env::temp_dir().join(format!("cc_retry0_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        ws(&dir, &[(1, "渲染输出正确", vec![])]); // 默认 Pending,非 needs_fix
+        let out = retry_one_milestone(
+            Arc::new(StubClient), "m".into(), 4096, 0.0, dir.clone(), 3,
+        ).unwrap();
+        assert!(out.is_none(), "无 needs_fix 时应 None");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn workgraph_auto_retries_needs_fix_until_pass() {
+        let dir = std::env::temp_dir().join(format!("cc_selfrec_pass_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        ws(&dir, &[(1, "渲染输出正确", vec![])]); // prose → 评审门读 Provider VERDICT
+        // 首次 advance + retry#1 都 needs_fix,retry#2 pass(fail_until=2)。
+        let out = run_background_cfg(
+            Arc::new(FlakyProvider { fail_until: 2, calls: std::sync::Mutex::new(0) }),
+            "m".into(), 256, 0.0, dir.clone(), "".into(),
+            5, 10, 8, 3,
+        ).unwrap();
+        assert_eq!(out.mission_state, MissionState::CompletedAllReady, "{:?}", out.mission_state);
+        let n = WorkGraph::read(&dir).get(1).unwrap().clone();
+        assert_eq!(n.status, NodeStatus::Done);
+        assert_eq!(n.fix_attempts, 2, "两次重试后通过");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn workgraph_gives_up_after_max_fix_attempts() {
+        let dir = std::env::temp_dir().join(format!("cc_selfrec_giveup_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        ws(&dir, &[(1, "渲染输出正确", vec![])]);
+        // 恒 needs_fix(fail_until 极大)。
+        let out = run_background_cfg(
+            Arc::new(FlakyProvider { fail_until: 9999, calls: std::sync::Mutex::new(0) }),
+            "m".into(), 256, 0.0, dir.clone(), "".into(),
+            10, 10, 8, 2,
+        ).unwrap();
+        assert_eq!(out.mission_state, MissionState::StuckNeedsFix(1), "{:?}", out.mission_state);
+        let n = WorkGraph::read(&dir).get(1).unwrap().clone();
+        assert_eq!(n.fix_attempts, 2, "预算耗尽应等于 max_fix_attempts");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn build_repair_prompt_injects_failure_and_title() {
+        use crate::workgraph::{Milestone, NodeStatus};
+        // acceptance 刻意选一个不出现在失败字符串里的值,使两个 contains 断言互相独立。
+        let m = Milestone {
+            id: 7,
+            title: "CRDT 核心".into(),
+            acceptance: "cargo build --release".into(),
+            deps: vec![],
+            status: NodeStatus::NeedsFix,
+            verdict: None,
+            touched: vec![],
+            fix_attempts: 1,
+            last_failure: Some("gate `cargo test` failed: 2 failed".into()),
+        };
+        let p = build_repair_prompt(&m, "gate `cargo test` failed: 2 failed");
+        assert!(p.contains("CRDT 核心"), "含标题: {p}");
+        assert!(p.contains("gate `cargo test` failed: 2 failed"), "含失败原因: {p}");
+        assert!(p.contains("cargo build --release"), "含 acceptance: {p}");
+        assert!(p.trim_end().ends_with("VERDICT: <pass|needs_fix|rebuild>"), "以 VERDICT 行结尾: {p}");
+    }
+
+    #[test]
+    fn build_repair_prompt_uses_none_for_empty_acceptance() {
+        use crate::workgraph::{Milestone, NodeStatus};
+        let m = Milestone {
+            id: 3,
+            title: "无验收命令".into(),
+            acceptance: String::new(),
+            deps: vec![],
+            status: NodeStatus::NeedsFix,
+            verdict: None,
+            touched: vec![],
+            fix_attempts: 0,
+            last_failure: Some("self-review: NeedsFix".into()),
+        };
+        let p = build_repair_prompt(&m, "self-review: NeedsFix");
+        assert!(p.contains("(none)"), "空 acceptance 应渲染为 (none): {p}");
     }
 }
