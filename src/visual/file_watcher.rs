@@ -33,6 +33,17 @@ impl FileWatcher {
         })
     }
 
+    /// A stub watcher for error recovery.
+    /// Delete this once Phase 2 provides a real fallback.
+    pub fn dummy() -> Self {
+        let (_tx, rx) = mpsc::channel();
+        Self {
+            _watcher: RecommendedWatcher::new(move |_| {}, Config::default())
+                .expect("RecommendedWatcher::new should always succeed"),
+            rx,
+        }
+    }
+
     /// Drain any pending file-change events (used in the main loop).
     pub fn drain_events(&self) -> Vec<notify::Result<Event>> {
         let mut events = Vec::new();
