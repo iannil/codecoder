@@ -81,6 +81,54 @@ impl Config {
     }
 }
 
+/// 解析 dotenv 风格文本为 (key, value):跳过空行/`#` 注释/无 `=` 行;在首个 `=` 切分;
+/// trim key 与 value;去 value 成对的单/双引号。
+pub fn parse_dotenv(text: &str) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let Some((k, v)) = line.split_once('=') else { continue; };
+        let key = k.trim();
+        if key.is_empty() {
+            continue;
+        }
+        let mut val = v.trim();
+        if val.len() >= 2
+            && ((val.starts_with('"') && val.ends_with('"'))
+                || (val.starts_with('\'') && val.ends_with('\'')))
+        {
+            val = &val[1..val.len() - 1];
+        }
+        out.push((key.to_string(), val.to_string()));
+    }
+    out
+}
+
+/// 从 `path` 读 dotenv;对每个 key 仅在进程 env 未设置时 set_var(显式 env 优先)。
+/// 文件不存在/读失败静默返回 0。返回实际注入的 key 数。
+pub fn autoload_ccd_env_from(path: &std::path::Path) -> usize {
+    let Ok(text) = std::fs::read_to_string(path) else { return 0; };
+    let mut injected = 0usize;
+    for (k, v) in parse_dotenv(&text) {
+        if std::env::var(&k).is_err() {
+            unsafe { std::env::set_var(&k, &v); }
+            injected += 1;
+        }
+    }
+    injected
+}
+
+/// 解析项目根(CODECODER_ROOT 或 CWD),自动加载 `<root>/.ccd.env`。入口在 Config::from_env() 之前调用。
+pub fn autoload_ccd_env() -> usize {
+    let root = std::env::var("CODECODER_ROOT")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| std::env::current_dir().unwrap_or_default());
+    autoload_ccd_env_from(&root.join(".ccd.env"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -145,6 +193,42 @@ mod tests {
         unsafe { std::env::set_var("CODECODER_NOOP_NUDGE_THRESHOLD", "5"); }
         assert_eq!(Config::from_env().noop_nudge_threshold, 5);
         unsafe { std::env::remove_var("CODECODER_NOOP_NUDGE_THRESHOLD"); }
+    }
+
+    #[test]
+    fn parse_dotenv_handles_comments_blank_quotes() {
+        let text = "# comment\n\nFOO=bar\nBAZ = \"qux\"\nNOEQ\nA=b=c\n";
+        let pairs = parse_dotenv(text);
+        assert_eq!(pairs, vec![
+            ("FOO".to_string(), "bar".to_string()),
+            ("BAZ".to_string(), "qux".to_string()),   // trim + 去成对引号
+            ("A".to_string(), "b=c".to_string()),      // 只在首个 = 切分
+        ]);
+    }
+
+    #[test]
+    fn autoload_ccd_env_from_injects_unset_not_override() {
+        let dir = tempfile::tempdir().unwrap();
+        let f = dir.path().join(".ccd.env");
+        std::fs::write(&f, "CODECODER_TEST_DOTENV_ZZ=fromfile\nCODECODER_TEST_DOTENV_YY=file2\n").unwrap();
+        unsafe {
+            std::env::remove_var("CODECODER_TEST_DOTENV_ZZ");
+            std::env::set_var("CODECODER_TEST_DOTENV_YY", "explicit");
+        }
+        let n = autoload_ccd_env_from(&f);
+        assert_eq!(std::env::var("CODECODER_TEST_DOTENV_ZZ").unwrap(), "fromfile"); // 未设置 → 注入
+        assert_eq!(std::env::var("CODECODER_TEST_DOTENV_YY").unwrap(), "explicit"); // 已设置 → 不覆盖
+        assert_eq!(n, 1, "only the unset key is injected");
+        unsafe {
+            std::env::remove_var("CODECODER_TEST_DOTENV_ZZ");
+            std::env::remove_var("CODECODER_TEST_DOTENV_YY");
+        }
+    }
+
+    #[test]
+    fn autoload_ccd_env_from_missing_file_is_noop() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(autoload_ccd_env_from(&dir.path().join(".ccd.env")), 0);
     }
 
     #[test]
