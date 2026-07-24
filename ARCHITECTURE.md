@@ -1,6 +1,6 @@
 # CodeCoder 架构
 
-自主 AI agent,Rust 编写,**事件驱动、文件系统即自我**。本文串起 43 个源文件 ↔ 29 个 ADR ↔ 26 个内置工具 ↔ 6 点自我进化诉求,供人与未来 agent 导航。术语以 `CONTEXT.md` 为准,决策依据见 `docs/adr/`。
+自主 AI agent,Rust 编写,**事件驱动、文件系统即自我**。本文串起 43 个源文件 ↔ 30 个 ADR ↔ 26 个内置工具 ↔ 6 点自我进化诉求,供人与未来 agent 导航。术语以 `CONTEXT.md` 为准,决策依据见 `docs/adr/`。
 
 ## 一句话
 
@@ -29,11 +29,11 @@
 
 | 模块 | 职责 | ADR |
 |---|---|---|
-| `main.rs` | 入口分发(`bg_mode_from_env` 路由):`CODECODER_BG_TASK`→显式 BG、`CODECODER_BG_WORKGRAPH=1`→workgraph BG、否则→`run_daemon` | 0016 0026 0033 |
-| `config.rs` | `CODECODER_*` 环境变量 | — |
+| `main.rs` | 入口分发(`bg_mode_from_env` 路由):`CODECODER_BG_TASK`→显式 BG、`CODECODER_BG_WORKGRAPH=1`→workgraph BG、否则→`run_daemon`;**入口最先 `autoload_ccd_env()`**(迭代 4) | 0016 0026 0033 |
+| `config.rs` | `CODECODER_*` 环境变量;**`.ccd.env` 自动加载**(`autoload_ccd_env`,迭代 4):启动时从项目根加载 `KEY=VALUE`,**只注入 `DOTENV_ALLOWED_KEYS` 安全调参白名单**且不覆盖已设 env——密钥/端点/trust 门/loader 变量一律拒绝(仓库本地文件不可信,这些必须来自真实 shell) | — |
 | `message.rs` | `Message`/`MessageItem`/`MessageId`/`Role`(provider 中立) | 0015 0017 |
 | `provider/{mod,openai,stub}` | `Provider` trait;`OpenAiClient`(chat-completions)/`StubClient` | 0017 |
-| `agent.rs` | `AgentLoop`、turn 循环、工具分派、子 agent、ask_user、reload、**workgraph 自动推进(`drive_workgraph`)** | 0016 0019 |
+| `agent.rs` | `AgentLoop`、turn 循环、工具分派、子 agent、ask_user、reload、**workgraph 自动推进(`drive_workgraph`)**、**no-op 探索兜底 nudge**(迭代 4,ADR 0029 修订) | 0016 0019 0029 |
 | `background.rs` | Background Agent headless one-shot runner;`run_background` 驱动一个 turn 到结束,汇总为 `BgOutcome`;**无显式 task 时从 workgraph 取就绪里程碑推进**;**客观验收门覆盖自报 + 失败写回 + continue/stop 策略**;**needs_fix 自恢复循环**(迭代 1):验收 `needs_fix` 后 runner 在预算内(`CODECODER_BG_MAX_FIX_ATTEMPTS`,默认 3,0=禁用)自动把 `last_failure` 注入修复 prompt 重试(`retry_one_milestone`,重试不计入 max_auto/连败熔断);预算耗尽仍 `needs_fix` 才落 `StuckNeedsFix`(退出码 2);重试计数 `fix_attempts` 持久化在 `workgraph.json` 的里程碑上,跨进程尊重预算 | 0026 0030 0033 |
 | `bg_gate.rs` | **BG 客观验收门 + 任务策略**(ADR 0030):`GateVerdict`/命令门/`evaluate`/`next_action`(BlockedAt/CircuitBreaker/CompletedAllReady);纯函数 + 可取消 shell,hermetic 可测;**迭代 3 契约化**:acceptance 支持结构化 `Milestone.command` 通道(显式 command 优先、旧数据启发式兜底),`gate_kind` 单一路由事实源并随 `SubgoalOutcome` 记入账本(强/弱门可观测) | 0030 |
 | `bg_ledger.rs` | **BG 任务账本**(ADR 0033):`append`/`read_recent`/`mission_exit_code`/`format_utc`;JSONL 持久化 + 退出码告警 | 0033 |
@@ -65,6 +65,7 @@
    - 权限闸门(0018):`None` 直跑;`Ask{key}` 查 allowlist,否则发 `PermissionRequest` **阻塞等 oneshot**。
    - `agent`/`review`/`ask_user` 被 `AgentLoop` **拦截**(需 provider/事件通道)。
    - 执行 → `ToolResult` 回灌 → 再问 LLM,直到无工具调用或触及 `MAX_TOOL_ITERATIONS`。
+   - **no-op 兜底**(迭代 4,ADR 0029 修订):连续 `CODECODER_NOOP_NUDGE_THRESHOLD`(默认 3,0=禁用)个「纯探索」迭代(tool_calls 全 ∈ read_file/glob/grep/diff)→ 注入一条 `User` steering 消息推动动手或声明阻塞,并发 `Notice`;非探索工具重置计数,每 turn 至多一次。
 8. 无工具调用 → `TurnComplete` → `run()` 循环自动调用 `drive_workgraph()` 推进 workgraph 就绪里程碑(**Plan #2 自动驱动**)。
 
 ## 工具体系(26 内置)
@@ -149,7 +150,7 @@ codecoder 的「文件系统即自我」覆盖了三层身份与工作/推理层
 
 ## 测试与验证边界
 
-- **314 个离线单元/集成测试**(默认套件,hermetic)+ **3 个 `#[ignore]`**(2 Docker e2e + L3 真实 LLM 冒烟;`cargo test -- --ignored`,部分另需门控 env)。Wasm e2e 在默认套件内(纯进程内)。
+- **336 个离线单元/集成测试**(默认套件,hermetic)+ **3 个 `#[ignore]`**(2 Docker e2e + L3 真实 LLM 冒烟;`cargo test -- --ignored`,部分另需门控 env)。Wasm e2e 在默认套件内(纯进程内)。
 - `tests/` 下为**黑盒行为验证分层**:只编译于 `src/lib.rs` 公共 API,驱动真实 `AgentLoop`+真实工具,断言只落三面(`AgentEvent` 流 / 文件系统+git / `ScriptedProvider` 记录的 `CompletionRequest`)。分层与门控开关见 `docs/testing/behavioral-validation.md`。
 - **L2 pty 冒烟测试已删除**(原 TUI 交互验证);client-server 交互由 daemon+`cc` 的手动验收覆盖。
 - token 计数用 tiktoken(准确);`run_command`/`commit` 走真实 `git`/shell(运行期生效)。

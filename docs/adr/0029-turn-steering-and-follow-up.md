@@ -48,3 +48,12 @@ Input submitted after the turn has fully ended still flows the old way
 pi also has a **next-turn** queue (prepend to the next user prompt) distinct from
 steering/follow-up. One unified queue covers both behaviors here; a separate
 next-turn tier is deferred until a concrete need appears.
+
+## 修订（2026-07-24，迭代 4：no-op 探索兜底）
+
+steering 除用户注入外,新增 **agent 自发 nudge**:turn 内连续
+`CODECODER_NOOP_NUDGE_THRESHOLD`(默认 3,0=禁用)个「纯探索」迭代(该迭代的
+tool_calls 非空且全部 ∈ `EXPLORATION_TOOLS` = read_file/glob/grep/diff)后,内核追加
+一条 `User` steering 消息推动 agent 动手修改或明确声明阻塞原因,并发 `Notice` 事件。
+任一迭代出现非探索工具即重置计数;每 turn 至多注入一次。与迭代 1 的 needs_fix
+自恢复叠加:turn 内先 nudge,若整轮仍无产出则由客观 gate→自恢复循环接手。

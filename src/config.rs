@@ -14,6 +14,9 @@ pub struct Config {
     /// 自适应截断根治:命中 StopReason::Length 时,单 turn 有效 max_tokens 翻倍上调的封顶值
     /// (迭代 2)。env CODECODER_MAX_TOKENS_CEILING,默认 32768。
     pub max_tokens_ceiling: u32,
+    /// no-op 探索兜底(迭代 4):单 turn 内连续多少个「纯探索」迭代后注入一次 steering nudge。
+    /// 0 = 禁用。env CODECODER_NOOP_NUDGE_THRESHOLD,默认 3。
+    pub noop_nudge_threshold: usize,
     pub temperature: f32,
     pub root: PathBuf,
     pub github_token: Option<String>,
@@ -46,6 +49,9 @@ impl Config {
             max_tokens_ceiling: env("CODECODER_MAX_TOKENS_CEILING")
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(32768),
+            noop_nudge_threshold: env("CODECODER_NOOP_NUDGE_THRESHOLD")
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(3),
             temperature: env("CODECODER_TEMPERATURE")
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(0.7),
@@ -73,6 +79,95 @@ impl Config {
                 .unwrap_or(256 * 1024),
         }
     }
+}
+
+/// 解析 dotenv 风格文本为 (key, value):跳过空行/`#` 注释/无 `=` 行;在首个 `=` 切分;
+/// trim key 与 value;去 value 成对的单/双引号。
+pub fn parse_dotenv(text: &str) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let Some((k, v)) = line.split_once('=') else { continue; };
+        let key = k.trim();
+        if key.is_empty() {
+            continue;
+        }
+        let mut val = v.trim();
+        if val.len() >= 2
+            && ((val.starts_with('"') && val.ends_with('"'))
+                || (val.starts_with('\'') && val.ends_with('\'')))
+        {
+            val = &val[1..val.len() - 1];
+        }
+        out.push((key.to_string(), val.to_string()));
+    }
+    out
+}
+
+/// 允许从 `.ccd.env`(仓库本地、可能不可信)注入的键——只含无副作用的调参项。
+/// 刻意排除:密钥/端点(API_KEY/API_BASE/GITHUB_TOKEN)、trust 门(DEFAULT_TRUST)、
+/// 路径/根(ROOT)、执行模式(BG_TASK/BG_WORKGRAPH)、以及一切 loader/shell 敏感变量
+/// (LD_*/DYLD_*/PATH/BASH_ENV/IFS/GIT_*)——这些必须来自用户真实 shell,绝不从仓库文件 source。
+const DOTENV_ALLOWED_KEYS: &[&str] = &[
+    "CODECODER_MODEL",
+    "CODECODER_MAX_TOKENS",
+    "CODECODER_MAX_TOKENS_CEILING",
+    "CODECODER_TEMPERATURE",
+    "CODECODER_MAX_TOOL_OUTPUT",
+    "CODECODER_BG_MAX_AUTO",
+    "CODECODER_BG_CIRCUIT_K",
+    "CODECODER_BG_MILESTONE_TOOL_CAP",
+    "CODECODER_BG_MAX_FIX_ATTEMPTS",
+    "CODECODER_NOOP_NUDGE_THRESHOLD",
+    "CODECODER_SUPERVISOR_CRASH_BUDGET",
+];
+
+/// 从 `path` 读 dotenv;仅对 (a) 在 `DOTENV_ALLOWED_KEYS` 白名单内且 (b) 进程 env 未设置的
+/// key 执行 set_var(显式 env 优先)。安全边界在此:仓库本地文件可能不可信,故密钥/端点/
+/// trust 门/loader/shell 变量一律拒绝注入(记入 rejected 并 eprintln 告警,让恶意文件可见)。
+/// 文件不存在/读失败静默返回 0。返回实际注入的 key 数。
+pub fn autoload_ccd_env_from(path: &std::path::Path) -> usize {
+    let Ok(text) = std::fs::read_to_string(path) else { return 0; };
+    let mut injected: Vec<String> = Vec::new();
+    let mut rejected: Vec<String> = Vec::new();
+    for (k, v) in parse_dotenv(&text) {
+        if !DOTENV_ALLOWED_KEYS.contains(&k.as_str()) {
+            rejected.push(k);
+            continue;
+        }
+        if std::env::var_os(&k).is_none() {
+            unsafe { std::env::set_var(&k, &v); }
+            injected.push(k);
+        }
+    }
+    if !injected.is_empty() {
+        eprintln!(
+            "ccd: loaded {} key(s) from {}: {}",
+            injected.len(),
+            path.display(),
+            injected.join(", ")
+        );
+    }
+    if !rejected.is_empty() {
+        eprintln!(
+            "ccd: ignored {} non-allowlisted key(s) in {} (secrets/endpoints/trust/loader vars are never sourced from a repo file): {}",
+            rejected.len(),
+            path.display(),
+            rejected.join(", ")
+        );
+    }
+    injected.len()
+}
+
+/// 解析项目根(CODECODER_ROOT 或 CWD),自动加载 `<root>/.ccd.env`。入口在 Config::from_env() 之前调用。
+pub fn autoload_ccd_env() -> usize {
+    let root = std::env::var("CODECODER_ROOT")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| std::env::current_dir().unwrap_or_default());
+    autoload_ccd_env_from(&root.join(".ccd.env"))
 }
 
 #[cfg(test)]
@@ -130,6 +225,121 @@ mod tests {
         unsafe { std::env::set_var("CODECODER_MAX_TOKENS_CEILING", "16384"); }
         assert_eq!(Config::from_env().max_tokens_ceiling, 16384);
         unsafe { std::env::remove_var("CODECODER_MAX_TOKENS_CEILING"); }
+    }
+
+    #[test]
+    fn noop_nudge_threshold_default_and_override() {
+        unsafe { std::env::remove_var("CODECODER_NOOP_NUDGE_THRESHOLD"); }
+        assert_eq!(Config::from_env().noop_nudge_threshold, 3);
+        unsafe { std::env::set_var("CODECODER_NOOP_NUDGE_THRESHOLD", "5"); }
+        assert_eq!(Config::from_env().noop_nudge_threshold, 5);
+        unsafe { std::env::remove_var("CODECODER_NOOP_NUDGE_THRESHOLD"); }
+    }
+
+    #[test]
+    fn parse_dotenv_handles_comments_blank_quotes() {
+        let text = "# comment\n\nFOO=bar\nBAZ = \"qux\"\nNOEQ\nA=b=c\n";
+        let pairs = parse_dotenv(text);
+        assert_eq!(pairs, vec![
+            ("FOO".to_string(), "bar".to_string()),
+            ("BAZ".to_string(), "qux".to_string()),   // trim + 去成对引号
+            ("A".to_string(), "b=c".to_string()),      // 只在首个 = 切分
+        ]);
+    }
+
+    #[test]
+    fn autoload_ccd_env_from_injects_unset_not_override() {
+        // 使用真实的白名单键。CODECODER_MAX_TOKENS_CEILING 由专用锁串行化(其他测试也读它),
+        // 顺带覆盖 CODECODER_MODEL(注入)。注意:CODECODER_MODEL 无专用锁,与并行读写它的
+        // 测试之间存在竞态窗口——此处 save/restore 尽力兜底,但不是完全无竞态。
+        let _g = MAX_TOKENS_CEILING_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let prior_model = std::env::var_os("CODECODER_MODEL");
+        let prior_ceiling = std::env::var_os("CODECODER_MAX_TOKENS_CEILING");
+        let dir = tempfile::tempdir().unwrap();
+        let f = dir.path().join(".ccd.env");
+        std::fs::write(
+            &f,
+            "CODECODER_MODEL=fromfile\nCODECODER_MAX_TOKENS_CEILING=file2\n",
+        )
+        .unwrap();
+        unsafe {
+            std::env::remove_var("CODECODER_MODEL"); // 未设置 → 应被注入
+            std::env::set_var("CODECODER_MAX_TOKENS_CEILING", "explicit"); // 已设置 → 不覆盖
+        }
+        let n = autoload_ccd_env_from(&f);
+        assert_eq!(std::env::var("CODECODER_MODEL").unwrap(), "fromfile"); // 未设置 → 注入
+        assert_eq!(std::env::var("CODECODER_MAX_TOKENS_CEILING").unwrap(), "explicit"); // 已设置 → 不覆盖
+        assert_eq!(n, 1, "only the unset key is injected");
+        // 恢复先前值,避免污染其它测试。
+        unsafe {
+            match prior_model {
+                Some(v) => std::env::set_var("CODECODER_MODEL", v),
+                None => std::env::remove_var("CODECODER_MODEL"),
+            }
+            match prior_ceiling {
+                Some(v) => std::env::set_var("CODECODER_MAX_TOKENS_CEILING", v),
+                None => std::env::remove_var("CODECODER_MAX_TOKENS_CEILING"),
+            }
+        }
+    }
+
+    #[test]
+    fn autoload_ccd_env_from_rejects_non_allowlisted_keys() {
+        // 恶意 .ccd.env:loader 注入、凭证、trust 门、PATH 均须被拒;只有白名单键被注入。
+        let _g = MAX_TOKENS_CEILING_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let prior_model = std::env::var_os("CODECODER_MODEL");
+        let dir = tempfile::tempdir().unwrap();
+        let f = dir.path().join(".ccd.env");
+        std::fs::write(
+            &f,
+            "LD_PRELOAD=/evil.so\nCODECODER_API_KEY=stolen\nCODECODER_DEFAULT_TRUST=always\nPATH=/evil\nCODECODER_MODEL=safe-model\n",
+        )
+        .unwrap();
+        // 确保这些危险键在测试前都未设置(注入才有意义;PATH 通常已由 shell 设置,
+        // 但即便如此它也在白名单之外,断言的是"不被本文件的值污染")。
+        let prior_ld = std::env::var_os("LD_PRELOAD");
+        let prior_apikey = std::env::var_os("CODECODER_API_KEY");
+        let prior_trust = std::env::var_os("CODECODER_DEFAULT_TRUST");
+        unsafe {
+            std::env::remove_var("LD_PRELOAD");
+            std::env::remove_var("CODECODER_API_KEY");
+            std::env::remove_var("CODECODER_DEFAULT_TRUST");
+            std::env::remove_var("CODECODER_MODEL");
+        }
+        let n = autoload_ccd_env_from(&f);
+        // 四个危险键:注入前均未设置(PATH 除外——但白名单外,值绝不来自文件),故仍未设置。
+        assert!(std::env::var_os("LD_PRELOAD").is_none(), "LD_PRELOAD must not be injected");
+        assert!(std::env::var_os("CODECODER_API_KEY").is_none(), "API_KEY must not be injected");
+        assert!(std::env::var_os("CODECODER_DEFAULT_TRUST").is_none(), "DEFAULT_TRUST must not be injected");
+        assert_ne!(std::env::var("PATH").ok().as_deref(), Some("/evil"), "PATH must not be sourced from file");
+        // 白名单键被注入。
+        assert_eq!(std::env::var("CODECODER_MODEL").unwrap(), "safe-model");
+        assert_eq!(n, 1, "only the single allowlisted key is injected");
+        // 清理/恢复。
+        unsafe {
+            match prior_model {
+                Some(v) => std::env::set_var("CODECODER_MODEL", v),
+                None => std::env::remove_var("CODECODER_MODEL"),
+            }
+            match prior_ld {
+                Some(v) => std::env::set_var("LD_PRELOAD", v),
+                None => std::env::remove_var("LD_PRELOAD"),
+            }
+            match prior_apikey {
+                Some(v) => std::env::set_var("CODECODER_API_KEY", v),
+                None => std::env::remove_var("CODECODER_API_KEY"),
+            }
+            match prior_trust {
+                Some(v) => std::env::set_var("CODECODER_DEFAULT_TRUST", v),
+                None => std::env::remove_var("CODECODER_DEFAULT_TRUST"),
+            }
+        }
+    }
+
+    #[test]
+    fn autoload_ccd_env_from_missing_file_is_noop() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(autoload_ccd_env_from(&dir.path().join(".ccd.env")), 0);
     }
 
     #[test]
