@@ -1416,13 +1416,6 @@ impl AgentLoop {
     }
 }
 
-/// Build the System prompt from AGENTS.md (identity) + the already-rendered
-/// catalog string (ADR 0020). "Filesystem as self": both come from disk, not
-/// hardcoded. The caller renders the catalog under a brief Registry read-lock
-/// and DROPS that lock before this function does any disk I/O
-/// (`AGENTS.md` read, `WorkGraph::read`) — no `RwLock` guard may span those
-/// reads, otherwise the reload thread's writer would be blocked (and a panic
-/// during I/O would poison the lock).
 /// 小步写纪律(迭代 2):始终注入,减少单次巨量 write_file 被 max_tokens 截断。
 const SMALL_STEP_WRITE_GUIDANCE: &str =
     "When writing a large file, prefer building it up in smaller chunks \
@@ -1430,6 +1423,13 @@ const SMALL_STEP_WRITE_GUIDANCE: &str =
      giant write_file — a single oversized tool call can be cut off at \
      max_tokens and fail.";
 
+/// Build the System prompt from AGENTS.md (identity) + the already-rendered
+/// catalog string (ADR 0020). "Filesystem as self": both come from disk, not
+/// hardcoded. The caller renders the catalog under a brief Registry read-lock
+/// and DROPS that lock before this function does any disk I/O
+/// (`AGENTS.md` read, `WorkGraph::read`) — no `RwLock` guard may span those
+/// reads, otherwise the reload thread's writer would be blocked (and a panic
+/// during I/O would poison the lock).
 fn build_system_prompt_with_catalog(root: &std::path::Path, catalog: &str) -> String {
     let mut parts = Vec::new();
     parts.push(SMALL_STEP_WRITE_GUIDANCE.to_string());
