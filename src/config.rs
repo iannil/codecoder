@@ -1,6 +1,10 @@
 // Runtime configuration from CODECODER_* env vars (see README.md env table).
 use std::path::PathBuf;
 
+/// Serializes tests (across modules in this lib test binary) that read/mutate the
+/// process-global `CODECODER_MAX_TOKENS_CEILING` env var.
+pub(crate) static MAX_TOKENS_CEILING_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 #[derive(Debug, Clone)]
 pub struct Config {
     pub api_key: Option<String>,
@@ -120,6 +124,7 @@ mod tests {
 
     #[test]
     fn max_tokens_ceiling_default_and_override() {
+        let _g = MAX_TOKENS_CEILING_ENV_LOCK.lock().unwrap();
         unsafe { std::env::remove_var("CODECODER_MAX_TOKENS_CEILING"); }
         assert_eq!(Config::from_env().max_tokens_ceiling, 32768);
         unsafe { std::env::set_var("CODECODER_MAX_TOKENS_CEILING", "16384"); }

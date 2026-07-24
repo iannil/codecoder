@@ -2168,6 +2168,8 @@ mod tests {
 
     #[test]
     fn max_tokens_ceiling_defaults_and_setter_overrides() {
+        let _g = crate::config::MAX_TOKENS_CEILING_ENV_LOCK.lock().unwrap();
+        unsafe { std::env::remove_var("CODECODER_MAX_TOKENS_CEILING"); }
         let dir = tempfile::tempdir().unwrap();
         let mut agent = AgentLoop::new(stub_provider(), "m", 256, 0.0, dir.path().to_path_buf());
         // 默认来自 Config::from_env()(env 未设 → 32768)。
