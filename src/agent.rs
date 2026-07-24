@@ -1423,8 +1423,16 @@ impl AgentLoop {
 /// (`AGENTS.md` read, `WorkGraph::read`) — no `RwLock` guard may span those
 /// reads, otherwise the reload thread's writer would be blocked (and a panic
 /// during I/O would poison the lock).
+/// 小步写纪律(迭代 2):始终注入,减少单次巨量 write_file 被 max_tokens 截断。
+const SMALL_STEP_WRITE_GUIDANCE: &str =
+    "When writing a large file, prefer building it up in smaller chunks \
+     (multiple append-style edit_file / write_file calls) rather than one \
+     giant write_file — a single oversized tool call can be cut off at \
+     max_tokens and fail.";
+
 fn build_system_prompt_with_catalog(root: &std::path::Path, catalog: &str) -> String {
     let mut parts = Vec::new();
+    parts.push(SMALL_STEP_WRITE_GUIDANCE.to_string());
     if let Ok(agents) = std::fs::read_to_string(root.join("AGENTS.md")) {
         let agents = agents.trim();
         if !agents.is_empty() {
@@ -2411,6 +2419,14 @@ mod tests {
         let prompt = build_system_prompt_with_catalog(&dir, &catalog);
         assert!(prompt.contains("shared-skill — a shared skill"));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn system_prompt_includes_small_step_write_guidance() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = build_system_prompt(dir.path());
+        assert!(p.contains("append"), "应含小步写引导, prompt={p}");
+        assert!(p.to_lowercase().contains("max_tokens"), "应解释原因, prompt={p}");
     }
 
     #[test]
