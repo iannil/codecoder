@@ -133,9 +133,17 @@ pub(crate) fn run_background_cfg(
             agent
         });
         drain_bg_events(rx, &mut out, &mut obs);
-        let agent = handle.join().expect("bg turn thread panicked");
-        if let Some(e) = agent.last_error() {
-            out.mission_state = crate::bg_gate::MissionState::Error(e.to_string());
+        match handle.join() {
+            Ok(agent) => {
+                if let Some(e) = agent.last_error() {
+                    out.mission_state = crate::bg_gate::MissionState::Error(e.to_string());
+                }
+            }
+            Err(panic) => {
+                let msg = format!("bg turn thread panicked: {}", panic_message(panic));
+                obs.emit("error", &msg);
+                out.mission_state = crate::bg_gate::MissionState::Error(msg);
+            }
         }
         return Ok(out);
     }
@@ -249,6 +257,17 @@ pub(crate) fn run_background_cfg(
     crate::bg_observer::BgObserver::new(&root)
         .emit("mission_state", &format!("{:?}", out.mission_state));
     Ok(out)
+}
+
+/// Extract a human-readable message from a joined thread's panic payload
+/// (`std::thread::Result` Err), so a turn panic becomes a recorded error
+/// instead of aborting the whole headless process.
+fn panic_message(payload: Box<dyn std::any::Any + Send>) -> String {
+    payload
+        .downcast_ref::<&str>()
+        .map(|s| s.to_string())
+        .or_else(|| payload.downcast_ref::<String>().cloned())
+        .unwrap_or_else(|| "unknown panic".to_string())
 }
 
 /// Drain events from a background turn's rx into the BgOutcome accumulator,
@@ -400,7 +419,14 @@ fn run_milestone_and_gate(
         agent // hand the agent back so we can read last_error()
     });
     drain_bg_events(rx, &mut out, &mut obs);
-    let agent = handle.join().expect("bg turn thread panicked");
+    let agent = match handle.join() {
+        Ok(agent) => agent,
+        Err(panic) => {
+            let msg = format!("bg turn thread panicked: {}", panic_message(panic));
+            obs.emit("error", &msg);
+            return Err(anyhow::anyhow!(msg));
+        }
+    };
     if let Some(e) = agent.last_error() {
         return Err(anyhow::anyhow!(e.to_string()));
     }
@@ -539,6 +565,54 @@ mod tests {
         ) -> anyhow::Result<crate::provider::Completion> {
             Err(anyhow::anyhow!("provider down: simulated 503"))
         }
+    }
+
+    /// Panics inside the turn (not a graceful `Err`), exercising the worker-thread
+    /// `join()` panic path — which must be mapped to a recorded error instead of
+    /// aborting the headless process.
+    struct PanicProvider;
+    impl crate::provider::Provider for PanicProvider {
+        fn name(&self) -> &str { "panic" }
+        fn complete(
+            &self,
+            _req: &crate::provider::CompletionRequest,
+        ) -> anyhow::Result<crate::provider::Completion> {
+            panic!("simulated turn panic");
+        }
+    }
+
+    #[test]
+    fn explicit_task_turn_panic_maps_to_error_state() {
+        let dir = std::env::temp_dir().join(format!("cc_panic1_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        // A panicking turn must NOT abort the process; run_background_cfg returns
+        // Ok(out) with mission_state = Error(... panicked ...).
+        let out = run_background_cfg(
+            Arc::new(PanicProvider), "m".into(), 256, 0.0, dir.clone(),
+            "do something".into(), 3, 2, 8, 0,
+        )
+        .expect("must return Ok, not abort");
+        match out.mission_state {
+            MissionState::Error(ref m) => assert!(m.contains("panicked"), "got {m}"),
+            other => panic!("expected Error state, got {other:?}"),
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn advance_one_milestone_turn_panic_returns_err() {
+        let dir = std::env::temp_dir().join(format!("cc_panic2_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        ws(&dir, &[(1, "echo ok", vec![])]); // one ready milestone
+        // A panicking milestone turn must surface as Err, not a process abort.
+        let r = advance_one_milestone(
+            Arc::new(PanicProvider), "m".into(), 256, 0.0, dir.clone(),
+        );
+        let e = r.expect_err("panic must map to Err");
+        assert!(e.to_string().contains("panicked"), "got {e}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

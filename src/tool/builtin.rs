@@ -949,6 +949,13 @@ impl Tool for Confirm {
 mod tests {
     use super::*;
 
+    /// Serializes tests that mutate the process-global `CODECODER_MAX_TOOL_OUTPUT`
+    /// env var. A per-test `Mutex::new(())` gives NO mutual exclusion (each test
+    /// locks its own independent mutex), so parallel runs raced: one test's
+    /// `remove_var` clobbered another's `set_var`, making the truncation marker
+    /// intermittently absent. A single shared lock makes them mutually exclusive.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
     fn read_file_is_permissionless() {
         assert!(matches!(ReadFile.permission(&json!({}), std::path::Path::new(".")), Permission::None));
@@ -990,8 +997,7 @@ mod tests {
             let mut f = std::fs::File::create(&big).unwrap();
             f.write_all("a".repeat(100_000).as_bytes()).unwrap();
         }
-        let lock = std::sync::Mutex::new(());
-        let _g = lock.lock().unwrap();
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         unsafe { std::env::set_var("CODECODER_MAX_TOOL_OUTPUT", "1024"); }
         let mut ctx = crate::tool::ToolCtx::new(&dir);
         let out = ReadFile.run(json!({ "path": "big.txt" }), &mut ctx).unwrap();
@@ -1008,8 +1014,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("cc_rctrunc_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        let lock = std::sync::Mutex::new(());
-        let _g = lock.lock().unwrap();
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         unsafe { std::env::set_var("CODECODER_MAX_TOOL_OUTPUT", "512"); }
         let mut ctx = crate::tool::ToolCtx::new(&dir);
         // seq 1 5000 产出 ~20KB >> 512
