@@ -88,11 +88,11 @@
 
 > 以下是**现状问题**，不是本 spec 要修的内容——列出以便你决定是否单开改动 spec。
 
-1. **空图 → 退出码 0"成功"（headless）。** 空/缺 `workgraph.json` → `CompletedAllReady` → exit 0，什么都没做。`StuckNeedsFix` 修复只覆盖了"只剩 needs_fix"的假成功，**未覆盖"真空图"**。调度器看到"成功"。（这正是 experiment-report #3 的真实内核——当时刻意保留未改。）
+1. **空图 → 退出码 0"成功"（headless）。** 空/缺 `workgraph.json` → `CompletedAllReady` → exit 0，什么都没做。`StuckNeedsFix` 修复只覆盖了"只剩 needs_fix"的假成功，**未覆盖"真空图"**。调度器看到"成功"。（这正是 experiment-report #3 的真实内核——当时刻意保留未改。）**已修（见 docs/superpowers/specs/2026-07-25-workgraph-integrity-fixes-design.md）** — 新增 `MissionState::EmptyGraph` → 退出码 5。
 2. **完全无自动播种。** 没有任何东西从 task/AGENTS.md/LLM 计划派生里程碑。headless `CODECODER_BG_WORKGRAPH=1` 假设有人已填 `workgraph.json`；否则见 #1。
-3. **`read()` 静默吞损坏与更新版本文件**（`:107`）。损坏或 v2 文件与"空"不可区分，下一次 `save` 覆盖 → 数据丢失陷阱。`load()` 正确报错，但 `read()` 丢弃了该错误。
+3. **`read()` 静默吞损坏与更新版本文件**（`:107`）。损坏或 v2 文件与"空"不可区分，下一次 `save` 覆盖 → 数据丢失陷阱。`load()` 正确报错，但 `read()` 丢弃了该错误。**已修（见 docs/superpowers/specs/2026-07-25-workgraph-integrity-fixes-design.md）** — `WorkGraph::read_checked` 把不可读文件备份为 `workgraph.json.corrupt.<pid>` 并中止（Error），不再静默覆盖。
 4. **id 复用隐患。** `next_id=max+1` 非持久计数器；删掉最大 id 节点后，下一次 `add` 复用其 id → `bg_ledger.jsonl` / 因果节点 / 按 id 记的 `verdict`/`last_failure` 历史可能指向另一个里程碑。
-5. **`reason.rs:172-175` 绕过 `with_lock`**（裸 read/add/save），违反 ADR 0035"三处写入统一"，与 daemon tick 或 milestone 工具并发时可丢更新。
+5. **`reason.rs:172-175` 绕过 `with_lock`**（裸 read/add/save），违反 ADR 0035"三处写入统一"，与 daemon tick 或 milestone 工具并发时可丢更新。**已修（见 docs/superpowers/specs/2026-07-25-workgraph-integrity-fixes-design.md）** — `to_milestone` 改走 `with_lock`。
 6. **`drive_workgraph` 写回依赖 LLM 输出可解析的 `VERDICT:` 行**（`agent.rs:1451-1477`）；缺失则里程碑停在 `in_progress` 仅发 notice → 交互自动推进可能静默卡住（headless 有客观门覆盖，不受此影响）。
 7. **同一张图两套写回语义**: 交互 `drive_workgraph` 信任 agent 自报 VERDICT（`agent.rs:1452`），headless `run_milestone_and_gate` 用客观/评审门覆盖（`background.rs`）。同一里程碑可能交互标 `Done`、headless 标 `NeedsFix`。
 
