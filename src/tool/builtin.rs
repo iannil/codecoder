@@ -956,6 +956,12 @@ mod tests {
     /// intermittently absent. A single shared lock makes them mutually exclusive.
     static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+    /// Serializes tests that mutate the process-global capability service registry
+    /// (`crate::capability::services()` / `shutdown_all()`). Without it, parallel
+    /// tests raced: one test's `shutdown_all` / `names().is_empty()` assertion saw
+    /// another test's still-registered service, an intermittent failure.
+    static CAP_SVC_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
     fn read_file_is_permissionless() {
         assert!(matches!(ReadFile.permission(&json!({}), std::path::Path::new(".")), Permission::None));
@@ -1284,6 +1290,7 @@ mod tests {
 
     #[test]
     fn persistent_service_starts_once_then_reports_running() {
+        let _svc = CAP_SVC_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let dir = std::env::temp_dir().join(format!("cc_persist_{}", std::process::id()));
         let capdir = dir.join("capabilities/server");
         std::fs::create_dir_all(&capdir).unwrap();
@@ -1333,6 +1340,7 @@ mod tests {
     #[test]
     #[ignore = "requires a running Docker daemon"]
     fn docker_persistent_service_starts_and_reports_running() {
+        let _svc = CAP_SVC_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let dir = std::env::temp_dir().join(format!("cc_dpers_{}", std::process::id()));
         let capdir = dir.join("capabilities/dpers");
         std::fs::create_dir_all(&capdir).unwrap();
@@ -1371,6 +1379,7 @@ mod tests {
 
     #[test]
     fn ondemand_shell_starts_and_reports() {
+        let _svc = CAP_SVC_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let dir = std::env::temp_dir().join(format!("cc_ondemand_{}", std::process::id()));
         let capdir = dir.join("capabilities/od");
         std::fs::create_dir_all(&capdir).unwrap();
