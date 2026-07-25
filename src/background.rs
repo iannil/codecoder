@@ -119,6 +119,7 @@ pub(crate) fn run_background_cfg(
     // ── 显式任务分支:跑一 turn,不进验收门、不自动推进。──
     if !task.trim().is_empty() {
         out.events.push("task: explicit task".into());
+        let mut obs = crate::bg_observer::BgObserver::start_run(&root);
         let mut agent = AgentLoop::new_background(provider, model, max_tokens, temperature, root);
         // ADR 0026:wire SIGINT → cancel。
         if let Err(e) = agent.cancel_token().cancel_on_sigint() {
@@ -126,9 +127,13 @@ pub(crate) fn run_background_cfg(
         }
         agent.set_tool_cap(tool_cap);
         let (tx, rx) = channel::<AgentEvent>();
-        agent.run_one_turn(task, &tx);
-        drop(tx);
-        drain_bg_events(rx, &mut out);
+        let handle = std::thread::spawn(move || {
+            agent.run_one_turn(task, &tx);
+            drop(tx);
+            agent
+        });
+        drain_bg_events(rx, &mut out, &mut obs);
+        let agent = handle.join().expect("bg turn thread panicked");
         if let Some(e) = agent.last_error() {
             out.mission_state = crate::bg_gate::MissionState::Error(e.to_string());
         }
@@ -136,6 +141,8 @@ pub(crate) fn run_background_cfg(
     }
 
     // ── Workgraph 分支:客观门驱动的 milestone 循环(spec 2026-07-22)。──
+    // Reset the NDJSON event stream once at run start; per-milestone observers append.
+    drop(crate::bg_observer::BgObserver::start_run(&root));
     out.mission_state = crate::bg_gate::MissionState::Running;
     let mut consecutive_fail = 0usize;
     let mut advanced = 0usize;
@@ -238,24 +245,39 @@ pub(crate) fn run_background_cfg(
             }
         }
     }
+    // observability: final mission state (fresh observer — this is the last write).
+    crate::bg_observer::BgObserver::new(&root)
+        .emit("mission_state", &format!("{:?}", out.mission_state));
     Ok(out)
 }
 
-/// Drain events from a background turn's rx into the BgOutcome accumulator.
-fn drain_bg_events(rx: std::sync::mpsc::Receiver<AgentEvent>, out: &mut BgOutcome) {
+/// Drain events from a background turn's rx into the BgOutcome accumulator,
+/// teeing each to the observer for live stderr + NDJSON output.
+fn drain_bg_events(
+    rx: std::sync::mpsc::Receiver<AgentEvent>,
+    out: &mut BgOutcome,
+    obs: &mut crate::bg_observer::BgObserver,
+) {
     for ev in rx.into_iter() {
         match ev {
             AgentEvent::StreamDelta(s) => out.final_text.push_str(&s),
             AgentEvent::ToolStarted { name, .. } => {
+                obs.emit("tool_started", &name);
                 out.tool_calls.push(name.clone());
                 out.events.push(format!("tool: {name}"));
             }
             AgentEvent::ToolFinished { name, is_error, output } => {
                 if is_error {
+                    obs.emit("tool_error", &format!("{name}: {output}"));
                     out.denied.push(format!("{name}: {output}"));
+                } else {
+                    obs.emit("tool_finished", &name);
                 }
             }
-            AgentEvent::Notice(m) => out.events.push(format!("notice: {m}")),
+            AgentEvent::Notice(m) => {
+                obs.emit("notice", &m);
+                out.events.push(format!("notice: {m}"));
+            }
             AgentEvent::Context { pct } => out.events.push(format!("context: {pct}%")),
             AgentEvent::SubAgentMilestone(m) => out.events.push(format!("sub-agent: {m}")),
             _ => {}
@@ -365,10 +387,16 @@ fn run_milestone_and_gate(
     let cancel = agent.cancel_token();
     let mut out = BgOutcome::default();
     out.events.push(format!("task: workgraph milestone #{} ({})", milestone_id, title));
+    let mut obs = crate::bg_observer::BgObserver::new(&root);
+    obs.emit("milestone_start", &format!("#{milestone_id} {title}"));
     let (tx, rx) = channel::<AgentEvent>();
-    agent.run_one_turn(task_text, &tx);
-    drop(tx);
-    drain_bg_events(rx, &mut out);
+    let handle = std::thread::spawn(move || {
+        agent.run_one_turn(task_text, &tx);
+        drop(tx);
+        agent // hand the agent back so we can read last_error()
+    });
+    drain_bg_events(rx, &mut out, &mut obs);
+    let agent = handle.join().expect("bg turn thread panicked");
     if let Some(e) = agent.last_error() {
         return Err(anyhow::anyhow!(e.to_string()));
     }
@@ -400,6 +428,7 @@ fn run_milestone_and_gate(
         crate::bg_gate::GateVerdict::Pass => "gate pass".to_string(),
         crate::bg_gate::GateVerdict::NeedsFix(r) | crate::bg_gate::GateVerdict::Inconclusive(r) => r.clone(),
     };
+    obs.emit("gate", &format!("#{milestone_id} {vs_str}: {gate_reason}"));
     {
         let reason_for_persist = gate_reason.clone();
         let _ = WorkGraph::with_lock(&root, |g| {
