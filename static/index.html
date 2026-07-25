@@ -264,10 +264,12 @@ function renderWorkgraph(data) {
   const inProgress = nodes.filter(n => n.status === 'in_progress');
   const completed = nodes.filter(n => n.status === 'done');
   const needsFix = nodes.filter(n => n.status === 'needs_fix');
+  const blocked = nodes.filter(n => n.status === 'blocked');
 
   const groups = [
     { label: 'In Progress', items: inProgress, color: '#58a6ff' },
     { label: 'Need Fix', items: needsFix, color: '#f85149' },
+    { label: 'Blocked', items: blocked, color: '#a371f7' },
     { label: 'Completed', items: completed, color: '#3fb950' },
     { label: 'Pending', items: pending, color: '#8b949e' },
   ];
