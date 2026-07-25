@@ -7,6 +7,7 @@ pub mod agent;
 pub mod background;
 pub mod bg_gate;
 pub mod bg_ledger;
+pub mod bg_observer;
 pub mod capability;
 pub mod compaction;
 pub mod config;

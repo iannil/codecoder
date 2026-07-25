@@ -132,7 +132,7 @@ project/
 | `CODECODER_DAEMON` | — | 设置后以 daemon 模式启动长驻服务（client-server 架构，无 TUI；见 ADR 0032） |
 | `CODECODER_BG_TASK` | — | 设置后以 Background Agent headless 模式跑完该 task 即退出（无 daemon、无用户在场；权限走 `codecoder.json` 预授权，见 ADR 0026） |
 | `CODECODER_BG_WORKGRAPH` | — | 设为 `1` 时以 headless **workgraph 模式**跑（无显式 task，逐里程碑推进 workgraph；产出 mission_state→退出码 0/2/3/4，见 ADR 0033 修订） |
-| `CODECODER_BG_MAX_AUTO` | `3` | BG workgraph 模式下，单次调用最多推进的里程碑数（ADR 0030） |
+| `CODECODER_BG_MAX_AUTO` | `10` | BG workgraph 模式下，单次调用最多推进的里程碑数（ADR 0030；默认 3→10 见 ADR 0039，熔断 `bg_circuit_k` 仍兜底） |
 | `CODECODER_BG_CIRCUIT_K` | `2` | BG 连续失败里程碑的熔断阈值：连续 K 个 fail 即停止（ADR 0030） |
 | `CODECODER_BG_MILESTONE_TOOL_CAP` | `8` | BG 单里程碑 turn 的工具迭代上限（< 全局 12，防固着；ADR 0030） |
 | `CODECODER_BG_MAX_FIX_ATTEMPTS` | `3` | headless workgraph 中单个 milestone 验收 `needs_fix` 后最多自动重试次数（0 = 禁用自恢复；预算耗尽才落 `StuckNeedsFix`，退出码 2；ADR 0026/0033 修订） |
@@ -144,6 +144,8 @@ project/
 | `GITHUB_TOKEN` | — | GitHub API token（提升 rate limit） |
 
 > **`.ccd.env` 自动加载**：`ccd`/`cc`/headless BG 启动时自动加载项目根（`CODECODER_ROOT` 或 CWD）的 `.ccd.env`（`KEY=VALUE` 每行一条，支持 `#` 注释与引号值；已 gitignore）。**只注入一个安全调参白名单**（`MODEL`、`MAX_TOKENS`、`MAX_TOKENS_CEILING`、`TEMPERATURE`、`MAX_TOOL_OUTPUT`、`BG_MAX_AUTO`、`BG_CIRCUIT_K`、`BG_MILESTONE_TOOL_CAP`、`BG_MAX_FIX_ATTEMPTS`、`NOOP_NUDGE_THRESHOLD`、`SUPERVISOR_CRASH_BUDGET`，均带 `CODECODER_` 前缀），且**不覆盖**已设置的进程 env。密钥/端点（`CODECODER_API_KEY`/`CODECODER_API_BASE`/`GITHUB_TOKEN`）、trust 门（`CODECODER_DEFAULT_TRUST`）与 loader/shell 变量（`LD_*`/`PATH` 等）**一律拒绝注入**并 stderr 告警——`.ccd.env` 是仓库本地文件、可能不可信，这些必须来自你的真实 shell。
+
+> **`.ccd.bg.ndjson` 实时 BG 日志**：headless BG（`CODECODER_BG_TASK`/`CODECODER_BG_WORKGRAPH`）运行期间，`BgObserver` 把每个 BG 事件同时写 stderr 与项目根的 `<root>/.ccd.bg.ndjson`（每行一条 JSON，一次 truncate 开轮 + 逐事件 append 累积整条流；已 gitignore），可 `tail -f` 实时观察进展（ADR 0039）。
 
 ## Background Agent 账本与告警（ADR 0033）
 
@@ -175,7 +177,7 @@ systemd `OnFailure=` / cron 邮件可按非 0 退出码触发告警；账本文�
 
 ```bash
 cargo build      # 编译
-cargo test       # 运行 339 个测试（336 通过 + 3 个 #[ignore]：2 Docker e2e + L3 LLM 冒烟）
+cargo test       # 运行 351 个测试（348 通过 + 3 个 #[ignore]：2 Docker e2e + L3 LLM 冒烟）
                  # tests/ 下为黑盒行为验证分层（L1 默认；L2/L3 门控，见 docs/testing/behavioral-validation.md）
 CODECODER_DAEMON=1 cargo run  # 启动 ccd daemon
 cargo run --bin cc            # 启动 cc 客户端

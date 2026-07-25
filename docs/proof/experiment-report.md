@@ -29,7 +29,7 @@
 
 | # | 问题 | 影响 | 修复方式 |
 |---|------|------|---------|
-| 1 | **Review gate v1 未实现** (`bg_gate.rs:295` panic) | 无 `command` 字段的里程碑无法验收，中文 prose acceptance 不被识别为命令 | 必须给每个 milestone 设置 `command` 字段 |
+| 1 | **Review gate 早已实现**；局限是仅解析 agent 自报 VERDICT。本轮已升级为独立评审(ADR 0039)。`bg_gate.rs:295` 实为单测断言，非运行时 panic。 | 无 `command` 字段的里程碑仅凭自报 VERDICT 验收，易被乐观自评通过 | 已升级为独立只读评审子 agent 覆盖自报(ADR 0039) |
 | 2 | **复合命令 keying (ADR 0036)** | `npm install 2>&1` 的 key 是完整命令串，不在 allowlist 中就拒绝 | 在 AGENTS.md 中指示避免 `2>&1`/`&&` 等 |
 | 3 | **BG_WORKGRAPH 不能自动创建里程碑** | 空 workgraph → 0 工具调用 → exit 0 | 手动预创建 `workgraph.json` |
 | 4 | **bg_max_auto 默认 3** | 默认只能自动推进 3 个里程碑 | 设置 `CODECODER_BG_MAX_AUTO=5` |
@@ -95,14 +95,16 @@ M5 制度+智能+系统   → done ✓ pass  [制度管理搜索/标签]
 
 ### 4.1 CodeCoder 项目本身的缺陷（需修复）
 
+> 以下条目经源码核实为误诊或刻意设计，详见 `docs/superpowers/specs/2026-07-25-codecoder-report-fixes-design.md`。（§4.2 为真实观察到的问题，不在此列。）
+
 | 严重度 | 模块 | 描述 |
 |--------|------|------|
-| 🔴 高 | `bg_gate.rs` | Review gate 未实现 (line 295 panic)。所有依赖 review 验收的里程碑全走不通，必须全部走 command 门 |
-| 🔴 高 | `permission.rs` | ADR 0036 的复合命令 keying 在 headless 开发模式中过于严格。`npm install 2>&1` 这类日常命令无法被简单前缀 `run_command:npm` 覆盖 |
-| 🟡 中 | `background.rs` | BG_WORKGRAPH 不自动创建初始里程碑。空 workgraph 时 exit 0 但无任何产出 |
-| 🟡 中 | `config.rs` | `bg_max_auto` 默认 3 太小。对超过 3 个里程碑的项目需要手动配置 |
-| 🟡 中 | `background.rs` | headless 模式的 stdout 缓冲问题，BG 运行期间无法通过日志实时观察进展 |
-| 🟢 低 | `config.rs` | `.ccd.env` 的安全白名单过滤了 `API_KEY`，但 headless 模式没有其他传递 API_KEY 的便捷方式 |
+| 🔴 高 | `bg_gate.rs` | Review gate 早已实现（`bg_gate.rs:295` 是单测断言，非运行时 panic）；原局限是仅解析 agent 自报 VERDICT，本轮已升级为独立只读评审子 agent 覆盖自报(ADR 0039) |
+| 🔴 高 | `permission.rs` | ADR 0036 的复合命令 keying 在 headless 开发模式中过于严格。`npm install 2>&1` 这类日常命令无法被简单前缀 `run_command:npm` 覆盖 (working-as-designed：ADR 0036 刻意保留——安全优先于 UX) |
+| 🟡 中 | `background.rs` | BG_WORKGRAPH 不自动创建初始里程碑。空 workgraph 时 exit 0 但无任何产出 (working-as-designed：ADR 0033 刻意保留) |
+| 🟡 中 | `config.rs` | `bg_max_auto` 默认 3 太小。对超过 3 个里程碑的项目需要手动配置（已修复：默认改为 10，见 ADR 0039） |
+| 🟡 中 | `background.rs` | headless 模式的 stdout 缓冲问题，BG 运行期间无法通过日志实时观察进展（已修复：`BgObserver` 同写 stderr 与 `.ccd.bg.ndjson`，见 ADR 0039） |
+| 🟢 低 | `config.rs` | `.ccd.env` 的安全白名单过滤了 `API_KEY`，但 headless 模式没有其他传递 API_KEY 的便捷方式 (working-as-designed：`config.rs` 密钥过滤刻意保留——`.ccd.env` 可能不可信，密钥须来自真实 shell) |
 
 ### 4.2 CodeCoder 自主开发中发现的行为问题
 

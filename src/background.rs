@@ -119,6 +119,7 @@ pub(crate) fn run_background_cfg(
     // ── 显式任务分支:跑一 turn,不进验收门、不自动推进。──
     if !task.trim().is_empty() {
         out.events.push("task: explicit task".into());
+        let mut obs = crate::bg_observer::BgObserver::start_run(&root);
         let mut agent = AgentLoop::new_background(provider, model, max_tokens, temperature, root);
         // ADR 0026:wire SIGINT → cancel。
         if let Err(e) = agent.cancel_token().cancel_on_sigint() {
@@ -126,9 +127,13 @@ pub(crate) fn run_background_cfg(
         }
         agent.set_tool_cap(tool_cap);
         let (tx, rx) = channel::<AgentEvent>();
-        agent.run_one_turn(task, &tx);
-        drop(tx);
-        drain_bg_events(rx, &mut out);
+        let handle = std::thread::spawn(move || {
+            agent.run_one_turn(task, &tx);
+            drop(tx);
+            agent
+        });
+        drain_bg_events(rx, &mut out, &mut obs);
+        let agent = handle.join().expect("bg turn thread panicked");
         if let Some(e) = agent.last_error() {
             out.mission_state = crate::bg_gate::MissionState::Error(e.to_string());
         }
@@ -136,6 +141,8 @@ pub(crate) fn run_background_cfg(
     }
 
     // ── Workgraph 分支:客观门驱动的 milestone 循环(spec 2026-07-22)。──
+    // Reset the NDJSON event stream once at run start; per-milestone observers append.
+    drop(crate::bg_observer::BgObserver::start_run(&root));
     out.mission_state = crate::bg_gate::MissionState::Running;
     let mut consecutive_fail = 0usize;
     let mut advanced = 0usize;
@@ -238,24 +245,39 @@ pub(crate) fn run_background_cfg(
             }
         }
     }
+    // observability: final mission state (fresh observer — this is the last write).
+    crate::bg_observer::BgObserver::new(&root)
+        .emit("mission_state", &format!("{:?}", out.mission_state));
     Ok(out)
 }
 
-/// Drain events from a background turn's rx into the BgOutcome accumulator.
-fn drain_bg_events(rx: std::sync::mpsc::Receiver<AgentEvent>, out: &mut BgOutcome) {
+/// Drain events from a background turn's rx into the BgOutcome accumulator,
+/// teeing each to the observer for live stderr + NDJSON output.
+fn drain_bg_events(
+    rx: std::sync::mpsc::Receiver<AgentEvent>,
+    out: &mut BgOutcome,
+    obs: &mut crate::bg_observer::BgObserver,
+) {
     for ev in rx.into_iter() {
         match ev {
             AgentEvent::StreamDelta(s) => out.final_text.push_str(&s),
             AgentEvent::ToolStarted { name, .. } => {
+                obs.emit("tool_started", &name);
                 out.tool_calls.push(name.clone());
                 out.events.push(format!("tool: {name}"));
             }
             AgentEvent::ToolFinished { name, is_error, output } => {
                 if is_error {
+                    obs.emit("tool_error", &format!("{name}: {output}"));
                     out.denied.push(format!("{name}: {output}"));
+                } else {
+                    obs.emit("tool_finished", &name);
                 }
             }
-            AgentEvent::Notice(m) => out.events.push(format!("notice: {m}")),
+            AgentEvent::Notice(m) => {
+                obs.emit("notice", &m);
+                out.events.push(format!("notice: {m}"));
+            }
             AgentEvent::Context { pct } => out.events.push(format!("context: {pct}%")),
             AgentEvent::SubAgentMilestone(m) => out.events.push(format!("sub-agent: {m}")),
             _ => {}
@@ -356,6 +378,10 @@ fn run_milestone_and_gate(
     title: String,
 ) -> anyhow::Result<BgOutcome> {
     use crate::workgraph::{NodeStatus, WorkGraph};
+    // Clone provider/model for the independent review sub-agent BEFORE the
+    // milestone agent consumes them (ADR 0039).
+    let review_provider = provider.clone();
+    let review_model = model.clone();
     let mut agent = AgentLoop::new_background(provider, model, max_tokens, temperature, root.clone());
     if let Err(e) = agent.cancel_token().cancel_on_sigint() {
         eprintln!("ccd: SIGINT cancel not wired: {e}");
@@ -365,10 +391,16 @@ fn run_milestone_and_gate(
     let cancel = agent.cancel_token();
     let mut out = BgOutcome::default();
     out.events.push(format!("task: workgraph milestone #{} ({})", milestone_id, title));
+    let mut obs = crate::bg_observer::BgObserver::new(&root);
+    obs.emit("milestone_start", &format!("#{milestone_id} {title}"));
     let (tx, rx) = channel::<AgentEvent>();
-    agent.run_one_turn(task_text, &tx);
-    drop(tx);
-    drain_bg_events(rx, &mut out);
+    let handle = std::thread::spawn(move || {
+        agent.run_one_turn(task_text, &tx);
+        drop(tx);
+        agent // hand the agent back so we can read last_error()
+    });
+    drain_bg_events(rx, &mut out, &mut obs);
+    let agent = handle.join().expect("bg turn thread panicked");
     if let Some(e) = agent.last_error() {
         return Err(anyhow::anyhow!(e.to_string()));
     }
@@ -379,14 +411,32 @@ fn run_milestone_and_gate(
         g.get(milestone_id).expect("just read").clone()
     };
     let tool_cap_hit = out.events.iter().any(|e| e.contains("tool-iteration cap"));
+    let acceptance = m.acceptance.clone();
+    let review_root = root.clone();
+    let self_report = out.final_text.clone();
+    let cancel_for_review = cancel.clone();
     let review_runner = || -> crate::bg_gate::GateVerdict {
-        let o = crate::review::parse_review(&out.final_text);
-        if !o.unparsed && matches!(o.verdict, crate::review::Verdict::Pass) {
-            crate::bg_gate::GateVerdict::Pass
-        } else if !o.unparsed {
-            crate::bg_gate::GateVerdict::NeedsFix(format!("self-review: {:?}", o.verdict))
-        } else {
-            crate::bg_gate::GateVerdict::Inconclusive("no command gate; review gate deferred in v1".into())
+        // On cancel, don't spend a review call — fall back to self-report parse.
+        if cancel_for_review.is_cancelled() {
+            let o = crate::review::parse_review(&self_report);
+            return if !o.unparsed && matches!(o.verdict, crate::review::Verdict::Pass) {
+                crate::bg_gate::GateVerdict::Pass
+            } else if !o.unparsed {
+                crate::bg_gate::GateVerdict::NeedsFix(format!("self-review: {:?}", o.verdict))
+            } else {
+                crate::bg_gate::GateVerdict::Inconclusive("review skipped (cancelled)".into())
+            };
+        }
+        // Independent read-only review overrides agent self-report.
+        let mut rev = AgentLoop::new_background(
+            review_provider.clone(), review_model.clone(), max_tokens, temperature, review_root.clone(),
+        );
+        let (rtx, _rrx) = channel::<AgentEvent>();
+        let target = format!("workgraph milestone acceptance: {acceptance}");
+        let (outcome, _raw) = rev.run_review(&target, &rtx);
+        match outcome.verdict {
+            crate::review::Verdict::Pass => crate::bg_gate::GateVerdict::Pass,
+            v => crate::bg_gate::GateVerdict::NeedsFix(format!("independent review: {v:?}")),
         }
     };
     let verdict = crate::bg_gate::evaluate(&m, &root, Some(&cancel), &review_runner);
@@ -400,6 +450,7 @@ fn run_milestone_and_gate(
         crate::bg_gate::GateVerdict::Pass => "gate pass".to_string(),
         crate::bg_gate::GateVerdict::NeedsFix(r) | crate::bg_gate::GateVerdict::Inconclusive(r) => r.clone(),
     };
+    obs.emit("gate", &format!("#{milestone_id} {vs_str}: {gate_reason}"));
     {
         let reason_for_persist = gate_reason.clone();
         let _ = WorkGraph::with_lock(&root, |g| {
@@ -747,10 +798,13 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("cc_selfrec_pass_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        ws(&dir, &[(1, "渲染输出正确", vec![])]); // prose → 评审门读 Provider VERDICT
-        // 首次 advance + retry#1 都 needs_fix,retry#2 pass(fail_until=2)。
+        ws(&dir, &[(1, "渲染输出正确", vec![])]); // prose → 评审门跑独立评审子 agent(ADR 0039)
+        // 独立评审门(ADR 0039):每轮里程碑消耗 2 次 Provider 调用——里程碑 agent(偶数下标)
+        // + 独立评审子 agent(奇数下标),门结论取评审调用。评审调用落在下标 1、3、5;
+        // fail_until=5 使下标 0–4 均 needs_fix、下标 5 pass ⇒ 评审序列 needs_fix、needs_fix、pass,
+        // 即 advance + retry#1 都 needs_fix、retry#2 pass ⇒ fix_attempts=2。
         let out = run_background_cfg(
-            Arc::new(FlakyProvider { fail_until: 2, calls: std::sync::Mutex::new(0) }),
+            Arc::new(FlakyProvider { fail_until: 5, calls: std::sync::Mutex::new(0) }),
             "m".into(), 256, 0.0, dir.clone(), "".into(),
             5, 10, 8, 3,
         ).unwrap();
