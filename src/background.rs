@@ -379,7 +379,7 @@ fn run_milestone_and_gate(
 ) -> anyhow::Result<BgOutcome> {
     use crate::workgraph::{NodeStatus, WorkGraph};
     // Clone provider/model for the independent review sub-agent BEFORE the
-    // milestone agent consumes them (ADR 0037).
+    // milestone agent consumes them (ADR 0039).
     let review_provider = provider.clone();
     let review_model = model.clone();
     let mut agent = AgentLoop::new_background(provider, model, max_tokens, temperature, root.clone());
@@ -798,8 +798,8 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("cc_selfrec_pass_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        ws(&dir, &[(1, "渲染输出正确", vec![])]); // prose → 评审门跑独立评审子 agent(ADR 0037)
-        // 独立评审门(ADR 0037):每轮里程碑消耗 2 次 Provider 调用——里程碑 agent(偶数下标)
+        ws(&dir, &[(1, "渲染输出正确", vec![])]); // prose → 评审门跑独立评审子 agent(ADR 0039)
+        // 独立评审门(ADR 0039):每轮里程碑消耗 2 次 Provider 调用——里程碑 agent(偶数下标)
         // + 独立评审子 agent(奇数下标),门结论取评审调用。评审调用落在下标 1、3、5;
         // fail_until=5 使下标 0–4 均 needs_fix、下标 5 pass ⇒ 评审序列 needs_fix、needs_fix、pass,
         // 即 advance + retry#1 都 needs_fix、retry#2 pass ⇒ fix_attempts=2。

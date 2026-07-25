@@ -93,9 +93,9 @@ M5 制度+智能+系统   → done ✓ pass  [制度管理搜索/标签]
 
 ## 四、发现的问题与缺陷
 
-> 以下条目经源码核实为误诊或刻意设计，详见 `docs/superpowers/specs/2026-07-25-codecoder-report-fixes-design.md`。
-
 ### 4.1 CodeCoder 项目本身的缺陷（需修复）
+
+> 以下条目经源码核实为误诊或刻意设计，详见 `docs/superpowers/specs/2026-07-25-codecoder-report-fixes-design.md`。（§4.2 为真实观察到的问题，不在此列。）
 
 | 严重度 | 模块 | 描述 |
 |--------|------|------|

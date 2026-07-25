@@ -1284,7 +1284,7 @@ impl AgentLoop {
     /// Run an independent read-only review sub-agent against `target` and parse
     /// its prose into a structured verdict. Returns both the parsed outcome and
     /// the sub-agent's raw prose. Reused by the `review` tool and the Background
-    /// review gate (ADR 0037).
+    /// review gate (ADR 0039).
     pub fn run_review(
         &mut self,
         target: &str,

@@ -1,4 +1,4 @@
-//! Live observability for headless Background runs (spec 2026-07-25, ADR 0037).
+//! Live observability for headless Background runs (spec 2026-07-25, ADR 0039).
 //! Tees each event to stderr (human) and `<root>/.ccd.bg.ndjson` (machine/tail).
 use std::io::Write;
 use std::path::Path;
