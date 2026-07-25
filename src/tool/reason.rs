@@ -169,14 +169,10 @@ impl Reason {
             node.leverage.as_deref().unwrap_or("(unspecified)"),
         );
 
-        let mut wg = crate::workgraph::WorkGraph::read(ctx.root);
-        match wg.add(&title, &acceptance, vec![]) {
-            Ok(new_id) => {
-                wg.save(ctx.root)?;
-                Ok(ToolOutput::ok(format!(
-                    "converted inference node #{id} → workgraph milestone #{new_id}: {title}"
-                )))
-            }
+        match crate::workgraph::WorkGraph::with_lock(ctx.root, |g| g.add(&title, &acceptance, vec![])) {
+            Ok(new_id) => Ok(ToolOutput::ok(format!(
+                "converted inference node #{id} → workgraph milestone #{new_id}: {title}"
+            ))),
             Err(e) => Ok(ToolOutput::err(e.to_string())),
         }
     }

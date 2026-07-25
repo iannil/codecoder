@@ -131,7 +131,7 @@ project/
 | `CODECODER_ROOT` | 当前目录 | 项目根目录 |
 | `CODECODER_DAEMON` | — | 设置后以 daemon 模式启动长驻服务（client-server 架构，无 TUI；见 ADR 0032） |
 | `CODECODER_BG_TASK` | — | 设置后以 Background Agent headless 模式跑完该 task 即退出（无 daemon、无用户在场；权限走 `codecoder.json` 预授权，见 ADR 0026） |
-| `CODECODER_BG_WORKGRAPH` | — | 设为 `1` 时以 headless **workgraph 模式**跑（无显式 task，逐里程碑推进 workgraph；产出 mission_state→退出码 0/2/3/4，见 ADR 0033 修订） |
+| `CODECODER_BG_WORKGRAPH` | — | 设为 `1` 时以 headless **workgraph 模式**跑（无显式 task，逐里程碑推进 workgraph；产出 mission_state→退出码 0/2/3/4/5=EmptyGraph（空图，需先 seed），见 ADR 0033 修订） |
 | `CODECODER_BG_MAX_AUTO` | `10` | BG workgraph 模式下，单次调用最多推进的里程碑数（ADR 0030；默认 3→10 见 ADR 0039，熔断 `bg_circuit_k` 仍兜底） |
 | `CODECODER_BG_CIRCUIT_K` | `2` | BG 连续失败里程碑的熔断阈值：连续 K 个 fail 即停止（ADR 0030） |
 | `CODECODER_BG_MILESTONE_TOOL_CAP` | `8` | BG 单里程碑 turn 的工具迭代上限（< 全局 12，防固着；ADR 0030） |
@@ -158,9 +158,10 @@ project/
 | `StuckNeedsFix(_)`（needs_fix 重试预算耗尽，见 `CODECODER_BG_MAX_FIX_ATTEMPTS`） | 2 |
 | `CircuitBreaker`（连续失败熔断） | 3 |
 | `Error(_)`（turn/provider 出错） | 4 |
+| `EmptyGraph`（空图，需先 seed） | 5 |
 | SIGINT 取消 | 0（操作者主动，非故障） |
 
-> **退出码可达性**：`CODECODER_BG_TASK=<显式 task>` 产 `Running`→0（provider 错误经 `AgentLoop.last_error` 现也→`Error`→4）；`CODECODER_BG_WORKGRAPH=1` 经 workgraph 分支可达 `CompletedAllReady`/`BlockedAt(2)`/`StuckNeedsFix(2)`/`CircuitBreaker(3)`（ADR 0033 修订）。
+> **退出码可达性**：`CODECODER_BG_TASK=<显式 task>` 产 `Running`→0（provider 错误经 `AgentLoop.last_error` 现也→`Error`→4）；`CODECODER_BG_WORKGRAPH=1` 经 workgraph 分支可达 `CompletedAllReady`/`BlockedAt(2)`/`StuckNeedsFix(2)`/`CircuitBreaker(3)`/`EmptyGraph(5)`（空图，需先 seed）（ADR 0033 修订）。
 
 查账本（直读文件，不经 daemon——BG 运行时 daemon 常不在场）：
 

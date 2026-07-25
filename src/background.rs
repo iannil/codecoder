@@ -150,7 +150,27 @@ pub(crate) fn run_background_cfg(
 
     // ── Workgraph 分支:客观门驱动的 milestone 循环(spec 2026-07-22)。──
     // Reset the NDJSON event stream once at run start; per-milestone observers append.
-    drop(crate::bg_observer::BgObserver::start_run(&root));
+    let mut obs = crate::bg_observer::BgObserver::start_run(&root);
+    // #3 data-loss guard: a present-but-unreadable workgraph.json must never be
+    // silently treated as empty and overwritten — back it up and abort.
+    let graph = match crate::workgraph::WorkGraph::read_checked(&root) {
+        Ok(g) => g,
+        Err(e) => {
+            let bad = root.join("workgraph.json");
+            let backup = root.join(format!("workgraph.json.corrupt.{}", std::process::id()));
+            let _ = std::fs::rename(&bad, &backup);
+            let msg = format!("workgraph.json unreadable ({e}); backed up to {}", backup.display());
+            obs.emit("error", &msg);
+            out.mission_state = crate::bg_gate::MissionState::Error(msg);
+            return Ok(out);
+        }
+    };
+    // #1 honesty: a genuinely empty graph is not "success" — nothing to advance.
+    if graph.nodes.is_empty() {
+        obs.emit("empty", "empty workgraph — nothing to advance; seed workgraph.json first");
+        out.mission_state = crate::bg_gate::MissionState::EmptyGraph;
+        return Ok(out);
+    }
     out.mission_state = crate::bg_gate::MissionState::Running;
     let mut consecutive_fail = 0usize;
     let mut advanced = 0usize;
@@ -333,7 +353,7 @@ pub fn advance_one_milestone(
 ) -> anyhow::Result<Option<BgOutcome>> {
     use crate::workgraph::WorkGraph;
     let (milestone_id, task_text, title) = {
-        let g = WorkGraph::read(&root);
+        let g = WorkGraph::read_checked(&root)?;
         let Some(n) = g.next_ready() else { return Ok(None); };
         let t = format!(
             "workgraph milestone #{}: {}\nacceptance: {}\n\n\
@@ -363,7 +383,7 @@ pub fn retry_one_milestone(
 ) -> anyhow::Result<Option<BgOutcome>> {
     use crate::workgraph::WorkGraph;
     let (milestone_id, prompt, title) = {
-        let g = WorkGraph::read(&root);
+        let g = WorkGraph::read_checked(&root)?;
         let Some(n) = g.next_retryable(max_fix_attempts) else { return Ok(None); };
         let last = n
             .last_failure
@@ -947,5 +967,39 @@ mod tests {
         };
         let p = build_repair_prompt(&m, "self-review: NeedsFix");
         assert!(p.contains("(none)"), "空 acceptance 应渲染为 (none): {p}");
+    }
+
+    #[test]
+    fn workgraph_empty_graph_yields_empty_state() {
+        let dir = std::env::temp_dir().join(format!("cc_empty_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        // Workgraph mode, no workgraph.json → genuinely empty.
+        let out = run_background_cfg(
+            Arc::new(StubClient), "m".into(), 256, 0.0, dir.clone(),
+            String::new(), 3, 2, 8, 0,
+        )
+        .unwrap();
+        assert_eq!(out.mission_state, MissionState::EmptyGraph);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn workgraph_corrupt_file_aborts_and_backs_up() {
+        let dir = std::env::temp_dir().join(format!("cc_corrupt_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("workgraph.json"), "{ not json").unwrap();
+        let out = run_background_cfg(
+            Arc::new(StubClient), "m".into(), 256, 0.0, dir.clone(),
+            String::new(), 3, 2, 8, 0,
+        )
+        .unwrap();
+        assert!(matches!(out.mission_state, MissionState::Error(_)), "got {:?}", out.mission_state);
+        // Original must be preserved (backed up), NOT overwritten with an empty graph.
+        assert!(!dir.join("workgraph.json").exists(), "corrupt file must be renamed away");
+        let backup = dir.join(format!("workgraph.json.corrupt.{}", std::process::id()));
+        assert!(backup.exists(), "backup must exist at {}", backup.display());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

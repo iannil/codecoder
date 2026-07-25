@@ -116,6 +116,31 @@ impl WorkGraph {
         WorkGraph::default()
     }
 
+    /// Like [`read`], but distinguishes an absent/empty graph (Ok) from a
+    /// present-but-unreadable `workgraph.json` (Err). Used by write paths so a
+    /// corrupt or newer-than-supported file is never silently treated as empty
+    /// and overwritten (data-loss guard, spec 2026-07-25). Absent file, a
+    /// `todos.json` migration, and a genuinely empty graph are all `Ok`.
+    pub fn read_checked(root: &Path) -> anyhow::Result<WorkGraph> {
+        match std::fs::read_to_string(path(root)) {
+            // File present and read: content is authoritative — parse or error.
+            Ok(raw) => Self::load(&raw).map_err(|e| {
+                anyhow::anyhow!("workgraph.json at {} is unreadable: {e}", path(root).display())
+            }),
+            // No readable workgraph.json: legacy todos migration, else empty (all legal).
+            Err(_) => {
+                if let Some(wg) = std::fs::read_to_string(root.join("todos.json"))
+                    .ok()
+                    .and_then(|raw| migrate_todos(&raw))
+                {
+                    Ok(wg)
+                } else {
+                    Ok(WorkGraph::default())
+                }
+            }
+        }
+    }
+
     /// Parse raw JSON and migrate forward to `WG_SCHEMA_VERSION` (mirrors
     /// `Session::load`, including refusing a newer-than-supported file).
     pub fn load(raw: &str) -> anyhow::Result<WorkGraph> {
@@ -462,6 +487,41 @@ mod tests {
         // #1 done → #2 unblocks and becomes the next ready node.
         assert_eq!(g.next_ready().map(|n| n.id), Some(2));
         assert_eq!(g.get(2).unwrap().status, NodeStatus::Pending);
+    }
+
+    #[test]
+    fn read_checked_absent_is_ok_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let g = WorkGraph::read_checked(dir.path()).unwrap();
+        assert!(g.nodes.is_empty());
+    }
+
+    #[test]
+    fn read_checked_corrupt_is_err() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("workgraph.json"), "{ not json").unwrap();
+        assert!(WorkGraph::read_checked(dir.path()).is_err());
+    }
+
+    #[test]
+    fn read_checked_newer_schema_is_err() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("workgraph.json"),
+            format!(r#"{{"schema_version":{},"nodes":[]}}"#, WG_SCHEMA_VERSION + 1),
+        )
+        .unwrap();
+        assert!(WorkGraph::read_checked(dir.path()).is_err());
+    }
+
+    #[test]
+    fn read_checked_valid_is_ok() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut g = WorkGraph::default();
+        g.add("m", "acc", vec![]).unwrap();
+        g.save(dir.path()).unwrap();
+        let g2 = WorkGraph::read_checked(dir.path()).unwrap();
+        assert_eq!(g2.nodes.len(), 1);
     }
 
     #[test]

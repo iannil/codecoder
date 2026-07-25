@@ -43,3 +43,20 @@ Dogfooding(用 cc/ccd/BG_WORKGRAPH 从零建一个外部 RGA CRDT 协作编辑�
 - **`StuckNeedsFix(id)`(退出码 2)仅在重试预算耗尽时落**:里程碑验收 `needs_fix` 后,runner 先在预算内(`CODECODER_BG_MAX_FIX_ATTEMPTS`,默认 3,0=禁用)经 `retry_one_milestone` 把 `Milestone.last_failure`(gate 失败原因)注入修复 prompt 自动重试;`WorkGraph::next_retryable` 只选 `fix_attempts < max` 的 needs_fix 节点。既无就绪又无预算内可重试节点时才置 `StuckNeedsFix` → exit 2(此时才需人工/上层介入)。
 - **重试不计入 `max_auto`**:重试的成败由 per-node `fix_attempts` 预算约束,不占推进配额、不累加 `consecutive_fail`、不走 `next_action`。`fix_attempts`/`last_failure` 持久化在 `workgraph.json`,跨进程(fresh BG 调用)尊重预算。
 - **已知取舍**:启用自恢复时,`CircuitBreaker(3)` 的跨里程碑连败熔断实际被 per-node 重试预算 + `max_auto` 取代(重试路径不累加 `consecutive_fail`);未来可让耗尽预算的硬失败里程碑累加独立计数以恢复该熔断。
+
+## 修订(2026-07-25):EmptyGraph 新退出码 5(空图诚实失败)
+
+`docs/superpowers/specs/2026-07-25-workgraph-initialization-analysis.md` foot-gun #1 暴露:headless workgraph 遇**真空图**(`workgraph.json` 缺失/空/零里程碑)时,`advance_one_milestone` 立即 `None` → 旧 `Ok(None)` 分支只区分 `needs_fix`(→`StuckNeedsFix`)与"完成",空图落 `CompletedAllReady` → exit 0,0 工具空跑却假报成功。修订:
+
+- **`MissionState::EmptyGraph` 新终态 → 退出码 5**:headless workgraph 图中无任何里程碑时置 `EmptyGraph`(区别于 `CompletedAllReady` 的真完成),映射进程退出码 **5**——"空图,需先 seed"的诚实失败,不再冒充成功。既有映射不变:`CompletedAllReady`/`Running`→0、`BlockedAt`/`StuckNeedsFix`→2、`CircuitBreaker`→3、`Error`→4。
+- **完整退出码表(现)**:
+
+  | mission_state | exit code |
+  | --- | --- |
+  | `CompletedAllReady` / `Running` | 0 |
+  | `BlockedAt` / `StuckNeedsFix` | 2 |
+  | `CircuitBreaker` | 3 |
+  | `Error` | 4 |
+  | `EmptyGraph` | 5 |
+
+- **配套(同批)**:present-but-unreadable 的 `workgraph.json`(损坏或 `schema_version` 更新)不再被下一次 `save` 静默覆盖,而是备份为 `workgraph.json.corrupt.<pid>` 并以 `Error`(4) 中止(`WorkGraph::read_checked`,修 foot-gun #3);`reason.rs::to_milestone` 改走 `with_lock`(修 foot-gun #5,ADR 0035 一致性)。详见 `docs/superpowers/specs/2026-07-25-workgraph-integrity-fixes-design.md`。
