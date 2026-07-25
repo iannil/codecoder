@@ -137,6 +137,9 @@ pub enum MissionState {
     Running,
     /// 无更多就绪 milestone(全部完成或无就绪)。
     CompletedAllReady,
+    /// 图中无任何里程碑：headless 无事可做。区别于 CompletedAllReady 的"真完成"
+    /// （曾有里程碑且全部到达终态），避免空图 exit 0 假报成功（spec 2026-07-25）。
+    EmptyGraph,
     /// 某 milestone 失败且其下游全部 Blocked,任务无法继续。
     BlockedAt(u64),
     /// 连续 K 个 milestone 失败,熔断。

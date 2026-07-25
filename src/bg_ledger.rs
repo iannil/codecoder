@@ -41,6 +41,7 @@ pub fn ledger_path(root: &Path) -> PathBuf {
 pub fn mission_exit_code(state: &MissionState) -> i32 {
     match state {
         MissionState::CompletedAllReady | MissionState::Running => 0,
+        MissionState::EmptyGraph => 5,
         MissionState::BlockedAt(_) | MissionState::StuckNeedsFix(_) => 2,
         MissionState::CircuitBreaker => 3,
         MissionState::Error(_) => 4,
@@ -217,6 +218,11 @@ mod tests {
         assert_eq!(mission_exit_code(&MissionState::StuckNeedsFix(3)), 2);
         assert_eq!(mission_exit_code(&MissionState::CircuitBreaker), 3);
         assert_eq!(mission_exit_code(&MissionState::Error("e".into())), 4);
+    }
+
+    #[test]
+    fn empty_graph_exit_code_is_5() {
+        assert_eq!(mission_exit_code(&crate::bg_gate::MissionState::EmptyGraph), 5);
     }
 
     #[test]
