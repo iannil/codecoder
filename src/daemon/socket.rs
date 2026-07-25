@@ -186,7 +186,11 @@ pub fn handle_connection(
                 );
             }
             ClientRequest::Status => {
-                let _ = body_tx.send(ServerEvent::Notice { text: "ccd running".into() });
+                let status = {
+                    let g = mgr.lock().unwrap();
+                    g.status()
+                };
+                let _ = body_tx.send(ServerEvent::Status(status));
                 let _ = body_tx.send(ServerEvent::TurnComplete);
             }
             ClientRequest::TreeShow => {

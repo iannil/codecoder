@@ -89,6 +89,23 @@ pub enum ClientRequest {
     TreeClone,
 }
 
+/// 对 Status 请求的响应（daemon 健康状态快照）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DaemonStatus {
+    pub uptime_secs: u64,
+    pub active_sessions: usize,
+    pub session_ids: Vec<String>,
+    pub supervisor_count: usize,
+    pub supervisor_services: Vec<ServiceStatus>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ServiceStatus {
+    pub name: String,
+    pub address: String,
+    pub gave_up: bool,
+}
+
 /// daemon → 客户端的事件。一个 `SendMessage` 会产生一串事件，以 `TurnComplete` 或
 /// `Error` 收尾。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -108,7 +125,8 @@ pub enum ServerEvent {
     /// daemon 级广播通知（来自 event bus，如 workgraph/supervisor）。
     /// 与 per-turn `Notice` 区分：带 `source` 标签，客户端可不同渲染。
     BusNotice { source: String, text: String },
-    /// 会话树视图（响应 `TreeShow`）。
+    /// 对 Status 请求的响应（daemon 健康状态）。
+    Status(DaemonStatus),
     Tree { nodes: Vec<TreeNode> },
 }
 
@@ -375,5 +393,24 @@ mod tests {
         assert_eq!(n.parent, Some(2));
         assert!(n.causal_node.is_none()); // should default to None
         assert!(n.status.is_none()); // should default to None
+    }
+
+    #[test]
+    fn daemon_status_round_trips() {
+        use crate::daemon::proto::{DaemonStatus, ServiceStatus, ServerEvent};
+        let ds = DaemonStatus {
+            uptime_secs: 42,
+            active_sessions: 1,
+            session_ids: vec!["s0000".into()],
+            supervisor_count: 2,
+            supervisor_services: vec![
+                ServiceStatus { name: "web".into(), address: "http://127.0.0.1:8080".into(), gave_up: false },
+                ServiceStatus { name: "db".into(), address: "".into(), gave_up: true },
+            ],
+        };
+        let ev = ServerEvent::Status(ds.clone());
+        let json = serde_json::to_string(&ev).unwrap();
+        let back: ServerEvent = serde_json::from_str(&json).unwrap();
+        assert_eq!(ev, back);
     }
 }

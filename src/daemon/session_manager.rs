@@ -2,6 +2,7 @@
 // 管理器持有每个 session 的 cmd_tx 与 event_rx；turn 级返回原始 AgentEvent，
 // 由 socket 层进行翻译及交互式提示处理（Task 9a）。
 use crate::agent::{AgentCommand, AgentEvent, AgentLoop};
+use crate::daemon::proto::{DaemonStatus, ServiceStatus};
 use crate::provider::Provider;
 use crate::registry::Registry;
 use crate::session::SessionManager;
@@ -30,6 +31,8 @@ pub struct DaemonSessionManager {
     registry: Arc<std::sync::RwLock<Registry>>,
     sessions: HashMap<String, DaemonSession>,
     next_seq: u64,
+    /// Daemon 启动时间，用于计算 uptime。
+    pub started_at: std::time::Instant,
     /// Turn 令牌：用户 turn 在 `drain_agent_events` 全程持有此 Mutex，
     /// workgraph tick 线程用 `try_lock` 探测——拿不到说明有 turn 在跑，跳过。
     /// 这与 `mgr` 的 Mutex 解耦（mgr 锁在 drain 之前释放以保持多客户端活性，
@@ -55,6 +58,7 @@ impl DaemonSessionManager {
             registry,
             sessions: HashMap::new(),
             next_seq: 0,
+            started_at: std::time::Instant::now(),
             turn_token: Arc::new(std::sync::Mutex::new(())),
         }
     }
@@ -169,6 +173,17 @@ impl DaemonSessionManager {
     /// 暴露 daemon root 路径（供 socket 层读 session 文件）。
     pub fn root(&self) -> &std::path::Path {
         &self.root
+    }
+
+    /// 构建 daemon 健康状态快照。
+    pub fn status(&self) -> DaemonStatus {
+        DaemonStatus {
+            uptime_secs: self.started_at.elapsed().as_secs(),
+            active_sessions: self.sessions.len(),
+            session_ids: self.list(),
+            supervisor_count: 0, // 暂缺，Task 4 会填充
+            supervisor_services: vec![],
+        }
     }
 }
 

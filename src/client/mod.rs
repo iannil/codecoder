@@ -167,6 +167,16 @@ pub fn print_event(ev: &ServerEvent) -> bool {
             false
         }
         ServerEvent::BusNotice { source, text } => { println!("· [{source}] {text}"); false }
+        ServerEvent::Status(s) => {
+            println!("daemon status:");
+            println!("  uptime: {}s", s.uptime_secs);
+            println!("  sessions: {} ({})", s.active_sessions, s.session_ids.join(", "));
+            for svc in &s.supervisor_services {
+                let status = if svc.gave_up { "FAILED" } else { "running" };
+                println!("  service: {} ({}) {} @ {}", svc.name, status, svc.address);
+            }
+            false
+        }
         ServerEvent::Tree { nodes } => {
             print!("{}", print_tree(nodes));
             let _ = std::io::stdout().flush();
