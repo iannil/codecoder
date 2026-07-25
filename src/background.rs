@@ -378,6 +378,10 @@ fn run_milestone_and_gate(
     title: String,
 ) -> anyhow::Result<BgOutcome> {
     use crate::workgraph::{NodeStatus, WorkGraph};
+    // Clone provider/model for the independent review sub-agent BEFORE the
+    // milestone agent consumes them (ADR 0037).
+    let review_provider = provider.clone();
+    let review_model = model.clone();
     let mut agent = AgentLoop::new_background(provider, model, max_tokens, temperature, root.clone());
     if let Err(e) = agent.cancel_token().cancel_on_sigint() {
         eprintln!("ccd: SIGINT cancel not wired: {e}");
@@ -407,14 +411,32 @@ fn run_milestone_and_gate(
         g.get(milestone_id).expect("just read").clone()
     };
     let tool_cap_hit = out.events.iter().any(|e| e.contains("tool-iteration cap"));
+    let acceptance = m.acceptance.clone();
+    let review_root = root.clone();
+    let self_report = out.final_text.clone();
+    let cancel_for_review = cancel.clone();
     let review_runner = || -> crate::bg_gate::GateVerdict {
-        let o = crate::review::parse_review(&out.final_text);
-        if !o.unparsed && matches!(o.verdict, crate::review::Verdict::Pass) {
-            crate::bg_gate::GateVerdict::Pass
-        } else if !o.unparsed {
-            crate::bg_gate::GateVerdict::NeedsFix(format!("self-review: {:?}", o.verdict))
-        } else {
-            crate::bg_gate::GateVerdict::Inconclusive("no command gate; review gate deferred in v1".into())
+        // On cancel, don't spend a review call — fall back to self-report parse.
+        if cancel_for_review.is_cancelled() {
+            let o = crate::review::parse_review(&self_report);
+            return if !o.unparsed && matches!(o.verdict, crate::review::Verdict::Pass) {
+                crate::bg_gate::GateVerdict::Pass
+            } else if !o.unparsed {
+                crate::bg_gate::GateVerdict::NeedsFix(format!("self-review: {:?}", o.verdict))
+            } else {
+                crate::bg_gate::GateVerdict::Inconclusive("review skipped (cancelled)".into())
+            };
+        }
+        // Independent read-only review overrides agent self-report.
+        let mut rev = AgentLoop::new_background(
+            review_provider.clone(), review_model.clone(), max_tokens, temperature, review_root.clone(),
+        );
+        let (rtx, _rrx) = channel::<AgentEvent>();
+        let target = format!("workgraph milestone acceptance: {acceptance}");
+        let (outcome, _raw) = rev.run_review(&target, &rtx);
+        match outcome.verdict {
+            crate::review::Verdict::Pass => crate::bg_gate::GateVerdict::Pass,
+            v => crate::bg_gate::GateVerdict::NeedsFix(format!("independent review: {v:?}")),
         }
     };
     let verdict = crate::bg_gate::evaluate(&m, &root, Some(&cancel), &review_runner);
@@ -776,10 +798,13 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("cc_selfrec_pass_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        ws(&dir, &[(1, "渲染输出正确", vec![])]); // prose → 评审门读 Provider VERDICT
-        // 首次 advance + retry#1 都 needs_fix,retry#2 pass(fail_until=2)。
+        ws(&dir, &[(1, "渲染输出正确", vec![])]); // prose → 评审门跑独立评审子 agent(ADR 0037)
+        // 独立评审门(ADR 0037):每轮里程碑消耗 2 次 Provider 调用——里程碑 agent(偶数下标)
+        // + 独立评审子 agent(奇数下标),门结论取评审调用。评审调用落在下标 1、3、5;
+        // fail_until=5 使下标 0–4 均 needs_fix、下标 5 pass ⇒ 评审序列 needs_fix、needs_fix、pass,
+        // 即 advance + retry#1 都 needs_fix、retry#2 pass ⇒ fix_attempts=2。
         let out = run_background_cfg(
-            Arc::new(FlakyProvider { fail_until: 2, calls: std::sync::Mutex::new(0) }),
+            Arc::new(FlakyProvider { fail_until: 5, calls: std::sync::Mutex::new(0) }),
             "m".into(), 256, 0.0, dir.clone(), "".into(),
             5, 10, 8, 3,
         ).unwrap();

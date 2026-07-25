@@ -1136,8 +1136,7 @@ impl AgentLoop {
             let target = args.get("target").and_then(|v| v.as_str()).unwrap_or("the current changes");
             // Hand the sub-agent the drift rubric + output contract, then parse
             // its prose into a structured verdict (docs/design/2026-07-19-review-verdict-rubric.md).
-            let raw = self.spawn_sub_agent_text(crate::review::review_task(target), event_tx);
-            let outcome = crate::review::parse_review(&raw);
+            let (outcome, raw) = self.run_review(target, event_tx);
             return ToolOutcome::Result(MessageItem::ToolResult {
                 call_id: call_id.to_string(),
                 output: crate::review::format_result(&outcome, &raw),
@@ -1280,6 +1279,20 @@ impl AgentLoop {
             output,
             is_error: false,
         })
+    }
+
+    /// Run an independent read-only review sub-agent against `target` and parse
+    /// its prose into a structured verdict. Returns both the parsed outcome and
+    /// the sub-agent's raw prose. Reused by the `review` tool and the Background
+    /// review gate (ADR 0037).
+    pub fn run_review(
+        &mut self,
+        target: &str,
+        event_tx: &Sender<AgentEvent>,
+    ) -> (crate::review::ReviewOutcome, String) {
+        let raw = self.spawn_sub_agent_text(crate::review::review_task(target), event_tx);
+        let outcome = crate::review::parse_review(&raw);
+        (outcome, raw)
     }
 
     /// Run a read-only sub-agent to completion and return its final assistant
@@ -2664,5 +2677,19 @@ mod tests {
         assert_eq!(node["ruling"], serde_json::json!("ruled out: alternative approach failed"));
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn run_review_returns_structured_outcome_under_stub() {
+        use std::sync::mpsc::channel;
+        let dir = tempfile::tempdir().unwrap();
+        let mut agent = AgentLoop::new_background(
+            stub_provider(),
+            "stub".to_string(), 256, 0.0, dir.path().to_path_buf(),
+        );
+        let (tx, _rx) = channel();
+        let (outcome, _raw) = agent.run_review("the current changes", &tx);
+        // Stub yields parseable-or-default review text → a concrete verdict exists.
+        let _ = outcome.verdict; // does not panic; type is ReviewOutcome
     }
 }
