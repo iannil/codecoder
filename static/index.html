@@ -85,14 +85,14 @@ body {
 </div>
 
 <div id="tab-bar">
-  <div class="tab active" data-tab="timeline">实时时间线</div>
-  <div class="tab" data-tab="workgraph">Workgraph</div>
+  <div class="tab" data-tab="timeline">实时时间线</div>
+  <div class="tab active" data-tab="workgraph">Workgraph</div>
   <div class="tab" data-tab="sessions">Session 回放</div>
   <div class="tab" data-tab="tests">测试热力图</div>
 </div>
 
-<div id="timeline" class="tab-content active"><div id="timeline-hint" style="padding:20px;color:#8b949e;line-height:1.6;">⏳ 等待实时事件…<br>daemon 空闲时时间线为空。点上方 <strong>Workgraph</strong> 查看里程碑状态、<strong>Session 回放</strong> 查看历史会话。</div></div>
-<div id="workgraph" class="tab-content"><p style="padding:20px;color:#8b949e;">Workgraph — Phase 2</p></div>
+<div id="timeline" class="tab-content"><div id="timeline-hint" style="padding:20px;color:#8b949e;line-height:1.6;">⏳ 等待实时事件…<br>daemon 空闲时时间线为空。此处在有活动 turn 时实时更新。</div></div>
+<div id="workgraph" class="tab-content active"><p style="padding:20px;color:#8b949e;">Loading workgraph…</p></div>
 <div id="sessions" class="tab-content"><p style="padding:20px;color:#8b949e;">Session 回放 — Phase 3</p></div>
 <div id="tests" class="tab-content"><p style="padding:20px;color:#8b949e;">测试热力图 — Phase 4</p></div>
 
@@ -342,6 +342,9 @@ document.querySelectorAll('#tab-bar .tab').forEach(tab => {
     }
   });
 });
+
+// Landing tab is Workgraph — populate it immediately (don't wait for a click).
+loadWorkgraph();
 
 // Session list (Phase 3)
 async function loadSessions() {
