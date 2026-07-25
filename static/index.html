@@ -91,7 +91,7 @@ body {
   <div class="tab" data-tab="tests">测试热力图</div>
 </div>
 
-<div id="timeline" class="tab-content active"></div>
+<div id="timeline" class="tab-content active"><div id="timeline-hint" style="padding:20px;color:#8b949e;line-height:1.6;">⏳ 等待实时事件…<br>daemon 空闲时时间线为空。点上方 <strong>Workgraph</strong> 查看里程碑状态、<strong>Session 回放</strong> 查看历史会话。</div></div>
 <div id="workgraph" class="tab-content"><p style="padding:20px;color:#8b949e;">Workgraph — Phase 2</p></div>
 <div id="sessions" class="tab-content"><p style="padding:20px;color:#8b949e;">Session 回放 — Phase 3</p></div>
 <div id="tests" class="tab-content"><p style="padding:20px;color:#8b949e;">测试热力图 — Phase 4</p></div>
@@ -194,7 +194,13 @@ function renderEvent(data) {
   }
 }
 
+function clearHint() {
+  const hint = document.getElementById('timeline-hint');
+  if (hint) hint.remove();
+}
+
 function appendReasoning(text) {
+  clearHint();
   const el = document.createElement('div');
   el.className = 'msg reasoning';
   el.innerHTML = '<span class="collapse-btn" onclick="this.parentElement.classList.toggle(\'collapsed\');const b=this.parentElement.querySelector(\'.body\');b.style.display=b.style.display===\'none\'?\'\':\'none\';">[−]</span><div class="body">' + escapeHtml(text) + '</div>';
@@ -202,6 +208,7 @@ function appendReasoning(text) {
 }
 
 function appendToolCard(data) {
+  clearHint();
   toolCounter++;
   const card = document.createElement('div');
   card.className = 'tool-card';
@@ -218,6 +225,7 @@ function appendToolCard(data) {
 }
 
 function appendNotice(text) {
+  clearHint();
   const el = document.createElement('div');
   el.className = 'notice';
   el.textContent = text;
@@ -254,7 +262,7 @@ function renderWorkgraph(data) {
   const rendered = new Set();
   const pending = nodes.filter(n => n.status === 'pending');
   const inProgress = nodes.filter(n => n.status === 'in_progress');
-  const completed = nodes.filter(n => n.status === 'completed');
+  const completed = nodes.filter(n => n.status === 'done');
   const needsFix = nodes.filter(n => n.status === 'needs_fix');
 
   const groups = [
