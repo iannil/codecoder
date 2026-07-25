@@ -13,6 +13,33 @@ fn main() -> anyhow::Result<()> {
 
     match args.as_slice() {
         [] => repl(&sock),
+        [one] if one == "help" || one == "--help" => {
+            println!("cc -- CodeCoder client");
+            println!();
+            println!("USAGE:");
+            println!("  cc <message>           Send a message (one-shot mode)");
+            println!("  cc                     Start interactive REPL");
+            println!("  cc help                Show this help");
+            println!("  cc shutdown            Stop the daemon gracefully");
+            println!("  cc status              Show daemon status");
+            println!("  cc sessions            List all sessions");
+            println!("  cc resume <id>         Resume a session");
+            println!("  cc tree                Show session tree");
+            println!("  cc fork <id>           Navigate session tree (fork)");
+            println!("  cc clone               Clone current session");
+            println!("  cc ledger              Show BG task ledger");
+            println!("  cc ledger --failed     Show only failed BG tasks");
+            println!("  cc ledger --last <n>   Show last N BG tasks");
+            println!("  cc ledger --detail     Show detailed last BG task");
+            println!("  cc services            List running persistent services");
+            println!();
+            println!("REPL commands (inside interactive mode):");
+            println!("  /exit                  Exit REPL");
+            println!("  /tree                  Show session tree");
+            println!("  /fork <id>             Navigate session tree");
+            println!("  /clone                 Clone current session");
+            Ok(())
+        }
         [one] if one == "sessions" => send_one(&sock, ClientRequest::ListSessions),
         [one] if one == "status" => send_one(&sock, ClientRequest::Status),
         [one] if one == "shutdown" => send_one(&sock, ClientRequest::Shutdown),
