@@ -136,7 +136,7 @@ pub fn fetch_open_issues(token: &str, owner: &str, repo: &str) -> anyhow::Result
 
 /// Check which issues are already seeded in the workgraph.
 /// Returns only issues whose number is not referenced in any milestone title.
-fn filter_unseeded_issues(issues: &[GitHubIssue], root: &Path) -> Vec<GitHubIssue> {
+pub fn filter_unseeded_issues(issues: &[GitHubIssue], root: &Path) -> Vec<GitHubIssue> {
     let wg = match WorkGraph::read_checked(root) {
         Ok(g) => g,
         Err(_) => return issues.to_vec(), // empty graph → all issues are unseeded
