@@ -1,6 +1,7 @@
 // Provider trait (ADR 0017): translates the neutral message model to/from a wire
 // protocol. OpenAI chat-completions is canonical; StubClient is the keyless fake.
 use crate::message::Message;
+use std::sync::Arc;
 
 pub mod openai;
 pub mod retry;
@@ -28,6 +29,7 @@ pub enum StopReason {
 }
 
 /// A provider's assembled reply: the neutral Message plus why it stopped.
+#[derive(Debug)]
 pub struct Completion {
     pub message: Message,
     pub stop_reason: StopReason,
@@ -57,4 +59,107 @@ pub trait Provider: Send + Sync {
     /// Blocking completion. (Streaming deltas → AgentEvent is the real design,
     /// ADR 0016; the scaffold returns the assembled Message.)
     fn complete(&self, req: &CompletionRequest) -> anyhow::Result<Completion>;
+}
+
+/// A provider that tries a primary provider first, and on failure falls back to a
+/// secondary provider. Useful for failover across API endpoints or model providers.
+pub struct FallbackProvider {
+    primary: Arc<dyn Provider>,
+    fallback: Arc<dyn Provider>,
+}
+
+impl FallbackProvider {
+    pub fn new(primary: Arc<dyn Provider>, fallback: Arc<dyn Provider>) -> Self {
+        Self { primary, fallback }
+    }
+}
+
+impl Provider for FallbackProvider {
+    fn name(&self) -> &str {
+        "fallback"
+    }
+
+    fn complete(&self, req: &CompletionRequest) -> anyhow::Result<Completion> {
+        match self.primary.complete(req) {
+            Ok(c) => Ok(c),
+            Err(e) => {
+                eprintln!("ccd: primary provider failed: {e}, trying fallback");
+                self.fallback.complete(req)
+            }
+        }
+    }
+}
+
+/// A fake provider that always fails. Used in fallback tests.
+struct AlwaysFailProvider;
+
+impl Provider for AlwaysFailProvider {
+    fn name(&self) -> &str {
+        "always-fail"
+    }
+    fn complete(&self, _req: &CompletionRequest) -> anyhow::Result<Completion> {
+        Err(anyhow::anyhow!("AlwaysFailProvider always fails"))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::message::{MessageItem, Role};
+    use crate::provider::stub::StubClient;
+
+    fn dummy_req() -> CompletionRequest {
+        CompletionRequest {
+            model: "test".into(),
+            messages: vec![],
+            max_tokens: 100,
+            temperature: 0.0,
+            tools: vec![],
+        }
+    }
+
+    /// When the primary succeeds, the fallback is never called.
+    #[test]
+    fn fallback_primary_success() {
+        let primary = Arc::new(StubClient);
+        let fallback = Arc::new(AlwaysFailProvider);
+        let fb = FallbackProvider::new(primary, fallback);
+        let result = fb.complete(&dummy_req());
+        assert!(result.is_ok());
+        let c = result.unwrap();
+        assert_eq!(c.message.role, Role::Assistant);
+        assert!(c.message.items.iter().any(|it| matches!(it, MessageItem::Text { text } if text.contains("stub"))));
+    }
+
+    /// When the primary fails, the fallback is tried and its result returned.
+    #[test]
+    fn fallback_primary_fails_fallback_succeeds() {
+        let primary = Arc::new(AlwaysFailProvider);
+        let fallback = Arc::new(StubClient);
+        let fb = FallbackProvider::new(primary, fallback);
+        let result = fb.complete(&dummy_req());
+        assert!(result.is_ok());
+        let c = result.unwrap();
+        assert_eq!(c.message.role, Role::Assistant);
+        assert!(c.message.items.iter().any(|it| matches!(it, MessageItem::Text { text } if text.contains("stub"))));
+    }
+
+    /// When both primary and fallback fail, the error from the fallback is returned.
+    #[test]
+    fn fallback_both_fail() {
+        let primary = Arc::new(AlwaysFailProvider);
+        let fallback = Arc::new(AlwaysFailProvider);
+        let fb = FallbackProvider::new(primary, fallback);
+        let result = fb.complete(&dummy_req());
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("AlwaysFailProvider"), "error should mention the fallback failure: {err}");
+    }
+
+    /// FallbackProvider name is "fallback".
+    #[test]
+    fn fallback_name() {
+        let fb = FallbackProvider::new(Arc::new(StubClient), Arc::new(StubClient));
+        assert_eq!(fb.name(), "fallback");
+    }
 }

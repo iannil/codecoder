@@ -36,7 +36,7 @@ pub use background::BgOutcome;
 pub use config::Config;
 pub use message::{Message, MessageItem, Role};
 pub use permission::PermScope;
-pub use provider::{Completion, CompletionRequest, Provider, StopReason};
+pub use provider::{Completion, CompletionRequest, FallbackProvider, Provider, StopReason};
 
 /// Provider selection (ADR 0017). An env hook allows a scripted provider to be
 /// injected for the pty smoke layer (L2); real runs use OpenAI or the stub.
@@ -44,10 +44,22 @@ pub fn select_provider(cfg: &Config) -> Arc<dyn Provider> {
     if let Ok(path) = std::env::var("CODECODER_SCRIPT") {
         return Arc::new(provider::stub::ScriptFileProvider::from_path(&path));
     }
-    match cfg.api_key.as_deref() {
-        Some(_) => Arc::new(provider::openai::OpenAiClient::new(cfg)),
-        None => Arc::new(provider::stub::StubClient),
+    let primary = match cfg.api_key.as_deref() {
+        Some(_) => Arc::new(provider::openai::OpenAiClient::new(cfg)) as Arc<dyn Provider>,
+        None => Arc::new(provider::stub::StubClient) as Arc<dyn Provider>,
+    };
+    // When a fallback API base is configured, wrap the primary and a second
+    // OpenAiClient (pointed at the fallback endpoint) in a FallbackProvider.
+    if let Some(ref fallback_base) = cfg.fallback_api_base {
+        let fallback_model = cfg.fallback_model.clone().unwrap_or_else(|| cfg.model.clone());
+        // Build a config clone with the fallback endpoint so OpenAiClient uses it.
+        let mut fb_cfg = cfg.clone();
+        fb_cfg.api_base = fallback_base.clone();
+        fb_cfg.model = fallback_model;
+        let fallback = Arc::new(provider::openai::OpenAiClient::new(&fb_cfg));
+        return Arc::new(provider::FallbackProvider::new(primary, fallback));
     }
+    primary
 }
 
 /// BG 模式的 env 路由结果(ADR 0033)。空 task→workgraph 分支由 background.rs 处理。
