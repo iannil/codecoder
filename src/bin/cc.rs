@@ -33,6 +33,9 @@ fn main() -> anyhow::Result<()> {
             println!("  cc ledger --detail     Show detailed last BG task");
             println!("  cc services            List running persistent services");
             println!("  cc workgraph           Show workgraph milestone status");
+            println!("  cc workgraph-pause     Pause workgraph auto-advance");
+            println!("  cc workgraph-resume    Resume workgraph auto-advance");
+            println!("  cc milestone-reset <id>  Reset a needs_fix milestone to pending");
             println!();
             println!("REPL commands (inside interactive mode):");
             println!("  /exit                  Exit REPL");
@@ -52,6 +55,12 @@ fn main() -> anyhow::Result<()> {
         [one] if one == "clone" => send_one(&sock, ClientRequest::TreeClone),
         [one] if one == "services" => send_one(&sock, ClientRequest::Services),
         [one] if one == "workgraph" => send_one(&sock, ClientRequest::WorkgraphStatus),
+        [one] if one == "workgraph-pause" => send_one(&sock, ClientRequest::WorkgraphPause),
+        [one] if one == "workgraph-resume" => send_one(&sock, ClientRequest::WorkgraphResume),
+        [one, id] if one == "milestone-reset" => {
+            let id: u64 = id.parse().map_err(|e| anyhow::anyhow!("milestone-reset <id>: {e}"))?;
+            send_one(&sock, ClientRequest::MilestoneReset { id })
+        }
         [one, rest @ ..] if one == "ledger" => {
             // 直读 bg_ledger.jsonl,不经 daemon(BG 独立于 daemon)。
             let root = codecoder::Config::from_env().root;

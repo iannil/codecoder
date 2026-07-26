@@ -43,6 +43,8 @@ pub struct DaemonSessionManager {
     pub supervisor: Option<Arc<Mutex<crate::capability::Supervisor>>>,
     /// 后台线程心跳状态。由 daemon::run() 创建并注入。
     pub thread_status: Option<Arc<Mutex<Vec<crate::daemon::proto::ThreadStatus>>>>,
+    /// workgraph 自动推进暂停 flag。由 daemon::run() 创建并注入。
+    pub workgraph_paused: Option<Arc<std::sync::atomic::AtomicBool>>,
 }
 
 impl DaemonSessionManager {
@@ -67,12 +69,55 @@ impl DaemonSessionManager {
             turn_token: Arc::new(std::sync::Mutex::new(())),
             supervisor: None,
             thread_status: None,
+            workgraph_paused: None,
         }
     }
 
     /// 共享的 turn 令牌：`drain_agent_events` 全程持有，workgraph tick 线程探测。
     pub fn turn_token(&self) -> Arc<std::sync::Mutex<()>> {
         self.turn_token.clone()
+    }
+
+    /// 暂停 workgraph 自动推进。返回 true 表示暂停操作已执行。
+    pub fn workgraph_pause(&self) -> bool {
+        if let Some(ref flag) = self.workgraph_paused {
+            flag.store(true, std::sync::atomic::Ordering::SeqCst);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// 恢复 workgraph 自动推进。返回 true 表示恢复操作已执行。
+    pub fn workgraph_resume(&self) -> bool {
+        if let Some(ref flag) = self.workgraph_paused {
+            flag.store(false, std::sync::atomic::Ordering::SeqCst);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// 查询 workgraph 暂停状态。
+    pub fn workgraph_is_paused(&self) -> bool {
+        self.workgraph_paused.as_ref().map_or(false, |f| f.load(std::sync::atomic::Ordering::SeqCst))
+    }
+
+    /// 重置一个 needs_fix 里程碑的状态为 pending（快捷重置）。
+    /// Ok(true) = 重置成功，Ok(false) = 里程碑不存在或非 needs_fix 状态。
+    pub fn milestone_reset(&self, id: u64) -> anyhow::Result<bool> {
+        let root = self.root.clone();
+        crate::workgraph::WorkGraph::with_lock(&root, |g| {
+            let node = g.nodes.iter().find(|n| n.id == id);
+            if node.is_none() {
+                return Ok(false);
+            }
+            let status = node.unwrap().status;
+            if !matches!(status, crate::workgraph::NodeStatus::NeedsFix) {
+                return Ok(false);
+            }
+            Ok(g.set_status(id, crate::workgraph::NodeStatus::Pending))
+        })
     }
 
     /// 新建一个 session，返回其 id。agent 线程立刻进入 `run` 阻塞循环等待命令。
@@ -93,8 +138,6 @@ impl DaemonSessionManager {
         let agent = thread::spawn(move || agent.run(cmd_rx, event_tx));
 
         let forward = thread::spawn(move || {
-            // event_rx 的所有权随 forward 线程；下面 send_message 用 Mutex 取用。
-            // 这里不能持有——DaemonSession 持有 event_rx。故此线程只做 agent 的存活托管。
             drop(agent);
         });
 
@@ -117,7 +160,6 @@ impl DaemonSessionManager {
     }
 
     /// 通用：向某 session 发一条 AgentCommand，返回该轮原始 AgentEvent 流
-    ///（由 socket 层翻译成 ServerEvent 并处理交互式提示）。
     fn dispatch(&mut self, id: &str, cmd: AgentCommand) -> anyhow::Result<Receiver<AgentEvent>> {
         let sess = self.sessions.get(id)
             .ok_or_else(|| anyhow::anyhow!("unknown session: {id}"))?;
@@ -126,9 +168,6 @@ impl DaemonSessionManager {
         let (out_tx, out_rx) = mpsc::channel::<AgentEvent>();
         cmd_tx.send(cmd).map_err(|_| anyhow::anyhow!("agent thread closed"))?;
 
-        // drainer 线程：持有 event_rx Mutex 锁，转发原始 AgentEvent 到临时 mpsc
-        //（recv_timeout(120s) 检测 agent 僵死；Timeout/Disconnected 时直接 drop out_tx，
-        // 让接收端的 recv_timeout 观察 Disconnected）。
         let out_tx_clone = out_tx;
         thread::spawn(move || {
             let rx = event_rx_mutex.lock().unwrap();
@@ -141,7 +180,6 @@ impl DaemonSessionManager {
                     }
                     Err(std::sync::mpsc::RecvTimeoutError::Timeout) |
                          Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
-                        // 直接 drop out_tx，让接收端观察到 Disconnected
                         drop(out_tx_clone);
                         break;
                     }
@@ -171,8 +209,7 @@ impl DaemonSessionManager {
         SessionManager::new(&self.root).list().into_iter().map(|m| m.id).collect()
     }
 
-    /// 导航活动 session 的 leaf 到 target（`cc fork <id>`）。复用 `AgentCommand::Navigate`：
-    /// agent 改 leaf + Phase C 摘要废弃分支 + 自动落盘，发 Notice + TurnComplete。
+    /// 导航活动 session 的 leaf 到 target（`cc fork <id>`）。
     pub fn navigate(&mut self, session_id: &str, target: u64) -> anyhow::Result<Receiver<AgentEvent>> {
         self.dispatch(session_id, AgentCommand::Navigate(target))
     }
@@ -256,7 +293,6 @@ mod tests {
             }
         }
         assert!(saw_complete, "turn must terminate with TurnComplete");
-        // StubClient 产出的回复带文本 → 至少一个 StreamDelta。
         assert!(saw_delta, "stub reply should stream some text");
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -269,7 +305,6 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// C1: turn_token 必须 lock 与 try_lock 行为正确，且跨线程互斥。
     #[test]
     fn turn_token_locks_and_try_locks_correctly() {
         let (mgr, dir) = mgr_with_temp_root();
@@ -277,30 +312,26 @@ mod tests {
         let token2 = mgr.turn_token();
         assert!(Arc::ptr_eq(&token, &token2), "turn_token() returns clones of same Arc");
 
-        // 单线程：可直接 lock、try_lock 成功；持有时 try_lock 失败。
         {
             let _g = token.lock().unwrap();
             assert!(token.try_lock().is_err(), "held token must block try_lock");
         }
         assert!(token.try_lock().is_ok(), "released token must be try_lockable");
 
-        // 跨线程互斥：子线程持有 token 期间，主线程 try_lock 必须返回 Err。
         let token_c = Arc::clone(&token);
         let barrier = Arc::new(std::sync::Barrier::new(2));
         let barrier_c = Arc::clone(&barrier);
         let h = std::thread::spawn(move || {
             let _g = token_c.lock().unwrap();
-            barrier_c.wait(); // 子线程已持有 token
+            barrier_c.wait();
             std::thread::sleep(std::time::Duration::from_millis(80));
-            // _g 释放后退出
         });
-        barrier.wait(); // 子线程已持有 token
+        barrier.wait();
         match token.try_lock() {
-            Err(std::sync::TryLockError::WouldBlock) => (), // 预期：互斥成立
+            Err(std::sync::TryLockError::WouldBlock) => (),
             other => panic!("expected WouldBlock while other thread holds token, got {other:?}"),
         }
         h.join().unwrap();
-        // 子线程释放后，主线程可重新取得
         assert!(token.try_lock().is_ok(), "token must be re-lockable after holder exits");
         let _ = std::fs::remove_dir_all(&dir);
     }

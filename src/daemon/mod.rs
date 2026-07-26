@@ -130,17 +130,34 @@ impl Daemon {
         };
 
         // workgraph 自动推进线程（first-class citizen #2 的 daemon 级形态）：空闲时推进。
+        // 支持运行时暂停/恢复（通过 `cc workgraph-pause` / `cc workgraph-resume` 控制）。
         let shutdown_c2 = shutdown.clone();
         let cfg_for_wg = self.cfg.clone();
         let turn_token_for_wg = Arc::clone(&turn_token);
         let bus_for_wg = Arc::clone(&bus);
         let wg_tick = Duration::from_secs(cfg_for_wg.wg_tick_secs);
         let ts_wg = Arc::clone(&thread_status);
+        // 暂停 flag：true = 暂停（不推进），false = 正常运行。
+        // 由 mgr 的 workgraph_paused 字段同步，workgraph 线程在此读取。
+        let wg_paused = Arc::new(AtomicBool::new(false));
+        // 把 wg_paused 传给 mgr（供 `cc workgraph-pause/resume` 控制）。
+        mgr.lock().unwrap().workgraph_paused = Some(Arc::clone(&wg_paused));
         let wg_handle = std::thread::spawn(move || {
             let mut count = 0u64;
             while !shutdown_c2.load(Ordering::SeqCst) {
                 std::thread::sleep(wg_tick);
                 count += 1;
+                // 检查暂停 flag：暂停时不推进，仅记录心跳。
+                if wg_paused.load(Ordering::SeqCst) {
+                    let mut status = ts_wg.lock().unwrap();
+                    if let Some(s) = status.iter_mut().find(|s| s.name == "workgraph") {
+                        s.last_tick = Some(std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH).unwrap().as_secs());
+                        s.tick_count = count;
+                        s.last_event = "paused".into();
+                    }
+                    continue;
+                }
                 // 拿到 token 才推进，且跨整段 advance 持有；拿不到（有 turn 在跑）跳过。
                 let _guard = match turn_token_for_wg.try_lock() {
                     Ok(g) => g,

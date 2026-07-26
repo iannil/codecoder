@@ -13,6 +13,7 @@ pub struct WorkgraphStatus {
     pub needs_fix: usize,
     pub blocked: usize,
     pub last_advanced: Option<String>,
+    pub paused: bool,
 }
 
 /// 用户对交互式提示的回答（mirrors 5 种 reply 类型，无 oneshot）。
@@ -102,6 +103,14 @@ pub enum ClientRequest {
     Services,
     /// 查询 workgraph 状态（走 daemon 读 workgraph.json，不走 agent）。
     WorkgraphStatus,
+    /// 暂停 workgraph 自动推进（`cc workgraph-pause`）。
+    WorkgraphPause,
+    /// 恢复 workgraph 自动推进（`cc workgraph-resume`）。
+    WorkgraphResume,
+    /// 查询 workgraph 暂停状态（`cc workgraph-status` 附带）。
+    WorkgraphPaused,
+    /// 重置一个 needs_fix 里程碑为 pending（`cc milestone-reset <id>`）。
+    MilestoneReset { id: u64 },
 }
 
 /// 对 Status 请求的响应（daemon 健康状态快照）。
@@ -463,7 +472,7 @@ mod tests {
 
     #[test]
     fn workgraph_status_round_trips() {
-        let ws = WorkgraphStatus { total: 5, pending: 2, done: 2, needs_fix: 1, blocked: 0, last_advanced: None };
+        let ws = WorkgraphStatus { total: 5, pending: 2, done: 2, needs_fix: 1, blocked: 0, last_advanced: None, paused: false };
         let ev = ServerEvent::WorkgraphStatus(ws.clone());
         let json = serde_json::to_string(&ev).unwrap();
         let back: ServerEvent = serde_json::from_str(&json).unwrap();

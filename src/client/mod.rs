@@ -209,6 +209,9 @@ pub fn print_event(ev: &ServerEvent) -> bool {
                 println!("  done:      {}", s.done);
                 println!("  needs_fix: {}", s.needs_fix);
                 println!("  blocked:   {}", s.blocked);
+                if s.paused {
+                    println!("  auto-advance: PAUSED");
+                }
                 if let Some(ref t) = s.last_advanced {
                     println!("  last:      {}", t);
                 }

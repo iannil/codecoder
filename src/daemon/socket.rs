@@ -249,6 +249,7 @@ pub fn handle_connection(
             }
             ClientRequest::WorkgraphStatus => {
                 let root = mgr.lock().unwrap().root().to_path_buf();
+                let paused = mgr.lock().unwrap().workgraph_is_paused();
                 drop(mgr);
                 let g = crate::workgraph::WorkGraph::read(&root);
                 let mut counts = (0usize, 0usize, 0usize, 0usize, 0usize);
@@ -268,7 +269,50 @@ pub fn handle_connection(
                     needs_fix: counts.2,
                     blocked: counts.3,
                     last_advanced: None,
+                    paused,
                 }));
+                let _ = body_tx.send(ServerEvent::TurnComplete);
+            }
+            ClientRequest::WorkgraphPause => {
+                let g = mgr.lock().unwrap();
+                let _ = body_tx.send(ServerEvent::Notice { text: if g.workgraph_pause() {
+                    "workgraph auto-advance paused".into()
+                } else {
+                    "workgraph pause unavailable (no daemon wg thread)".into()
+                }});
+                let _ = body_tx.send(ServerEvent::TurnComplete);
+            }
+            ClientRequest::WorkgraphResume => {
+                let g = mgr.lock().unwrap();
+                let _ = body_tx.send(ServerEvent::Notice { text: if !g.workgraph_resume() {
+                    "workgraph auto-advance resumed".into()
+                } else {
+                    "workgraph resume unavailable (no daemon wg thread)".into()
+                }});
+                let _ = body_tx.send(ServerEvent::TurnComplete);
+            }
+            ClientRequest::WorkgraphPaused => {
+                let paused = mgr.lock().unwrap().workgraph_is_paused();
+                let _ = body_tx.send(ServerEvent::Notice { text: if paused {
+                    "workgraph auto-advance is PAUSED".into()
+                } else {
+                    "workgraph auto-advance is RUNNING".into()
+                }});
+                let _ = body_tx.send(ServerEvent::TurnComplete);
+            }
+            ClientRequest::MilestoneReset { id } => {
+                let g = mgr.lock().unwrap();
+                match g.milestone_reset(id) {
+                    Ok(true) => {
+                        let _ = body_tx.send(ServerEvent::Notice { text: format!("milestone #{id} reset to pending") });
+                    }
+                    Ok(false) => {
+                        let _ = body_tx.send(ServerEvent::Error { message: format!("milestone #{id} not found or not in needs_fix state") });
+                    }
+                    Err(e) => {
+                        let _ = body_tx.send(ServerEvent::Error { message: format!("milestone reset failed: {e}") });
+                    }
+                }
                 let _ = body_tx.send(ServerEvent::TurnComplete);
             }
         }
