@@ -41,6 +41,8 @@ pub struct DaemonSessionManager {
     /// Supervisor 引用，供 `cc services` 查询 Persistent 服务状态。在 daemon::run()
     /// 中初始化后注入。
     pub supervisor: Option<Arc<Mutex<crate::capability::Supervisor>>>,
+    /// 后台线程心跳状态。由 daemon::run() 创建并注入。
+    pub thread_status: Option<Arc<Mutex<Vec<crate::daemon::proto::ThreadStatus>>>>,
 }
 
 impl DaemonSessionManager {
@@ -64,6 +66,7 @@ impl DaemonSessionManager {
             started_at: std::time::Instant::now(),
             turn_token: Arc::new(std::sync::Mutex::new(())),
             supervisor: None,
+            thread_status: None,
         }
     }
 
@@ -181,12 +184,18 @@ impl DaemonSessionManager {
 
     /// 构建 daemon 健康状态快照。
     pub fn status(&self) -> DaemonStatus {
+        use crate::daemon::proto::ThreadStatus;
+        let threads = match &self.thread_status {
+            Some(ts) => ts.lock().unwrap().clone(),
+            None => vec![],
+        };
         DaemonStatus {
             uptime_secs: self.started_at.elapsed().as_secs(),
             active_sessions: self.sessions.len(),
             session_ids: self.list(),
-            supervisor_count: 0, // 暂缺，Task 4 会填充
+            supervisor_count: 0,
             supervisor_services: vec![],
+            threads,
         }
     }
 

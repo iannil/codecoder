@@ -175,6 +175,10 @@ pub fn print_event(ev: &ServerEvent) -> bool {
                 let status = if svc.gave_up { "FAILED" } else { "running" };
                 println!("  service: {} ({}) at {}", svc.name, status, svc.address);
             }
+            for t in &s.threads {
+                let last = t.last_tick.map(|ts| format!("tick={}", ts)).unwrap_or_else(|| "none".into());
+                println!("  thread: {} ({} ticks, last: {}, event: {})", t.name, t.tick_count, last, t.last_event);
+            }
             false
         }
         ServerEvent::Tree { nodes } => {

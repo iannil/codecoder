@@ -112,6 +112,7 @@ pub struct DaemonStatus {
     pub session_ids: Vec<String>,
     pub supervisor_count: usize,
     pub supervisor_services: Vec<ServiceStatus>,
+    pub threads: Vec<ThreadStatus>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -119,6 +120,15 @@ pub struct ServiceStatus {
     pub name: String,
     pub address: String,
     pub gave_up: bool,
+}
+
+/// 后台线程心跳状态快照。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ThreadStatus {
+    pub name: String,
+    pub last_tick: Option<u64>,
+    pub tick_count: u64,
+    pub last_event: String,
 }
 
 /// daemon → 客户端的事件。一个 `SendMessage` 会产生一串事件，以 `TurnComplete` 或
@@ -431,7 +441,7 @@ mod tests {
 
     #[test]
     fn daemon_status_round_trips() {
-        use crate::daemon::proto::{DaemonStatus, ServiceStatus, ServerEvent};
+        use crate::daemon::proto::{DaemonStatus, ServiceStatus, ServerEvent, ThreadStatus};
         let ds = DaemonStatus {
             uptime_secs: 42,
             active_sessions: 1,
@@ -440,6 +450,9 @@ mod tests {
             supervisor_services: vec![
                 ServiceStatus { name: "web".into(), address: "http://127.0.0.1:8080".into(), gave_up: false },
                 ServiceStatus { name: "db".into(), address: "".into(), gave_up: true },
+            ],
+            threads: vec![
+                ThreadStatus { name: "monitor".into(), last_tick: Some(1000), tick_count: 10, last_event: "monitoring".into() },
             ],
         };
         let ev = ServerEvent::Status(ds.clone());

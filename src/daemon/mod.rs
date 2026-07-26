@@ -52,9 +52,19 @@ impl Daemon {
         // 这样 cc shutdown、SIGINT、SIGTERM 均能触发 daemon 退出(均设同一个 flag)。
         let sock_path_for_monitor = socket::default_sock_path(&self.cfg);
         let shutdown_for_monitor = shutdown.clone();
+        let ts_monitor = Arc::clone(&thread_status);
         std::thread::spawn(move || {
+            let mut count = 0u64;
             while !shutdown_for_monitor.load(Ordering::SeqCst) {
                 std::thread::sleep(Duration::from_millis(100));
+                count += 1;
+                let mut status = ts_monitor.lock().unwrap();
+                if let Some(s) = status.iter_mut().find(|s| s.name == "monitor") {
+                    s.last_tick = Some(std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH).unwrap().as_secs());
+                    s.tick_count = count;
+                    s.last_event = "monitoring".into();
+                }
             }
             // shutdown flag 被设,自连接触发 accept 退出阻塞。
             let _ = UnixStream::connect(&sock_path_for_monitor);
@@ -75,18 +85,62 @@ impl Daemon {
                 })
         ));
 
-        // 把 supervisor 引用传给 mgr（供 `cc services` 查询）。
-        mgr.lock().unwrap().supervisor = Some(Arc::clone(&supervisor));
+        // 创建共享线程心跳状态。
+        let thread_status = Arc::new(Mutex::new(Vec::<crate::daemon::proto::ThreadStatus>::new()));
+        // 初始化四个线程的槽位（monitor、supervisor、workgraph、reload）。
+        {
+            let mut ts = thread_status.lock().unwrap();
+            ts.push(crate::daemon::proto::ThreadStatus {
+                name: "monitor".into(),
+                last_tick: None,
+                tick_count: 0,
+                last_event: "initializing".into(),
+            });
+            ts.push(crate::daemon::proto::ThreadStatus {
+                name: "supervisor".into(),
+                last_tick: None,
+                tick_count: 0,
+                last_event: "initializing".into(),
+            });
+            ts.push(crate::daemon::proto::ThreadStatus {
+                name: "workgraph".into(),
+                last_tick: None,
+                tick_count: 0,
+                last_event: "initializing".into(),
+            });
+            ts.push(crate::daemon::proto::ThreadStatus {
+                name: "reload".into(),
+                last_tick: None,
+                tick_count: 0,
+                last_event: "initializing".into(),
+            });
+        }
+
+        // 把 thread_status 传给 mgr（供 `cc status` 查询）。
+        mgr.lock().unwrap().thread_status = Some(Arc::clone(&thread_status));
 
         // 监督线程：周期 supervise（独立线程，避免阻塞 accept）。
         let shutdown_c = shutdown.clone();
         let bus_for_sup = Arc::clone(&bus);
         let sup_supervisor = Arc::clone(&supervisor);
         let sup_tick = Duration::from_secs(self.cfg.supervisor_tick_secs);
+        let ts_sup = Arc::clone(&thread_status);
         let sup_handle = {
             std::thread::spawn(move || {
+                let mut count = 0u64;
                 while !shutdown_c.load(Ordering::SeqCst) {
                     let events = sup_supervisor.lock().unwrap().supervise();
+                    let last_event = events.iter().cloned().collect::<Vec<_>>().join("; ");
+                    count += 1;
+                    {
+                        let mut status = ts_sup.lock().unwrap();
+                        if let Some(s) = status.iter_mut().find(|s| s.name == "supervisor") {
+                            s.last_tick = Some(std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH).unwrap().as_secs());
+                            s.tick_count = count;
+                            s.last_event = if last_event.is_empty() { "no events".into() } else { last_event };
+                        }
+                    }
                     for line in events {
                         bus_for_sup.broadcast("supervisor", &line);
                     }
@@ -97,22 +151,30 @@ impl Daemon {
         };
 
         // workgraph 自动推进线程（first-class citizen #2 的 daemon 级形态）：空闲时推进。
-        // 用户 active turn 优先——通过 try_lock(turn_token) 探测：
-        //   - 用户 turn 在 `drain_agent_events` 全程持有 turn_token（见 socket.rs::handle_connection）；
-        //   - mgr 的 Mutex 不能用于此探测——它在 drain 之前就释放了（Task 9a：多客户端活性）。
-        // 持锁期间推进，确保「turn」与「tick」在 workgraph 上互斥，避免 lost-update。
         let shutdown_c2 = shutdown.clone();
         let cfg_for_wg = self.cfg.clone();
         let turn_token_for_wg = Arc::clone(&turn_token);
         let bus_for_wg = Arc::clone(&bus);
         let wg_tick = Duration::from_secs(cfg_for_wg.wg_tick_secs);
+        let ts_wg = Arc::clone(&thread_status);
         let wg_handle = std::thread::spawn(move || {
+            let mut count = 0u64;
             while !shutdown_c2.load(Ordering::SeqCst) {
                 std::thread::sleep(wg_tick);
+                count += 1;
                 // 拿到 token 才推进，且跨整段 advance 持有；拿不到（有 turn 在跑）跳过。
                 let _guard = match turn_token_for_wg.try_lock() {
                     Ok(g) => g,
-                    Err(_) => continue,
+                    Err(_) => {
+                        let mut status = ts_wg.lock().unwrap();
+                        if let Some(s) = status.iter_mut().find(|s| s.name == "workgraph") {
+                            s.last_tick = Some(std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH).unwrap().as_secs());
+                            s.tick_count = count;
+                            s.last_event = "skipped (turn active)".into();
+                        }
+                        continue;
+                    }
                 };
                 // advance 内部自建 agent，不复用 mgr；故此处不锁 mgr
                 let provider = crate::select_provider(&cfg_for_wg);
@@ -123,6 +185,23 @@ impl Daemon {
                     cfg_for_wg.temperature,
                     cfg_for_wg.root.clone(),
                 );
+                {
+                    let mut status = ts_wg.lock().unwrap();
+                    if let Some(s) = status.iter_mut().find(|s| s.name == "workgraph") {
+                        s.last_tick = Some(std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH).unwrap().as_secs());
+                        s.tick_count = count;
+                        s.last_event = match &out {
+                            Ok(Some(o)) => {
+                                let ms = o.events.iter().find(|e| e.starts_with("milestone"))
+                                    .cloned().unwrap_or_else(|| "advanced".into());
+                                ms
+                            }
+                            Ok(None) => "no pending milestone".into(),
+                            Err(e) => format!("error: {e}"),
+                        };
+                    }
+                }
                 if let Ok(Some(o)) = out {
                     if let Some(line) = o.events.iter().find(|e| e.starts_with("milestone")) {
                         bus_for_wg.broadcast("workgraph", line);
@@ -136,10 +215,20 @@ impl Daemon {
         // 会导致内容修改被漏掉。tick_reload 在锁外做磁盘 I/O，锁内只做廉价 swap。
         let root_for_reload = self.cfg.root.clone();
         let shutdown_for_reload = Arc::clone(&shutdown);
+        let ts_reload = Arc::clone(&thread_status);
         let reload_handle = std::thread::spawn(move || {
+            let mut count = 0u64;
             while !shutdown_for_reload.load(Ordering::SeqCst) {
                 std::thread::sleep(std::time::Duration::from_secs(3));
+                count += 1;
                 crate::registry::tick_reload(&registry_for_reload, &root_for_reload);
+                let mut status = ts_reload.lock().unwrap();
+                if let Some(s) = status.iter_mut().find(|s| s.name == "reload") {
+                    s.last_tick = Some(std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH).unwrap().as_secs());
+                    s.tick_count = count;
+                    s.last_event = "tick_reload".into();
+                }
             }
         });
 
