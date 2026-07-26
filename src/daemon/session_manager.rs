@@ -188,12 +188,13 @@ impl DaemonSessionManager {
             Some(ts) => ts.lock().unwrap().clone(),
             None => vec![],
         };
+        let supervisor_services = self.service_statuses();
         DaemonStatus {
             uptime_secs: self.started_at.elapsed().as_secs(),
             active_sessions: self.sessions.len(),
             session_ids: self.list(),
-            supervisor_count: 0,
-            supervisor_services: vec![],
+            supervisor_count: supervisor_services.len(),
+            supervisor_services,
             threads,
         }
     }
