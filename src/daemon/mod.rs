@@ -39,6 +39,16 @@ impl Daemon {
         // 「有 turn 在跑」；turn_token 在 drain 全程持有，正是这个信号。
         let turn_token = mgr.lock().unwrap().turn_token();
         let shutdown = Arc::new(AtomicBool::new(false));
+        // 创建共享线程心跳状态（需在后台线程使用之前）。
+        let thread_status = Arc::new(Mutex::new(Vec::<crate::daemon::proto::ThreadStatus>::new()));
+        {
+            let mut ts = thread_status.lock().unwrap();
+            ts.push(crate::daemon::proto::ThreadStatus { name: "monitor".into(), last_tick: None, tick_count: 0, last_event: "initializing".into() });
+            ts.push(crate::daemon::proto::ThreadStatus { name: "supervisor".into(), last_tick: None, tick_count: 0, last_event: "initializing".into() });
+            ts.push(crate::daemon::proto::ThreadStatus { name: "workgraph".into(), last_tick: None, tick_count: 0, last_event: "initializing".into() });
+            ts.push(crate::daemon::proto::ThreadStatus { name: "reload".into(), last_tick: None, tick_count: 0, last_event: "initializing".into() });
+        }
+
         // 注册 SIGINT + SIGTERM → shutdown flag(ADR 0032 修订)。
         // 复用 signal-hook(既有依赖,同 BG cancel_on_sigint),但 handler 设的是
         // daemon 的 shutdown flag(而非 turn CancelToken),使信号触发优雅退出。

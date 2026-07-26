@@ -184,7 +184,6 @@ impl DaemonSessionManager {
 
     /// 构建 daemon 健康状态快照。
     pub fn status(&self) -> DaemonStatus {
-        use crate::daemon::proto::ThreadStatus;
         let threads = match &self.thread_status {
             Some(ts) => ts.lock().unwrap().clone(),
             None => vec![],
