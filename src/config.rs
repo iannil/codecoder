@@ -41,6 +41,11 @@ pub struct Config {
     pub supervisor_tick_secs: u64,
     /// OnDemand capability 自动 reaper 延迟（秒）。默认 5。
     pub ondemand_reaper_secs: u64,
+    /// 自动任务发现轮询间隔（秒）。0 = 禁用。env CODECODER_AUTOTASK_INTERVAL_SECS, 默认 300。
+    pub auto_task_interval_secs: u64,
+    /// 任务源类型。env CODECODER_AUTOTASK_SOURCE, 默认 "github_issues"。
+    /// 未来可扩展: "github_issues", "webhook", "linear"。
+    pub auto_task_source: String,
 }
 
 impl Config {
@@ -97,6 +102,11 @@ impl Config {
             ondemand_reaper_secs: env("CODECODER_ONDEMAND_REAPER_SECS")
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(5),
+            auto_task_interval_secs: env("CODECODER_AUTOTASK_INTERVAL_SECS")
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(300),
+            auto_task_source: env("CODECODER_AUTOTASK_SOURCE")
+                .unwrap_or_else(|| "github_issues".into()),
         }
     }
 }
@@ -147,6 +157,8 @@ const DOTENV_ALLOWED_KEYS: &[&str] = &[
     "CODECODER_WG_TICK_SECS",
     "CODECODER_SUPERVISOR_TICK_SECS",
     "CODECODER_ONDEMAND_REAPER_SECS",
+    "CODECODER_AUTOTASK_INTERVAL_SECS",
+    "CODECODER_AUTOTASK_SOURCE",
 ];
 
 /// 从 `path` 读 dotenv;仅对 (a) 在 `DOTENV_ALLOWED_KEYS` 白名单内且 (b) 进程 env 未设置的
@@ -403,6 +415,32 @@ mod tests {
             std::env::remove_var("CODECODER_WG_TICK_SECS");
             std::env::remove_var("CODECODER_SUPERVISOR_TICK_SECS");
             std::env::remove_var("CODECODER_ONDEMAND_REAPER_SECS");
+        }
+    }
+
+    #[test]
+    fn autotask_config_defaults() {
+        unsafe {
+            std::env::remove_var("CODECODER_AUTOTASK_INTERVAL_SECS");
+            std::env::remove_var("CODECODER_AUTOTASK_SOURCE");
+        }
+        let cfg = Config::from_env();
+        assert_eq!(cfg.auto_task_interval_secs, 300);
+        assert_eq!(cfg.auto_task_source, "github_issues");
+    }
+
+    #[test]
+    fn autotask_config_overrides() {
+        unsafe {
+            std::env::set_var("CODECODER_AUTOTASK_INTERVAL_SECS", "60");
+            std::env::set_var("CODECODER_AUTOTASK_SOURCE", "webhook");
+        }
+        let cfg = Config::from_env();
+        assert_eq!(cfg.auto_task_interval_secs, 60);
+        assert_eq!(cfg.auto_task_source, "webhook");
+        unsafe {
+            std::env::remove_var("CODECODER_AUTOTASK_INTERVAL_SECS");
+            std::env::remove_var("CODECODER_AUTOTASK_SOURCE");
         }
     }
 }

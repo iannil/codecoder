@@ -45,6 +45,8 @@ pub struct DaemonSessionManager {
     pub thread_status: Option<Arc<Mutex<Vec<crate::daemon::proto::ThreadStatus>>>>,
     /// workgraph 自动推进暂停 flag。由 daemon::run() 创建并注入。
     pub workgraph_paused: Option<Arc<std::sync::atomic::AtomicBool>>,
+    /// autotask 轮询暂停 flag。true = 暂停（不轮询），false = 正常运行。
+    pub autotask_paused: Option<Arc<std::sync::atomic::AtomicBool>>,
 }
 
 impl DaemonSessionManager {
@@ -70,6 +72,7 @@ impl DaemonSessionManager {
             supervisor: None,
             thread_status: None,
             workgraph_paused: None,
+            autotask_paused: None,
         }
     }
 
@@ -101,6 +104,42 @@ impl DaemonSessionManager {
     /// 查询 workgraph 暂停状态。
     pub fn workgraph_is_paused(&self) -> bool {
         self.workgraph_paused.as_ref().map_or(false, |f| f.load(std::sync::atomic::Ordering::SeqCst))
+    }
+
+    /// 启动 autotask 轮询。返回 true 表示操作已执行。
+    pub fn autotask_on(&self) -> bool {
+        if let Some(ref flag) = self.autotask_paused {
+            flag.store(false, std::sync::atomic::Ordering::SeqCst);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// 停止 autotask 轮询。返回 true 表示操作已执行。
+    pub fn autotask_off(&self) -> bool {
+        if let Some(ref flag) = self.autotask_paused {
+            flag.store(true, std::sync::atomic::Ordering::SeqCst);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// 查询 autotask 状态。
+    pub fn autotask_status(&self) -> crate::daemon::proto::AutotaskStatus {
+        let running = self.autotask_paused.as_ref().map_or(false, |f| !f.load(std::sync::atomic::Ordering::SeqCst));
+        let (last_event, tick_count) = match &self.thread_status {
+            Some(ts) => {
+                let guard = ts.lock().unwrap();
+                match guard.iter().find(|s| s.name == "autotask") {
+                    Some(s) => (s.last_event.clone(), s.tick_count),
+                    None => ("initializing".into(), 0),
+                }
+            }
+            None => ("initializing".into(), 0),
+        };
+        crate::daemon::proto::AutotaskStatus { running, last_event, tick_count }
     }
 
     /// 重置一个 needs_fix 里程碑的状态为 pending（快捷重置）。

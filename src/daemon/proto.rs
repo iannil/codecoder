@@ -111,6 +111,12 @@ pub enum ClientRequest {
     WorkgraphPaused,
     /// 重置一个 needs_fix 里程碑为 pending（`cc milestone-reset <id>`）。
     MilestoneReset { id: u64 },
+    /// 查询 autotask 轮询状态（`cc autotask status`）。
+    AutotaskStatus,
+    /// 启动 autotask 轮询（`cc autotask on`）。
+    AutotaskOn,
+    /// 停止 autotask 轮询（`cc autotask off`）。
+    AutotaskOff,
 }
 
 /// 对 Status 请求的响应（daemon 健康状态快照）。
@@ -140,6 +146,14 @@ pub struct ThreadStatus {
     pub last_event: String,
 }
 
+/// autotask 轮询状态快照。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AutotaskStatus {
+    pub running: bool,
+    pub last_event: String,
+    pub tick_count: u64,
+}
+
 /// daemon → 客户端的事件。一个 `SendMessage` 会产生一串事件，以 `TurnComplete` 或
 /// `Error` 收尾。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -166,6 +180,8 @@ pub enum ServerEvent {
     Services(ServicesPayload),
     /// 当前 workgraph 状态快照。
     WorkgraphStatus(WorkgraphStatus),
+    /// 当前 autotask 状态快照。
+    AutotaskStatus(AutotaskStatus),
 }
 
 /// 服务列表的序列化 payload（包装 Vec 避免 serde tagged newtype 序列化问题）。

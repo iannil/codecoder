@@ -36,6 +36,9 @@ fn main() -> anyhow::Result<()> {
             println!("  cc workgraph-pause     Pause workgraph auto-advance");
             println!("  cc workgraph-resume    Resume workgraph auto-advance");
             println!("  cc milestone-reset <id>  Reset a needs_fix milestone to pending");
+            println!("  cc autotask on         Start autotask polling");
+            println!("  cc autotask off        Stop autotask polling");
+            println!("  cc autotask status     Show autotask polling status");
             println!();
             println!("NOTE: First-run users — set up a `.ccd.env` in the project root for");
             println!("persistent config (CODECODER_API_KEY, CODECODER_MODEL, etc.).");
@@ -59,6 +62,9 @@ fn main() -> anyhow::Result<()> {
         [one] if one == "workgraph" => send_one(&sock, ClientRequest::WorkgraphStatus),
         [one] if one == "workgraph-pause" => send_one(&sock, ClientRequest::WorkgraphPause),
         [one] if one == "workgraph-resume" => send_one(&sock, ClientRequest::WorkgraphResume),
+        [one, cmd] if one == "autotask" && cmd == "status" => send_one(&sock, ClientRequest::AutotaskStatus),
+        [one, cmd] if one == "autotask" && cmd == "on" => send_one(&sock, ClientRequest::AutotaskOn),
+        [one, cmd] if one == "autotask" && cmd == "off" => send_one(&sock, ClientRequest::AutotaskOff),
         [one, id] if one == "milestone-reset" => {
             let id: u64 = id.parse().map_err(|e| anyhow::anyhow!("milestone-reset <id>: {e}"))?;
             send_one(&sock, ClientRequest::MilestoneReset { id })

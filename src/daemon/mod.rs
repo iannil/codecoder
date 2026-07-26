@@ -10,6 +10,7 @@ pub mod proto;
 pub mod session_manager;
 pub mod socket;
 pub mod bus;
+pub mod task_source;
 
 pub struct Daemon {
     cfg: Config,
@@ -228,6 +229,78 @@ impl Daemon {
             }
         });
 
+        // 自动任务发现线程：按 interval 轮询外部源（GitHub Issues 等），
+        // 把新 issue seed 为 workgraph milestone。
+        // 仅当 auto_task_interval_secs > 0 时启动。
+        // 支持运行时暂停/恢复（通过 `cc autotask on/off` 控制）。
+        let auto_task_interval = self.cfg.auto_task_interval_secs;
+        if auto_task_interval > 0 {
+            // Register the thread in thread_status before spawning.
+            {
+                let mut ts = thread_status.lock().unwrap();
+                ts.push(crate::daemon::proto::ThreadStatus {
+                    name: "autotask".into(),
+                    last_tick: None,
+                    tick_count: 0,
+                    last_event: "initializing".into(),
+                });
+            }
+            // 暂停 flag：true = 暂停（不轮询），false = 正常运行。
+            // 由 mgr 的 autotask_paused 字段同步，autotask 线程在此读取。
+            let autotask_paused = Arc::new(AtomicBool::new(false));
+            // 把 autotask_paused 传给 mgr（供 `cc autotask on/off` 控制）。
+            mgr.lock().unwrap().autotask_paused = Some(Arc::clone(&autotask_paused));
+            let shutdown_auto = Arc::clone(&shutdown);
+            let root_auto = self.cfg.root.clone();
+            let token_auto = self.cfg.github_token.clone().unwrap_or_default();
+            let source_auto = self.cfg.auto_task_source.clone();
+            let ts_auto = Arc::clone(&thread_status);
+            let bus_auto = Arc::clone(&bus);
+            std::thread::spawn(move || {
+                let mut count = 0u64;
+                let tick = Duration::from_secs(auto_task_interval);
+                while !shutdown_auto.load(Ordering::SeqCst) {
+                    std::thread::sleep(tick);
+                    count += 1;
+                    // 检查暂停 flag：暂停时不轮询，仅记录心跳。
+                    if autotask_paused.load(Ordering::SeqCst) {
+                        let mut status = ts_auto.lock().unwrap();
+                        if let Some(s) = status.iter_mut().find(|s| s.name == "autotask") {
+                            s.last_tick = Some(std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH).unwrap().as_secs());
+                            s.tick_count = count;
+                            s.last_event = "paused".into();
+                        }
+                        continue;
+                    }
+                    let mut last_event = "idle".to_string();
+                    if source_auto == "github_issues" {
+                        match crate::daemon::task_source::poll_and_seed(&root_auto, &token_auto) {
+                            Ok((fetched, seeded)) => {
+                                if seeded > 0 {
+                                    last_event = format!("seeded {seeded}/{fetched} issues");
+                                    bus_auto.broadcast("autotask", &format!("seeded {seeded} new issues from {fetched} open"));
+                                } else {
+                                    last_event = format!("no new issues ({fetched} open)");
+                                }
+                            }
+                            Err(e) => {
+                                last_event = format!("error: {e}");
+                                // Don't broadcast errors — too noisy on each tick
+                            }
+                        }
+                    }
+                    let mut status = ts_auto.lock().unwrap();
+                    if let Some(s) = status.iter_mut().find(|s| s.name == "autotask") {
+                        s.last_tick = Some(std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH).unwrap().as_secs());
+                        s.tick_count = count;
+                        s.last_event = last_event;
+                    }
+                }
+            });
+        }
+
         // 优雅退出: SIGINT/SIGTERM → shutdown flag → 循环退出 → shutdown_all。
         // cc shutdown 设 shutdown flag 后,自连接 socket 触发 accept 退出阻塞。
         while !shutdown.load(Ordering::SeqCst) {
@@ -284,6 +357,8 @@ mod tests {
             wg_tick_secs: 30,
             supervisor_tick_secs: 1,
             ondemand_reaper_secs: 5,
+            auto_task_interval_secs: 300,
+            auto_task_source: "github_issues".into(),
         };
         let _d = Daemon::new(cfg); // 仅构造，不 run（run 会阻塞 accept）
         let _ = std::fs::remove_dir_all(&dir);
