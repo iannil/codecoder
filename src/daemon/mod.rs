@@ -229,6 +229,61 @@ impl Daemon {
             }
         });
 
+        // 自动任务发现线程：按 interval 轮询外部源（GitHub Issues 等），
+        // 把新 issue seed 为 workgraph milestone。
+        // 仅当 auto_task_interval_secs > 0 时启动。
+        let auto_task_interval = self.cfg.auto_task_interval_secs;
+        if auto_task_interval > 0 {
+            // Register the thread in thread_status before spawning.
+            {
+                let mut ts = thread_status.lock().unwrap();
+                ts.push(crate::daemon::proto::ThreadStatus {
+                    name: "autotask".into(),
+                    last_tick: None,
+                    tick_count: 0,
+                    last_event: "initializing".into(),
+                });
+            }
+            let shutdown_auto = Arc::clone(&shutdown);
+            let root_auto = self.cfg.root.clone();
+            let token_auto = self.cfg.github_token.clone().unwrap_or_default();
+            let source_auto = self.cfg.auto_task_source.clone();
+            let ts_auto = Arc::clone(&thread_status);
+            let bus_auto = Arc::clone(&bus);
+            std::thread::spawn(move || {
+                let mut count = 0u64;
+                let tick = Duration::from_secs(auto_task_interval);
+                while !shutdown_auto.load(Ordering::SeqCst) {
+                    std::thread::sleep(tick);
+                    count += 1;
+                    let mut last_event = "idle".to_string();
+                    if source_auto == "github_issues" {
+                        match crate::daemon::task_source::poll_and_seed(&root_auto, &token_auto) {
+                            Ok((fetched, seeded)) => {
+                                if seeded > 0 {
+                                    last_event = format!("seeded {seeded}/{fetched} issues");
+                                    bus_auto.broadcast("autotask", &format!("seeded {seeded} new issues from {fetched} open"));
+                                } else {
+                                    last_event = format!("no new issues ({fetched} open)");
+                                }
+                            }
+                            Err(e) => {
+                                last_event = format!("error: {e}");
+                                // Don't broadcast errors — too noisy on each tick
+                            }
+                        }
+                    }
+                    let mut status = ts_auto.lock().unwrap();
+                    if let Some(s) = status.iter_mut().find(|s| s.name == "autotask") {
+                        s.last_tick = Some(std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH).unwrap().as_secs());
+                        s.tick_count = count;
+                        s.last_event = last_event;
+                    }
+                }
+            });
+        }
+
         // 优雅退出: SIGINT/SIGTERM → shutdown flag → 循环退出 → shutdown_all。
         // cc shutdown 设 shutdown flag 后,自连接 socket 触发 accept 退出阻塞。
         while !shutdown.load(Ordering::SeqCst) {
