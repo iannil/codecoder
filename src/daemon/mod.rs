@@ -82,6 +82,7 @@ impl Daemon {
         let shutdown_c = shutdown.clone();
         let bus_for_sup = Arc::clone(&bus);
         let sup_supervisor = Arc::clone(&supervisor);
+        let sup_tick = Duration::from_secs(self.cfg.supervisor_tick_secs);
         let sup_handle = {
             std::thread::spawn(move || {
                 while !shutdown_c.load(Ordering::SeqCst) {
@@ -89,7 +90,7 @@ impl Daemon {
                     for line in events {
                         bus_for_sup.broadcast("supervisor", &line);
                     }
-                    std::thread::sleep(std::time::Duration::from_secs(1));
+                    std::thread::sleep(sup_tick);
                 }
                 sup_supervisor.lock().unwrap().shutdown_all();
             })
@@ -104,9 +105,10 @@ impl Daemon {
         let cfg_for_wg = self.cfg.clone();
         let turn_token_for_wg = Arc::clone(&turn_token);
         let bus_for_wg = Arc::clone(&bus);
+        let wg_tick = Duration::from_secs(cfg_for_wg.wg_tick_secs);
         let wg_handle = std::thread::spawn(move || {
             while !shutdown_c2.load(Ordering::SeqCst) {
-                std::thread::sleep(std::time::Duration::from_secs(30));
+                std::thread::sleep(wg_tick);
                 // 拿到 token 才推进，且跨整段 advance 持有；拿不到（有 turn 在跑）跳过。
                 let _guard = match turn_token_for_wg.try_lock() {
                     Ok(g) => g,
@@ -194,6 +196,9 @@ mod tests {
             max_tokens_ceiling: 32768,
             noop_nudge_threshold: 3,
             command_timeout_secs: 0,
+            wg_tick_secs: 30,
+            supervisor_tick_secs: 1,
+            ondemand_reaper_secs: 5,
         };
         let _d = Daemon::new(cfg); // 仅构造，不 run（run 会阻塞 accept）
         let _ = std::fs::remove_dir_all(&dir);

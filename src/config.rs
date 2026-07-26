@@ -35,6 +35,12 @@ pub struct Config {
     pub max_tool_output: usize,
     /// 命令超时秒数(0 = 无超时)。run_command 工具使用此值,也可被其 timeout_secs 参数覆盖。
     pub command_timeout_secs: u32,
+    /// daemon workgraph 推进线程间隔（秒）。默认 30。
+    pub wg_tick_secs: u64,
+    /// Supervisor 监督线程间隔（秒）。默认 1。
+    pub supervisor_tick_secs: u64,
+    /// OnDemand capability 自动 reaper 延迟（秒）。默认 5。
+    pub ondemand_reaper_secs: u64,
 }
 
 impl Config {
@@ -82,6 +88,15 @@ impl Config {
             command_timeout_secs: env("CODECODER_COMMAND_TIMEOUT_SECS")
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(0),
+            wg_tick_secs: env("CODECODER_WG_TICK_SECS")
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(30),
+            supervisor_tick_secs: env("CODECODER_SUPERVISOR_TICK_SECS")
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(1),
+            ondemand_reaper_secs: env("CODECODER_ONDEMAND_REAPER_SECS")
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(5),
         }
     }
 }
@@ -129,6 +144,9 @@ const DOTENV_ALLOWED_KEYS: &[&str] = &[
     "CODECODER_NOOP_NUDGE_THRESHOLD",
     "CODECODER_SUPERVISOR_CRASH_BUDGET",
     "CODECODER_COMMAND_TIMEOUT_SECS",
+    "CODECODER_WG_TICK_SECS",
+    "CODECODER_SUPERVISOR_TICK_SECS",
+    "CODECODER_ONDEMAND_REAPER_SECS",
 ];
 
 /// 从 `path` 读 dotenv;仅对 (a) 在 `DOTENV_ALLOWED_KEYS` 白名单内且 (b) 进程 env 未设置的
@@ -355,5 +373,36 @@ mod tests {
         unsafe { std::env::set_var("CODECODER_SUPERVISOR_CRASH_BUDGET", "5"); }
         assert_eq!(Config::from_env().supervisor_crash_budget, 5);
         unsafe { std::env::remove_var("CODECODER_SUPERVISOR_CRASH_BUDGET"); }
+    }
+
+    #[test]
+    fn config_interval_defaults() {
+        unsafe {
+            std::env::remove_var("CODECODER_WG_TICK_SECS");
+            std::env::remove_var("CODECODER_SUPERVISOR_TICK_SECS");
+            std::env::remove_var("CODECODER_ONDEMAND_REAPER_SECS");
+        }
+        let cfg = Config::from_env();
+        assert_eq!(cfg.wg_tick_secs, 30);
+        assert_eq!(cfg.supervisor_tick_secs, 1);
+        assert_eq!(cfg.ondemand_reaper_secs, 5);
+    }
+
+    #[test]
+    fn config_interval_overrides() {
+        unsafe {
+            std::env::set_var("CODECODER_WG_TICK_SECS", "15");
+            std::env::set_var("CODECODER_SUPERVISOR_TICK_SECS", "3");
+            std::env::set_var("CODECODER_ONDEMAND_REAPER_SECS", "10");
+        }
+        let cfg = Config::from_env();
+        assert_eq!(cfg.wg_tick_secs, 15);
+        assert_eq!(cfg.supervisor_tick_secs, 3);
+        assert_eq!(cfg.ondemand_reaper_secs, 10);
+        unsafe {
+            std::env::remove_var("CODECODER_WG_TICK_SECS");
+            std::env::remove_var("CODECODER_SUPERVISOR_TICK_SECS");
+            std::env::remove_var("CODECODER_ONDEMAND_REAPER_SECS");
+        }
     }
 }
