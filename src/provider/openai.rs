@@ -2,11 +2,13 @@
 use super::{Completion, CompletionRequest, Provider, StopReason};
 use crate::config::Config;
 use crate::message::{Message, MessageItem, Role};
+use crate::provider::retry::{RetryConfig, with_retry};
 use serde_json::{Value, json};
 
 pub struct OpenAiClient {
     api_key: String,
     api_base: String,
+    retry_config: RetryConfig,
 }
 
 impl OpenAiClient {
@@ -14,6 +16,10 @@ impl OpenAiClient {
         Self {
             api_key: cfg.api_key.clone().unwrap_or_default(),
             api_base: cfg.api_base.clone(),
+            retry_config: RetryConfig {
+                max_retries: cfg.provider_retry_max,
+                initial_delay_ms: cfg.provider_retry_initial_ms,
+            },
         }
     }
 
@@ -38,18 +44,32 @@ impl Provider for OpenAiClient {
             body["tools"] = json!(req.tools);
         }
 
-        let resp = match ureq::post(&self.endpoint())
-            .set("Authorization", &format!("Bearer {}", self.api_key))
-            .set("Content-Type", "application/json")
-            .send_json(body)
-        {
-            Ok(r) => r,
-            Err(ureq::Error::Status(code, r)) => {
-                let detail = r.into_string().unwrap_or_default();
-                anyhow::bail!("OpenAI API returned {code}: {detail}");
+        let body_clone = body.clone();
+        let self_ref = &self;
+
+        let resp = with_retry(&self.retry_config, || {
+            match ureq::post(&self_ref.endpoint())
+                .set("Authorization", &format!("Bearer {}", self_ref.api_key))
+                .set("Content-Type", "application/json")
+                .send_json(body_clone.clone())
+            {
+                Ok(r) => Ok(r),
+                Err(ureq::Error::Status(code, r)) => {
+                    let detail = r.into_string().unwrap_or_default();
+                    let err_str = format!("OpenAI API returned {code}: {detail}");
+                    Err((err_str, Some(code)))
+                }
+                Err(e) => {
+                    let err_str = format!("OpenAI request failed: {e}");
+                    Err((err_str, None))
+                }
             }
-            Err(e) => return Err(anyhow::Error::new(e).context("OpenAI request failed")),
-        };
+        })
+        .map_err(|retry_err| {
+            eprintln!("[retry] exhausted after {} attempt(s): {} (rate_limited={})",
+                retry_err.attempts, retry_err.last_error, retry_err.is_rate_limited);
+            anyhow::anyhow!("{}", retry_err)
+        })?;
 
         let json: Value = resp.into_json()?;
         from_wire_response(&json)

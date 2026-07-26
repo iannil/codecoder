@@ -68,9 +68,9 @@ pub fn is_retryable(error: &str, status_code: Option<u16>) -> bool {
 
 /// Call `f` with retry logic. Returns the first successful result, or a `RetryError`
 /// after all retries are exhausted.
-pub fn with_retry<F, T>(config: &RetryConfig, f: F) -> Result<T, RetryError>
+pub fn with_retry<F, T>(config: &RetryConfig, mut f: F) -> Result<T, RetryError>
 where
-    F: Fn() -> Result<T, (String, Option<u16>)>,
+    F: FnMut() -> Result<T, (String, Option<u16>)>,
 {
     let max = config.max_retries.max(1); // at least 1 attempt
     let mut last_error = String::new();
@@ -124,7 +124,7 @@ mod tests {
     fn retries_on_429_then_succeeds() {
         let cfg = RetryConfig { max_retries: 3, initial_delay_ms: 1 };
         let mut calls = 0u32;
-        let result = with_retry(&cfg, || {
+        let result: Result<i32, _> = with_retry(&cfg, || {
             calls += 1;
             if calls < 3 {
                 Err(("rate limited".into(), Some(429)))
@@ -139,7 +139,7 @@ mod tests {
     #[test]
     fn exhausts_retries_on_persistent_429() {
         let cfg = RetryConfig { max_retries: 3, initial_delay_ms: 1 };
-        let result = with_retry(&cfg, || {
+        let result: Result<i32, _> = with_retry(&cfg, || {
             Err(("rate limited".into(), Some(429)))
         });
         let err = result.unwrap_err();
@@ -151,7 +151,7 @@ mod tests {
     fn non_retryable_error_bails_immediately() {
         let cfg = RetryConfig { max_retries: 3, initial_delay_ms: 1 };
         let mut calls = 0u32;
-        let result = with_retry(&cfg, || {
+        let result: Result<i32, _> = with_retry(&cfg, || {
             calls += 1;
             Err(("invalid api key".into(), Some(401)))
         });
@@ -176,7 +176,7 @@ mod tests {
     fn zero_retries_means_one_attempt() {
         let cfg = RetryConfig { max_retries: 0, initial_delay_ms: 1 };
         let mut calls = 0u32;
-        let result = with_retry(&cfg, || {
+        let result: Result<i32, _> = with_retry(&cfg, || {
             calls += 1;
             Err(("timeout".into(), None))
         });

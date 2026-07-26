@@ -3,6 +3,7 @@
 use crate::message::Message;
 
 pub mod openai;
+pub mod retry;
 pub mod stub;
 
 pub struct CompletionRequest {
