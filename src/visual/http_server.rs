@@ -480,5 +480,6 @@ fn sse_event_type(ev: &ServerEvent) -> &'static str {
         ServerEvent::Status(_) => "status",
         ServerEvent::Services(_) => "services",
         ServerEvent::WorkgraphStatus(_) => "workgraph_status",
+        ServerEvent::AutotaskStatus(_) => "autotask_status",
     }
 }

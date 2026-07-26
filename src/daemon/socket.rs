@@ -315,6 +315,29 @@ pub fn handle_connection(
                 }
                 let _ = body_tx.send(ServerEvent::TurnComplete);
             }
+            ClientRequest::AutotaskOn => {
+                let g = mgr.lock().unwrap();
+                let _ = body_tx.send(ServerEvent::Notice { text: if g.autotask_on() {
+                    "autotask polling ON".into()
+                } else {
+                    "autotask unavailable (no daemon autotask thread)".into()
+                }});
+                let _ = body_tx.send(ServerEvent::TurnComplete);
+            }
+            ClientRequest::AutotaskOff => {
+                let g = mgr.lock().unwrap();
+                let _ = body_tx.send(ServerEvent::Notice { text: if g.autotask_off() {
+                    "autotask polling OFF".into()
+                } else {
+                    "autotask unavailable (no daemon autotask thread)".into()
+                }});
+                let _ = body_tx.send(ServerEvent::TurnComplete);
+            }
+            ClientRequest::AutotaskStatus => {
+                let status = mgr.lock().unwrap().autotask_status();
+                let _ = body_tx.send(ServerEvent::AutotaskStatus(status));
+                let _ = body_tx.send(ServerEvent::TurnComplete);
+            }
         }
     }
 

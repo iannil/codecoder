@@ -218,6 +218,13 @@ pub fn print_event(ev: &ServerEvent) -> bool {
             }
             false
         }
+        ServerEvent::AutotaskStatus(s) => {
+            println!("autotask:");
+            println!("  running:    {}", s.running);
+            println!("  last_event: {}", s.last_event);
+            println!("  ticks:      {}", s.tick_count);
+            false
+        }
     }
 }
 
