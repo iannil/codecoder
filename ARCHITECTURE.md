@@ -51,6 +51,7 @@
 | `workgraph.rs` | **Work Graph(一等公民 #2)**:持久化、依赖有序的里程碑图,`Milestone` 节点含 `NodeStatus`(含 `Hypothesis`/`Locked`)、`next_ready()` 调度、`render_for_prompt()` 摘要;**fs2-locked RMW**(`with_lock`,ADR 0035,防并发 lost-update);节点带 `fix_attempts`/`last_failure` 重试状态,`next_retryable(max)` 选预算内最低 id 的 needs_fix | 设计文档 0035 |
 | `review.rs` | **结构化验收裁决(一等公民 #4)**:`Verdict`(pass/needs_fix/rebuild)+ 四信号(`foundation`/`over_engineering`/`volume`/`terminology`),纯函数解析 | 设计文档 |
 | `daemon/{mod,bus,proto,session_manager,socket}` | **Daemon(长驻服务)**:Unix socket 监听、多 client 复用、session 管理、permission/ask/confirm/plan/trust 往返 wire protocol | 0032 |
+| `daemon/task_source.rs` | **自动任务发现**:`TaskSource` trait + `GitHubIssuesPoller` 实现，按 `CODECODER_AUTOTASK_INTERVAL_SECS` 间隔轮询 GitHub Issues 生成 workgraph 里程碑 | — |
 | `client/mod.rs` | **cc 客户端**:daemon 连接、stdin→消息、消息→stdout 格式化、permission 弹窗行内 `y/n` | 0032 |
 
 ## 一个 turn 的生命周期
@@ -146,7 +147,7 @@ codecoder 的「文件系统即自我」覆盖了三层身份与工作/推理层
 
 ## ADR 索引
 
-`0001` TUI 键位与 Mode 语义(已废弃)· `0002` slash 本地派发 · `0003` 中心 Theme(已废弃)· `0004` Session 持久化与迁移 · `0005` 权限 scope 与 allowlist · `0007` prompt 注入 slash · `0015` 统一消息模型 · `0016` channel 拓扑与事件模型 · `0017` provider 中立消息模型 · `0018` Tool trait 与 PermissionKey · `0019` 子 agent 能力边界 · `0020` Skills/Capabilities Registry · `0021` Capability 环境与生命周期 · `0022` 自撰安全回路 · `0023` 上下文压缩 · `0024` TUI 视口与渲染循环(已废弃)· `0025` Prompt 作为 Skill 草稿层 · `0026` Background Agent · `0027` pi 对照分析 · `0028` 项目信任加载门禁 · `0029` turn steering 与 follow-up · `0031` 拦截中间件边界论证(不做)· `0032` client-server 架构 · `0030` BG 客观验收门与失败写回 · `0033` BG 任务账本与退出码告警 · `0034` Persistent Capability 跨重启韧性 · `0035` workgraph 并发写保护 · `0036` 复合命令 keying · `0037` 工具输出长度截断 · `0038` 自适应 max_tokens 预算 · `0039` BG Review 门(独立评审)与 headless 可观测性
+`0001` TUI 键位与 Mode 语义(已废弃)· `0002` slash 本地派发 · `0003` 中心 Theme(已废弃)· `0004` Session 持久化与迁移 · `0005` 权限 scope 与 allowlist · `0007` prompt 注入 slash · `0015` 统一消息模型 · `0016` channel 拓扑与事件模型 · `0017` provider 中立消息模型 · `0018` Tool trait 与 PermissionKey · `0019` 子 agent 能力边界 · `0020` Skills/Capabilities Registry · `0021` Capability 环境与生命周期 · `0022` 自撰安全回路 · `0023` 上下文压缩 · `0024` TUI 视口与渲染循环(已废弃)· `0025` Prompt 作为 Skill 草稿层 · `0026` Background Agent · `0027` pi 对照分析 · `0028` 项目信任加载门禁 · `0029` turn steering 与 follow-up · `0031` 拦截中间件边界论证(不做)· `0032` client-server 架构 · `0030` BG 客观验收门与失败写回 · `0033` BG 任务账本与退出码告警 · `0034` Persistent Capability 跨重启韧性 · `0035` workgraph 并发写保护 · `0036` 复合命令 keying · `0037` 工具输出长度截断 · `0038` 自适应 max_tokens 预算 · `0039` BG Review 门(独立评审)与 headless 可观测性 · `0040` 任务自我发现(autotask)
 
 ## 测试与验证边界
 

@@ -31,7 +31,7 @@ CODECODER_DAEMON=1 cargo run  # 启动 daemon
 cargo run --bin cc            # 连接 (cc 客户端)
 ```
 
-## 内置工具（26 个）
+## 内置工具（27 个）
 
 > **Tool / Skill / Capability 三分**:**Tool** 是编译进二进制的原生原语(下表);**Skill** 是 agent 自撰的 `.md` 程序性知识(改变怎么想);**Capability** 是 agent 自撰的可执行产物(长出新手脚)。**Skill** 另有一个草稿前身 **Prompt**(`prompts/`,经 `promote_prompt` 转正,见 `docs/adr/0025`)。详见 `CONTEXT.md` 与 `docs/adr/0020`–`0022`、`0025`。
 
@@ -48,6 +48,7 @@ cargo run --bin cc            # 连接 (cc 客户端)
 | `generate_prompt` | 撰写 Prompt 草稿(Skill 草稿态)到 `prompts/` |
 | `promote_prompt` | 把 `prompts/` 草稿转正为 `skills/` 里的 Skill(删草稿,撞名报错) |
 | `generate_capability` | 撰写 Capability(自撰可执行产物)到 `capabilities/` |
+| `generate_milestones` | 将目标分解为 workgraph 里程碑（`goal`, 可选 `context`） |
 | `use_skill` | 激活某个 Skill,把全文注入后续 context |
 | `run_capability` | 在声明的 Environment/Lifecycle 中执行某个 Capability |
 | `glob` | 文件 glob 搜索（支持 ** 递归） |
@@ -94,6 +95,9 @@ project/
 /tools          列出可用工具
 /skills         列出已加载技能
 /memory         列出持久化记忆
+/autotask on    启用自动任务发现（从 `CODECODER_AUTOTASK_SOURCE` 轮询）
+/autotask off   禁用自动任务发现
+/autotask status 查看自动任务状态（运行中/已停止/间隔/来源）
 ```
 
 ## Capability 执行:Environment × Lifecycle
@@ -143,6 +147,8 @@ project/
 | `CODECODER_NOOP_NUDGE_THRESHOLD` | `3` | 单 turn 连续多少「纯探索」步（read_file/glob/grep/diff）后注入一次 steering nudge，推动动手或声明阻塞（0 = 禁用；每 turn 至多一次；迭代 4，ADR 0029 修订） |
 | `CODECODER_COMMAND_TIMEOUT_SECS` | `0` | `run_command` 默认超时秒数（0 = 无超时；工具参数 `timeout_secs` 可覆盖） |
 | `CODECODER_WG_TICK_SECS` | `30` | daemon 后台 workgraph 自动推进间隔秒数 |
+| `CODECODER_AUTOTASK_INTERVAL_SECS` | `300` | 自动任务发现轮询间隔秒数（0 = 禁用） |
+| `CODECODER_AUTOTASK_SOURCE` | `github_issues` | 自动任务来源（当前仅支持 `github_issues`） |
 | `CODECODER_SUPERVISOR_TICK_SECS` | `1` | daemon Persistent 服务监督线程检查间隔秒数 |
 | `CODECODER_ONDEMAND_REAPER_SECS` | `5` | OnDemand capability 自动回收延迟秒数 |
 | `GITHUB_TOKEN` | — | GitHub API token（提升 rate limit） |
