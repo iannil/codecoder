@@ -169,6 +169,105 @@ pub fn render_file_blocks(read: &BTreeSet<String>, modified: &BTreeSet<String>) 
     s
 }
 
+/// Determine if tier-2 compaction should run after tier-1.
+/// Returns the index of the first message that can be summarized (the oldest span
+/// that is not the anchor goal and not the recent tail).
+///
+/// The anchor is the first user message (the original goal, never evicted).
+/// The tail is the last ~window_size messages (preserved for ongoing conversation context).
+/// Everything between them is eligible for summarization.
+///
+/// `working_set` is the tier-1 compacted working set. `threshold_pct` is the
+/// fraction of the span-between-anchor-and-tail that must be exceeded (e.g. 0.5
+/// means at least half of the eligible messages must exist). Returns the index
+/// (into `working_set`) of the first message to summarize, i.e. `anchor + 1`,
+/// or `None` when there is nothing to summarize.
+pub fn tier2_should_run(
+    working_set: &[&Message],
+    threshold_pct: f64,
+    window_size: usize,
+) -> Option<usize> {
+    let anchor = working_set.iter().position(|m| m.role == Role::User)?;
+    let tail_start = working_set.len().saturating_sub(window_size);
+    // The eligible span is [anchor+1, tail_start). It must be non-empty.
+    let span_start = anchor + 1;
+    if span_start >= tail_start {
+        return None;
+    }
+    // Check that the eligible span exceeds the threshold fraction of all messages
+    // between anchor and tail.
+    let total_eligible = tail_start - span_start;
+    if total_eligible == 0 {
+        return None;
+    }
+    // threshold_pct is a fraction of the total working set length; if the eligible
+    // span is large enough relative to the working set, trigger.
+    let working_len = working_set.len();
+    if working_len == 0 {
+        return None;
+    }
+    let ratio = total_eligible as f64 / working_len as f64;
+    if ratio >= threshold_pct {
+        Some(span_start)
+    } else {
+        None
+    }
+}
+
+/// Build a summarization prompt for an LLM from a message span.
+/// Instructs the LLM to extract: what was accomplished, what decisions were made,
+/// what remaining work exists, and any important context.
+pub fn build_summary_prompt(span: &[&Message]) -> String {
+    let text = render_span(
+        &span.iter().map(|m| (*m).clone()).collect::<Vec<_>>(),
+    );
+    format!(
+        "You are a conversation summarizer. The following is a conversation span \
+         between a user and an AI agent. Summarize the key information: what was \
+         asked, what was done, what decisions were made, what files were changed, \
+         and what remaining work exists. Be concise but comprehensive.\n\n\
+         CONVERSATION:\n{text}\n\n\
+         SUMMARY:"
+    )
+}
+
+/// Perform tier-2 summarization: call the LLM to summarize the oldest conversation span.
+/// Returns the summary text on success, or an error string.
+pub fn tier2_summarize(
+    provider: &dyn crate::provider::Provider,
+    span: &[&Message],
+    model: &str,
+) -> Result<String, String> {
+    let prompt = build_summary_prompt(span);
+    let req = crate::provider::CompletionRequest {
+        model: model.to_string(),
+        messages: vec![crate::message::Message {
+            id: 0,
+            role: crate::message::Role::User,
+            items: vec![crate::message::MessageItem::Text { text: prompt }],
+        }],
+        max_tokens: 1024,
+        temperature: 0.3,
+        tools: vec![],
+    };
+    match provider.complete(&req) {
+        Ok(completion) => {
+            let text = completion.message.items.iter().filter_map(|it| {
+                if let crate::message::MessageItem::Text { text } = it {
+                    Some(text.as_str())
+                } else {
+                    None
+                }
+            }).collect::<Vec<_>>().join("\n").trim().to_string();
+            if text.is_empty() {
+                return Err("tier-2 summary returned empty text".into());
+            }
+            Ok(text)
+        }
+        Err(e) => Err(format!("tier-2 LLM call failed: {e}")),
+    }
+}
+
 /// Rewrite the tier-1 result: drop every message whose id is in
 /// `(anchor_id, covered_last_id]` and insert one synthetic `System` summary right
 /// after the anchor. Works by **id** because tier-1 may have dropped Reasoning-only
@@ -373,5 +472,99 @@ mod tests {
         let only_read = render_file_blocks(&read, &empty);
         assert!(only_read.contains("<read-files>"));
         assert!(!only_read.contains("<modified-files>"));
+    }
+
+    // ── tier-2 tests ──────────────────────────────────────────────────────
+
+    #[test]
+    fn tier2_should_run_returns_none_when_below_threshold() {
+        // 5 messages: anchor + 4 assistant. window_size=3 → tail_start=2, eligible span
+        // [1, 2) = 1 message. eligible_len=1, working_len=5, ratio=0.2 < 0.5 → None.
+        let anchor = msg(0, Role::User, vec![MessageItem::Text { text: "goal".into() }]);
+        let asst1 = msg(1, Role::Assistant, vec![MessageItem::Text { text: "a".into() }]);
+        let asst2 = msg(2, Role::Assistant, vec![MessageItem::Text { text: "b".into() }]);
+        let asst3 = msg(3, Role::Assistant, vec![MessageItem::Text { text: "c".into() }]);
+        let asst4 = msg(4, Role::Assistant, vec![MessageItem::Text { text: "d".into() }]);
+
+        let refs: Vec<&Message> = vec![&anchor, &asst1, &asst2, &asst3, &asst4];
+        // window_size=3 → tail starts at index 2 (asst2, asst3, asst4 are tail).
+        // Eligible span = [1, 2) = {asst1} = 1 msg. 1/5 = 0.2 < 0.5.
+        let result = tier2_should_run(&refs, 0.5, 3);
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn tier2_should_run_returns_index_when_above_threshold() {
+        // 10 messages: anchor + 9 assistant. window_size=3 → tail_start=7.
+        // Eligible span = [1, 7) = 6 messages. 6/10 = 0.6 >= 0.5 → Some(1).
+        let anchor = msg(0, Role::User, vec![MessageItem::Text { text: "goal".into() }]);
+        let mut refs: Vec<Message> = vec![anchor];
+        for i in 1..10 {
+            refs.push(msg(i as u64, Role::Assistant, vec![MessageItem::Text { text: "x".into() }]));
+        }
+        let refs_ref: Vec<&Message> = refs.iter().collect();
+        let result = tier2_should_run(&refs_ref, 0.5, 3);
+        assert_eq!(result, Some(1));
+    }
+
+    #[test]
+    fn tier2_should_run_none_when_tail_covers_almost_everything() {
+        // 3 messages: anchor + 2 assistant. window_size=3 → tail_start=0, so
+        // span_start=1 >= tail_start=0 → early return None (nothing eligible).
+        let anchor = msg(0, Role::User, vec![MessageItem::Text { text: "goal".into() }]);
+        let asst1 = msg(1, Role::Assistant, vec![MessageItem::Text { text: "a".into() }]);
+        let asst2 = msg(2, Role::Assistant, vec![MessageItem::Text { text: "b".into() }]);
+        let refs: Vec<&Message> = vec![&anchor, &asst1, &asst2];
+        let result = tier2_should_run(&refs, 0.0, 3);
+        // tail_start = 0, anchor_start+1 = 1 >= 0 → None
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn build_summary_prompt_contains_messages_and_has_expected_structure() {
+        let msgs = vec![
+            msg(1, Role::User, vec![MessageItem::Text { text: "hello".into() }]),
+            msg(2, Role::Assistant, vec![MessageItem::Text { text: "world".into() }]),
+        ];
+        let refs: Vec<&Message> = msgs.iter().collect();
+        let prompt = build_summary_prompt(&refs);
+        assert!(prompt.contains("hello"));
+        assert!(prompt.contains("world"));
+        assert!(prompt.contains("conversation summarizer"));
+        assert!(prompt.contains("CONVERSATION:"));
+        assert!(prompt.contains("SUMMARY:"));
+    }
+
+    #[test]
+    fn build_summary_prompt_renders_tool_calls_and_results() {
+        let msgs = vec![
+            msg(1, Role::Assistant, vec![
+                MessageItem::ToolCall { id: "c1".into(), name: "read_file".into(), args: serde_json::json!({"path": "a.rs"}) },
+            ]),
+            msg(2, Role::Tool, vec![
+                MessageItem::ToolResult { call_id: "c1".into(), output: "file content".into(), is_error: false },
+            ]),
+        ];
+        let refs: Vec<&Message> = msgs.iter().collect();
+        let prompt = build_summary_prompt(&refs);
+        assert!(prompt.contains("[tool_call read_file]"));
+        assert!(prompt.contains("[result:"));
+        assert!(prompt.contains("file content"));
+    }
+
+    #[test]
+    fn tier2_summarize_uses_stub_provider() {
+        use crate::provider::stub::StubClient;
+        let msgs = vec![
+            msg(1, Role::User, vec![MessageItem::Text { text: "hello".into() }]),
+        ];
+        let refs: Vec<&Message> = msgs.iter().collect();
+        let provider = StubClient;
+        let result = tier2_summarize(&provider, &refs, "gpt-4o");
+        // StubClient returns a deterministic text, so it should succeed.
+        assert!(result.is_ok());
+        let summary = result.unwrap();
+        assert!(!summary.is_empty());
+        assert!(summary.contains("stub"));
     }
 }
