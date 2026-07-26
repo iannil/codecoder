@@ -88,7 +88,10 @@ impl Tool for RunCommand {
     fn schema(&self) -> Value {
         json!({
             "type": "object",
-            "properties": { "cmd": { "type": "string", "description": "The shell command line." } },
+            "properties": {
+                "cmd": { "type": "string", "description": "The shell command line." },
+                "timeout_secs": { "type": "integer", "description": "Timeout in seconds (0 = no timeout).", "default": 0 }
+            },
             "required": ["cmd"]
         })
     }
@@ -101,9 +104,20 @@ impl Tool for RunCommand {
         if cmd.is_empty() {
             return Ok(ToolOutput::err("missing required arg: cmd"));
         }
+        let timeout_secs = args.get("timeout_secs").and_then(Value::as_u64).unwrap_or(0);
+        let effective_timeout = if timeout_secs > 0 {
+            std::time::Duration::from_secs(timeout_secs)
+        } else {
+            ctx.command_timeout
+        };
+        let ctx_override = ToolCtx {
+            root: ctx.root,
+            cancel: ctx.cancel,
+            command_timeout: effective_timeout,
+        };
         let mut command = Command::new("sh");
         command.arg("-c").arg(cmd).current_dir(ctx.root);
-        run_shell_cancellable(command, ctx)
+        run_shell_cancellable(command, &ctx_override)
     }
 }
 
@@ -151,11 +165,23 @@ pub(crate) fn run_shell_cancellable(mut command: Command, ctx: &ToolCtx) -> anyh
     });
 
     // Poll for exit while watching the cancel token; kill the child on cancel.
+    let deadline = if ctx.command_timeout > std::time::Duration::ZERO {
+        Some(std::time::Instant::now() + ctx.command_timeout)
+    } else {
+        None
+    };
     let status = loop {
         if ctx.is_cancelled() {
             let _ = child.kill();
             let _ = child.wait();
             break None;
+        }
+        if let Some(dead) = deadline {
+            if std::time::Instant::now() >= dead {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Ok(ToolOutput::err("timed out"));
+            }
         }
         match child.try_wait()? {
             Some(status) => break Some(status),
@@ -1096,6 +1122,38 @@ mod tests {
             "the child must be killed promptly on cancel; took {:?}",
             start.elapsed()
         );
+    }
+
+    #[test]
+    fn run_command_with_timeout_kills_child() {
+        let dir = std::env::temp_dir();
+        let mut ctx = ToolCtx::new(&dir);
+        ctx.command_timeout = std::time::Duration::from_millis(100);
+        let out = RunCommand
+            .run(json!({ "cmd": "sleep 10", "timeout_secs": 0 }), &mut ctx)
+            .unwrap();
+        assert!(out.content.contains("timed out"), "should timeout: {}", out.content);
+    }
+
+    #[test]
+    fn run_command_with_timeout_secs_param_kills() {
+        let dir = std::env::temp_dir();
+        let mut ctx = ToolCtx::new(&dir);
+        let out = RunCommand
+            .run(json!({ "cmd": "sleep 10", "timeout_secs": 1 }), &mut ctx)
+            .unwrap();
+        assert!(out.content.contains("timed out"), "should timeout: {}", out.content);
+    }
+
+    #[test]
+    fn run_command_no_timeout_runs_normally() {
+        let dir = std::env::temp_dir();
+        let mut ctx = ToolCtx::new(&dir);
+        let out = RunCommand
+            .run(json!({ "cmd": "echo hello", "timeout_secs": 0 }), &mut ctx)
+            .unwrap();
+        assert!(!out.is_error);
+        assert!(out.content.contains("hello"));
     }
 
     #[test]

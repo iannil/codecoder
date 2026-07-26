@@ -193,6 +193,7 @@ mod tests {
             max_tool_output: 256 * 1024,
             max_tokens_ceiling: 32768,
             noop_nudge_threshold: 3,
+            command_timeout_secs: 0,
         };
         let _d = Daemon::new(cfg); // 仅构造，不 run（run 会阻塞 accept）
         let _ = std::fs::remove_dir_all(&dir);

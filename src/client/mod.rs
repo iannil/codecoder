@@ -182,7 +182,8 @@ pub fn print_event(ev: &ServerEvent) -> bool {
             let _ = std::io::stdout().flush();
             false
         }
-        ServerEvent::Services(services) => {
+        ServerEvent::Services(payload) => {
+            let services = &payload.services;
             if services.is_empty() {
                 println!("(no persistent services)");
             } else {

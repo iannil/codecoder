@@ -17,17 +17,24 @@ pub struct ToolCtx<'a> {
     /// long-running tool (e.g. `run_command`) can poll it and kill its child;
     /// `None` in unit tests that never cancel.
     pub cancel: Option<&'a crate::agent::CancelToken>,
+    /// 命令超时(0 = 无超时)。从 config 传入,run_command 工具可被参数覆盖。
+    pub command_timeout: std::time::Duration,
 }
 
 impl<'a> ToolCtx<'a> {
     /// A context with no cancellation signal (unit tests, one-shot helpers).
     pub fn new(root: &'a Path) -> Self {
-        ToolCtx { root, cancel: None }
+        ToolCtx { root, cancel: None, command_timeout: std::time::Duration::from_secs(0) }
     }
 
     /// A context wired to the turn's cancel token (the live agent loop).
     pub fn with_cancel(root: &'a Path, cancel: &'a crate::agent::CancelToken) -> Self {
-        ToolCtx { root, cancel: Some(cancel) }
+        let cfg = crate::config::Config::from_env();
+        ToolCtx {
+            root,
+            cancel: Some(cancel),
+            command_timeout: std::time::Duration::from_secs(cfg.command_timeout_secs as u64),
+        }
     }
 
     /// True once the turn has been cancelled; long-running tools should stop.

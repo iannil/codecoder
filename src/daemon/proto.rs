@@ -144,9 +144,15 @@ pub enum ServerEvent {
     Status(DaemonStatus),
     Tree { nodes: Vec<TreeNode> },
     /// 列 Persistent 服务的状态响应（`cc services`）。
-    Services(Vec<ServiceStatus>),
+    Services(ServicesPayload),
     /// 当前 workgraph 状态快照。
     WorkgraphStatus(WorkgraphStatus),
+}
+
+/// 服务列表的序列化 payload（包装 Vec 避免 serde tagged newtype 序列化问题）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ServicesPayload {
+    pub services: Vec<ServiceStatus>,
 }
 
 /// 从一行读一个 `ClientRequest`。`Ok(None)` 表示客户端关闭（EOF）。
@@ -323,7 +329,7 @@ mod tests {
     #[test]
     fn services_event_round_trips() {
         let svc = ServiceStatus { name: "web".into(), address: "http://127.0.0.1:8080".into(), gave_up: false };
-        let ev = ServerEvent::Services(vec![svc]);
+        let ev = ServerEvent::Services(crate::daemon::proto::ServicesPayload { services: vec![svc] });
         let json = serde_json::to_string(&ev).unwrap();
         let back: ServerEvent = serde_json::from_str(&json).unwrap();
         assert_eq!(ev, back);

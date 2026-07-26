@@ -33,6 +33,8 @@ pub struct Config {
     pub supervisor_crash_budget: u32,
     /// 工具输出(read_file / run_command)字节上限,超长截断带 marker(ADR 0037)。
     pub max_tool_output: usize,
+    /// 命令超时秒数(0 = 无超时)。run_command 工具使用此值,也可被其 timeout_secs 参数覆盖。
+    pub command_timeout_secs: u32,
 }
 
 impl Config {
@@ -77,6 +79,9 @@ impl Config {
             max_tool_output: env("CODECODER_MAX_TOOL_OUTPUT")
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(256 * 1024),
+            command_timeout_secs: env("CODECODER_COMMAND_TIMEOUT_SECS")
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(0),
         }
     }
 }
@@ -123,6 +128,7 @@ const DOTENV_ALLOWED_KEYS: &[&str] = &[
     "CODECODER_BG_MAX_FIX_ATTEMPTS",
     "CODECODER_NOOP_NUDGE_THRESHOLD",
     "CODECODER_SUPERVISOR_CRASH_BUDGET",
+    "CODECODER_COMMAND_TIMEOUT_SECS",
 ];
 
 /// 从 `path` 读 dotenv;仅对 (a) 在 `DOTENV_ALLOWED_KEYS` 白名单内且 (b) 进程 env 未设置的

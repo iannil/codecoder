@@ -244,7 +244,7 @@ pub fn handle_connection(
             ClientRequest::Services => {
                 let g = mgr.lock().unwrap();
                 let services = g.service_statuses();
-                let _ = body_tx.send(ServerEvent::Services(services));
+                let _ = body_tx.send(ServerEvent::Services(crate::daemon::proto::ServicesPayload { services }));
                 let _ = body_tx.send(ServerEvent::TurnComplete);
             }
             ClientRequest::WorkgraphStatus => {
