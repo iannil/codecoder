@@ -359,6 +359,10 @@ mod tests {
             ondemand_reaper_secs: 5,
             auto_task_interval_secs: 300,
             auto_task_source: "github_issues".into(),
+            provider_retry_max: 3,
+            provider_retry_initial_ms: 1000,
+            fallback_api_base: None,
+            fallback_model: None,
         };
         let _d = Daemon::new(cfg); // 仅构造，不 run（run 会阻塞 accept）
         let _ = std::fs::remove_dir_all(&dir);

@@ -46,6 +46,14 @@ pub struct Config {
     /// 任务源类型。env CODECODER_AUTOTASK_SOURCE, 默认 "github_issues"。
     /// 未来可扩展: "github_issues", "webhook", "linear"。
     pub auto_task_source: String,
+    /// LLM provider 调用最大重试次数(含首次)。0 = 不重试。env CODECODER_PROVIDER_RETRY_MAX, 默认 3。
+    pub provider_retry_max: u32,
+    /// 重试初始退避毫秒数。每次重试加倍,封顶 30s。env CODECODER_PROVIDER_RETRY_INITIAL_MS, 默认 1000。
+    pub provider_retry_initial_ms: u64,
+    /// 可选的主 provider 失败后的 fallback API base。env CODECODER_FALLBACK_API_BASE。
+    pub fallback_api_base: Option<String>,
+    /// fallback 模型的名称。env CODECODER_FALLBACK_MODEL。
+    pub fallback_model: Option<String>,
 }
 
 impl Config {
@@ -107,6 +115,14 @@ impl Config {
                 .unwrap_or(300),
             auto_task_source: env("CODECODER_AUTOTASK_SOURCE")
                 .unwrap_or_else(|| "github_issues".into()),
+            provider_retry_max: env("CODECODER_PROVIDER_RETRY_MAX")
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(3),
+            provider_retry_initial_ms: env("CODECODER_PROVIDER_RETRY_INITIAL_MS")
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(1000),
+            fallback_api_base: env("CODECODER_FALLBACK_API_BASE"),
+            fallback_model: env("CODECODER_FALLBACK_MODEL"),
         }
     }
 }
@@ -159,6 +175,11 @@ const DOTENV_ALLOWED_KEYS: &[&str] = &[
     "CODECODER_ONDEMAND_REAPER_SECS",
     "CODECODER_AUTOTASK_INTERVAL_SECS",
     "CODECODER_AUTOTASK_SOURCE",
+    "CODECODER_PROVIDER_RETRY_MAX",
+    "CODECODER_PROVIDER_RETRY_INITIAL_MS",
+    // Note: FALLBACK_API_BASE and FALLBACK_MODEL are NOT in DOTENV_ALLOWED_KEYS
+    // because they could redirect traffic to a malicious endpoint.
+    // They must come from the real shell env.
 ];
 
 /// 从 `path` 读 dotenv;仅对 (a) 在 `DOTENV_ALLOWED_KEYS` 白名单内且 (b) 进程 env 未设置的
@@ -441,6 +462,32 @@ mod tests {
         unsafe {
             std::env::remove_var("CODECODER_AUTOTASK_INTERVAL_SECS");
             std::env::remove_var("CODECODER_AUTOTASK_SOURCE");
+        }
+    }
+
+    #[test]
+    fn provider_retry_defaults() {
+        unsafe {
+            std::env::remove_var("CODECODER_PROVIDER_RETRY_MAX");
+            std::env::remove_var("CODECODER_PROVIDER_RETRY_INITIAL_MS");
+        }
+        let cfg = Config::from_env();
+        assert_eq!(cfg.provider_retry_max, 3);
+        assert_eq!(cfg.provider_retry_initial_ms, 1000);
+    }
+
+    #[test]
+    fn provider_retry_overrides() {
+        unsafe {
+            std::env::set_var("CODECODER_PROVIDER_RETRY_MAX", "5");
+            std::env::set_var("CODECODER_PROVIDER_RETRY_INITIAL_MS", "2000");
+        }
+        let cfg = Config::from_env();
+        assert_eq!(cfg.provider_retry_max, 5);
+        assert_eq!(cfg.provider_retry_initial_ms, 2000);
+        unsafe {
+            std::env::remove_var("CODECODER_PROVIDER_RETRY_MAX");
+            std::env::remove_var("CODECODER_PROVIDER_RETRY_INITIAL_MS");
         }
     }
 }
