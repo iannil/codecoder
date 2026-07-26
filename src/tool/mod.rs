@@ -2,6 +2,7 @@
 // the binary; a runtime-authored executable is a Capability, not a Tool.
 pub mod builtin;
 pub mod dev;
+pub mod generate_milestones;
 pub mod net;
 pub mod reason;
 pub mod search;
@@ -113,6 +114,7 @@ impl Toolbox {
                 Box::new(dev::Plan),
                 Box::new(dev::Milestone),
                 Box::new(dev::Memory),
+                Box::new(generate_milestones::GenerateMilestones),
                 Box::new(reason::Reason),
                 Box::new(search::Glob),
                 Box::new(search::Grep),
@@ -135,6 +137,7 @@ impl Toolbox {
                 Box::new(net::SearchGithub),
                 Box::new(net::ReverseApi),
                 Box::new(dev::Diff),
+                Box::new(generate_milestones::GenerateMilestones),
             ],
         }
     }
