@@ -32,6 +32,7 @@ fn main() -> anyhow::Result<()> {
             println!("  cc ledger --last <n>   Show last N BG tasks");
             println!("  cc ledger --detail     Show detailed last BG task");
             println!("  cc services            List running persistent services");
+            println!("  cc workgraph           Show workgraph milestone status");
             println!();
             println!("REPL commands (inside interactive mode):");
             println!("  /exit                  Exit REPL");
@@ -50,6 +51,7 @@ fn main() -> anyhow::Result<()> {
         }
         [one] if one == "clone" => send_one(&sock, ClientRequest::TreeClone),
         [one] if one == "services" => send_one(&sock, ClientRequest::Services),
+        [one] if one == "workgraph" => send_one(&sock, ClientRequest::WorkgraphStatus),
         [one, rest @ ..] if one == "ledger" => {
             // 直读 bg_ledger.jsonl,不经 daemon(BG 独立于 daemon)。
             let root = codecoder::Config::from_env().root;

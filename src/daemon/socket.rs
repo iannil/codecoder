@@ -94,7 +94,7 @@ pub fn handle_connection(
     turn_token: &std::sync::Arc<std::sync::Mutex<()>>,
     bus: &std::sync::Arc<super::bus::EventBus>,
 ) -> anyhow::Result<()> {
-    use super::proto::{read_request, write_event, ClientRequest, ServerEvent};
+    use super::proto::{read_request, write_event, ClientRequest, ServerEvent, WorkgraphStatus};
     use std::io::BufWriter;
     use std::sync::mpsc;
 
@@ -245,6 +245,30 @@ pub fn handle_connection(
                 let g = mgr.lock().unwrap();
                 let services = g.service_statuses();
                 let _ = body_tx.send(ServerEvent::Services(services));
+                let _ = body_tx.send(ServerEvent::TurnComplete);
+            }
+            ClientRequest::WorkgraphStatus => {
+                let root = mgr.lock().unwrap().root().to_path_buf();
+                drop(mgr);
+                let g = crate::workgraph::WorkGraph::read(&root);
+                let mut counts = (0usize, 0usize, 0usize, 0usize, 0usize);
+                for n in &g.nodes {
+                    match n.status {
+                        crate::workgraph::NodeStatus::Pending => counts.0 += 1,
+                        crate::workgraph::NodeStatus::Done => counts.1 += 1,
+                        crate::workgraph::NodeStatus::NeedsFix => counts.2 += 1,
+                        crate::workgraph::NodeStatus::Blocked => counts.3 += 1,
+                        _ => {}
+                    }
+                }
+                let _ = body_tx.send(ServerEvent::WorkgraphStatus(WorkgraphStatus {
+                    total: g.nodes.len(),
+                    pending: counts.0,
+                    done: counts.1,
+                    needs_fix: counts.2,
+                    blocked: counts.3,
+                    last_advanced: None,
+                }));
                 let _ = body_tx.send(ServerEvent::TurnComplete);
             }
         }

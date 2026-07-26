@@ -173,7 +173,7 @@ pub fn print_event(ev: &ServerEvent) -> bool {
             println!("  sessions: {} ({})", s.active_sessions, s.session_ids.join(", "));
             for svc in &s.supervisor_services {
                 let status = if svc.gave_up { "FAILED" } else { "running" };
-                println!("  service: {} ({}) {} @ {}", svc.name, status, svc.address);
+                println!("  service: {} ({}) at {}", svc.name, status, svc.address);
             }
             false
         }
@@ -191,6 +191,21 @@ pub fn print_event(ev: &ServerEvent) -> bool {
                     let status = if svc.gave_up { "FAILED" } else { "running" };
                     println!("  {}  {}  {}", status, svc.name,
                         if svc.address.is_empty() { "(no address)" } else { &svc.address });
+                }
+            }
+            false
+        }
+        ServerEvent::WorkgraphStatus(s) => {
+            if s.total == 0 {
+                println!("workgraph: (empty — seed workgraph.json first)");
+            } else {
+                println!("workgraph: {} milestones", s.total);
+                println!("  pending:   {}", s.pending);
+                println!("  done:      {}", s.done);
+                println!("  needs_fix: {}", s.needs_fix);
+                println!("  blocked:   {}", s.blocked);
+                if let Some(ref t) = s.last_advanced {
+                    println!("  last:      {}", t);
                 }
             }
             false

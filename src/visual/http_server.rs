@@ -477,5 +477,8 @@ fn sse_event_type(ev: &ServerEvent) -> &'static str {
         ServerEvent::Prompt { .. } => "prompt",
         ServerEvent::BusNotice { .. } => "bus_notice",
         ServerEvent::Tree { .. } => "tree",
+        ServerEvent::Status(_) => "status",
+        ServerEvent::Services(_) => "services",
+        ServerEvent::WorkgraphStatus(_) => "workgraph_status",
     }
 }
