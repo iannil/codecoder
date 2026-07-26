@@ -95,37 +95,6 @@ impl Daemon {
                 })
         ));
 
-        // 创建共享线程心跳状态。
-        let thread_status = Arc::new(Mutex::new(Vec::<crate::daemon::proto::ThreadStatus>::new()));
-        // 初始化四个线程的槽位（monitor、supervisor、workgraph、reload）。
-        {
-            let mut ts = thread_status.lock().unwrap();
-            ts.push(crate::daemon::proto::ThreadStatus {
-                name: "monitor".into(),
-                last_tick: None,
-                tick_count: 0,
-                last_event: "initializing".into(),
-            });
-            ts.push(crate::daemon::proto::ThreadStatus {
-                name: "supervisor".into(),
-                last_tick: None,
-                tick_count: 0,
-                last_event: "initializing".into(),
-            });
-            ts.push(crate::daemon::proto::ThreadStatus {
-                name: "workgraph".into(),
-                last_tick: None,
-                tick_count: 0,
-                last_event: "initializing".into(),
-            });
-            ts.push(crate::daemon::proto::ThreadStatus {
-                name: "reload".into(),
-                last_tick: None,
-                tick_count: 0,
-                last_event: "initializing".into(),
-            });
-        }
-
         // 把 thread_status 传给 mgr（供 `cc status` 查询）。
         mgr.lock().unwrap().thread_status = Some(Arc::clone(&thread_status));
 
