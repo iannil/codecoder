@@ -10,6 +10,7 @@ pub mod proto;
 pub mod session_manager;
 pub mod socket;
 pub mod bus;
+pub mod task_source;
 
 pub struct Daemon {
     cfg: Config,
