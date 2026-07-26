@@ -35,6 +35,8 @@ pub struct Config {
     pub max_tool_output: usize,
     /// 命令超时秒数(0 = 无超时)。run_command 工具使用此值,也可被其 timeout_secs 参数覆盖。
     pub command_timeout_secs: u32,
+    /// 是否启用 tier-2 compaction (LLM 摘要)。env CODECODER_COMPACTION_TIER2, 默认 true。
+    pub compaction_tier2: bool,
     /// daemon workgraph 推进线程间隔（秒）。默认 30。
     pub wg_tick_secs: u64,
     /// Supervisor 监督线程间隔（秒）。默认 1。
@@ -101,6 +103,9 @@ impl Config {
             command_timeout_secs: env("CODECODER_COMMAND_TIMEOUT_SECS")
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(0),
+            compaction_tier2: env("CODECODER_COMPACTION_TIER2")
+                .map(|v| v != "0" && v != "false" && v != "no")
+                .unwrap_or(true),
             wg_tick_secs: env("CODECODER_WG_TICK_SECS")
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(30),
@@ -170,6 +175,7 @@ const DOTENV_ALLOWED_KEYS: &[&str] = &[
     "CODECODER_NOOP_NUDGE_THRESHOLD",
     "CODECODER_SUPERVISOR_CRASH_BUDGET",
     "CODECODER_COMMAND_TIMEOUT_SECS",
+    "CODECODER_COMPACTION_TIER2",
     "CODECODER_WG_TICK_SECS",
     "CODECODER_SUPERVISOR_TICK_SECS",
     "CODECODER_ONDEMAND_REAPER_SECS",
@@ -463,6 +469,19 @@ mod tests {
             std::env::remove_var("CODECODER_AUTOTASK_INTERVAL_SECS");
             std::env::remove_var("CODECODER_AUTOTASK_SOURCE");
         }
+    }
+
+    #[test]
+    fn compaction_tier2_default_true() {
+        unsafe { std::env::remove_var("CODECODER_COMPACTION_TIER2"); }
+        assert!(Config::from_env().compaction_tier2);
+    }
+
+    #[test]
+    fn compaction_tier2_can_be_disabled() {
+        unsafe { std::env::set_var("CODECODER_COMPACTION_TIER2", "false"); }
+        assert!(!Config::from_env().compaction_tier2);
+        unsafe { std::env::remove_var("CODECODER_COMPACTION_TIER2"); }
     }
 
     #[test]

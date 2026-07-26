@@ -354,6 +354,7 @@ mod tests {
             max_tokens_ceiling: 32768,
             noop_nudge_threshold: 3,
             command_timeout_secs: 0,
+            compaction_tier2: true,
             wg_tick_secs: 30,
             supervisor_tick_secs: 1,
             ondemand_reaper_secs: 5,
