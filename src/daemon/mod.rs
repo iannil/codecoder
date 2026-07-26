@@ -284,6 +284,8 @@ mod tests {
             wg_tick_secs: 30,
             supervisor_tick_secs: 1,
             ondemand_reaper_secs: 5,
+            auto_task_interval_secs: 300,
+            auto_task_source: "github_issues".into(),
         };
         let _d = Daemon::new(cfg); // 仅构造，不 run（run 会阻塞 accept）
         let _ = std::fs::remove_dir_all(&dir);
