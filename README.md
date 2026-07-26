@@ -141,6 +141,10 @@ project/
 | `CODECODER_TRUST_FILE` | `~/.codecoder/trust.json` | 全局信任决策存储路径（就近祖先匹配，见 ADR 0028） |
 | `CODECODER_MAX_TOOL_OUTPUT` | `262144` | `read_file` / `run_command` 单次输出字节上限，超长截断带 marker（ADR 0037） |
 | `CODECODER_NOOP_NUDGE_THRESHOLD` | `3` | 单 turn 连续多少「纯探索」步（read_file/glob/grep/diff）后注入一次 steering nudge，推动动手或声明阻塞（0 = 禁用；每 turn 至多一次；迭代 4，ADR 0029 修订） |
+| `CODECODER_COMMAND_TIMEOUT_SECS` | `0` | `run_command` 默认超时秒数（0 = 无超时；工具参数 `timeout_secs` 可覆盖） |
+| `CODECODER_WG_TICK_SECS` | `30` | daemon 后台 workgraph 自动推进间隔秒数 |
+| `CODECODER_SUPERVISOR_TICK_SECS` | `1` | daemon Persistent 服务监督线程检查间隔秒数 |
+| `CODECODER_ONDEMAND_REAPER_SECS` | `5` | OnDemand capability 自动回收延迟秒数 |
 | `GITHUB_TOKEN` | — | GitHub API token（提升 rate limit） |
 
 > **`.ccd.env` 自动加载**：`ccd`/`cc`/headless BG 启动时自动加载项目根（`CODECODER_ROOT` 或 CWD）的 `.ccd.env`（`KEY=VALUE` 每行一条，支持 `#` 注释与引号值；已 gitignore）。**只注入一个安全调参白名单**（`MODEL`、`MAX_TOKENS`、`MAX_TOKENS_CEILING`、`TEMPERATURE`、`MAX_TOOL_OUTPUT`、`BG_MAX_AUTO`、`BG_CIRCUIT_K`、`BG_MILESTONE_TOOL_CAP`、`BG_MAX_FIX_ATTEMPTS`、`NOOP_NUDGE_THRESHOLD`、`SUPERVISOR_CRASH_BUDGET`，均带 `CODECODER_` 前缀），且**不覆盖**已设置的进程 env。密钥/端点（`CODECODER_API_KEY`/`CODECODER_API_BASE`/`GITHUB_TOKEN`）、trust 门（`CODECODER_DEFAULT_TRUST`）与 loader/shell 变量（`LD_*`/`PATH` 等）**一律拒绝注入**并 stderr 告警——`.ccd.env` 是仓库本地文件、可能不可信，这些必须来自你的真实 shell。

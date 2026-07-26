@@ -37,6 +37,8 @@ fn main() -> anyhow::Result<()> {
             println!("  cc workgraph-resume    Resume workgraph auto-advance");
             println!("  cc milestone-reset <id>  Reset a needs_fix milestone to pending");
             println!();
+            println!("NOTE: First-run users — set up a `.ccd.env` in the project root for");
+            println!("persistent config (CODECODER_API_KEY, CODECODER_MODEL, etc.).");
             println!("REPL commands (inside interactive mode):");
             println!("  /exit                  Exit REPL");
             println!("  /tree                  Show session tree");
