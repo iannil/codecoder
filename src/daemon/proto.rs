@@ -87,6 +87,8 @@ pub enum ClientRequest {
     TreeNav { id: u64 },
     /// 复制活动 session 为新 session 文件（`cc clone`）。
     TreeClone,
+    /// 列出运行中的 Persistent 服务（`cc services`）。
+    Services,
 }
 
 /// 对 Status 请求的响应（daemon 健康状态快照）。
@@ -128,6 +130,8 @@ pub enum ServerEvent {
     /// 对 Status 请求的响应（daemon 健康状态）。
     Status(DaemonStatus),
     Tree { nodes: Vec<TreeNode> },
+    /// 列 Persistent 服务的状态响应（`cc services`）。
+    Services(Vec<ServiceStatus>),
 }
 
 /// 从一行读一个 `ClientRequest`。`Ok(None)` 表示客户端关闭（EOF）。
@@ -296,6 +300,15 @@ mod tests {
             id: 42,
             body: PromptBody::AskUser { prompt: "favorite number?".into() },
         };
+        let json = serde_json::to_string(&ev).unwrap();
+        let back: ServerEvent = serde_json::from_str(&json).unwrap();
+        assert_eq!(ev, back);
+    }
+
+    #[test]
+    fn services_event_round_trips() {
+        let svc = ServiceStatus { name: "web".into(), address: "http://127.0.0.1:8080".into(), gave_up: false };
+        let ev = ServerEvent::Services(vec![svc]);
         let json = serde_json::to_string(&ev).unwrap();
         let back: ServerEvent = serde_json::from_str(&json).unwrap();
         assert_eq!(ev, back);

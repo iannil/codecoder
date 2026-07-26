@@ -38,6 +38,9 @@ pub struct DaemonSessionManager {
     /// 这与 `mgr` 的 Mutex 解耦（mgr 锁在 drain 之前释放以保持多客户端活性，
     /// Task 9a）；两者不可合用，否则又退化成单客户端。
     turn_token: Arc<std::sync::Mutex<()>>,
+    /// Supervisor 引用，供 `cc services` 查询 Persistent 服务状态。在 daemon::run()
+    /// 中初始化后注入。
+    pub supervisor: Option<Arc<Mutex<crate::capability::Supervisor>>>,
 }
 
 impl DaemonSessionManager {
@@ -60,6 +63,7 @@ impl DaemonSessionManager {
             next_seq: 0,
             started_at: std::time::Instant::now(),
             turn_token: Arc::new(std::sync::Mutex::new(())),
+            supervisor: None,
         }
     }
 
@@ -183,6 +187,20 @@ impl DaemonSessionManager {
             session_ids: self.list(),
             supervisor_count: 0, // 暂缺，Task 4 会填充
             supervisor_services: vec![],
+        }
+    }
+
+    /// 查询所有受监督的 Persistent 服务状态，按名称排序返回。
+    pub fn service_statuses(&self) -> Vec<ServiceStatus> {
+        match &self.supervisor {
+            Some(sup) => {
+                let tuples = sup.lock().unwrap().service_statuses();
+                tuples
+                    .into_iter()
+                    .map(|(name, address, gave_up)| ServiceStatus { name, address, gave_up })
+                    .collect()
+            }
+            None => vec![],
         }
     }
 }

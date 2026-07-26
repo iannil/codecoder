@@ -62,30 +62,36 @@ impl Daemon {
         let bus = Arc::new(crate::daemon::bus::EventBus::new());
 
         let budget = self.cfg.supervisor_crash_budget;
-        let mut supervisor = crate::capability::Supervisor::start_all(&self.cfg.root, budget)
-            .unwrap_or_else(|e| {
-                eprintln!("ccd: supervisor init failed: {e}");
-                crate::capability::Supervisor {
-                    root: self.cfg.root.clone(),
-                    states: Default::default(),
-                    state: crate::supervisor_state::SupervisorState::default(),
-                    crash_budget: budget,
-                }
-            });
+        let supervisor = Arc::new(Mutex::new(
+            crate::capability::Supervisor::start_all(&self.cfg.root, budget)
+                .unwrap_or_else(|e| {
+                    eprintln!("ccd: supervisor init failed: {e}");
+                    crate::capability::Supervisor {
+                        root: self.cfg.root.clone(),
+                        states: Default::default(),
+                        state: crate::supervisor_state::SupervisorState::default(),
+                        crash_budget: budget,
+                    }
+                })
+        ));
+
+        // 把 supervisor 引用传给 mgr（供 `cc services` 查询）。
+        mgr.lock().unwrap().supervisor = Some(Arc::clone(&supervisor));
 
         // 监督线程：周期 supervise（独立线程，避免阻塞 accept）。
         let shutdown_c = shutdown.clone();
         let bus_for_sup = Arc::clone(&bus);
+        let sup_supervisor = Arc::clone(&supervisor);
         let sup_handle = {
             std::thread::spawn(move || {
                 while !shutdown_c.load(Ordering::SeqCst) {
-                    let events = supervisor.supervise();
+                    let events = sup_supervisor.lock().unwrap().supervise();
                     for line in events {
                         bus_for_sup.broadcast("supervisor", &line);
                     }
                     std::thread::sleep(std::time::Duration::from_secs(1));
                 }
-                supervisor.shutdown_all();
+                sup_supervisor.lock().unwrap().shutdown_all();
             })
         };
 

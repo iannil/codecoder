@@ -49,6 +49,7 @@ fn main() -> anyhow::Result<()> {
             send_one(&sock, ClientRequest::TreeNav { id })
         }
         [one] if one == "clone" => send_one(&sock, ClientRequest::TreeClone),
+        [one] if one == "services" => send_one(&sock, ClientRequest::Services),
         [one, rest @ ..] if one == "ledger" => {
             // 直读 bg_ledger.jsonl,不经 daemon(BG 独立于 daemon)。
             let root = codecoder::Config::from_env().root;

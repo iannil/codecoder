@@ -210,6 +210,17 @@ impl Supervisor {
             }
         }
     }
+
+    /// Return (name, address, gave_up) for every supervised service, sorted by name.
+    pub fn service_statuses(&self) -> Vec<(String, String, bool)> {
+        let mut v: Vec<(String, String, bool)> = self
+            .states
+            .iter()
+            .map(|(name, s)| (name.clone(), s.manifest.address.clone(), s.gave_up))
+            .collect();
+        v.sort_by(|a, b| a.0.cmp(&b.0));
+        v
+    }
 }
 
 fn read_manifest(name: &str, root: &std::path::Path) -> anyhow::Result<CapabilityManifest> {

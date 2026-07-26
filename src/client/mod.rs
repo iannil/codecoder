@@ -182,6 +182,19 @@ pub fn print_event(ev: &ServerEvent) -> bool {
             let _ = std::io::stdout().flush();
             false
         }
+        ServerEvent::Services(services) => {
+            if services.is_empty() {
+                println!("(no persistent services)");
+            } else {
+                println!("persistent services:");
+                for svc in services {
+                    let status = if svc.gave_up { "FAILED" } else { "running" };
+                    println!("  {}  {}  {}", status, svc.name,
+                        if svc.address.is_empty() { "(no address)" } else { &svc.address });
+                }
+            }
+            false
+        }
     }
 }
 
