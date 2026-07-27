@@ -1,13 +1,21 @@
 //! Live observability for headless Background runs (spec 2026-07-25, ADR 0039).
 //! Tees each event to stderr (human) and `<root>/.ccd.bg.ndjson` (machine/tail).
+//! Auto-rotates NDJSON at 10 MB to prevent unbounded disk usage (P2-5).
 use std::io::Write;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 #[cfg(test)]
 use serde_json::json;
 
+/// Max NDJSON file size before rotation (10 MB).
+const ROTATE_SIZE: u64 = 10 * 1024 * 1024;
+/// Max rotated files to keep.
+const MAX_ROTATED: usize = 3;
+
 pub struct BgObserver {
     ndjson: Option<std::fs::File>,
+    /// Path to the NDJSON file, saved for rotation checks.
+    ndjson_path: Option<PathBuf>,
 }
 
 impl BgObserver {
@@ -18,7 +26,7 @@ impl BgObserver {
     pub fn start_run(root: &Path) -> Self {
         let path = root.join(".ccd.bg.ndjson");
         let ndjson = std::fs::File::create(&path).ok();
-        Self { ndjson }
+        Self { ndjson, ndjson_path: Some(path) }
     }
 
     /// Open `<root>/.ccd.bg.ndjson` in APPEND mode (create if missing, never
@@ -28,7 +36,7 @@ impl BgObserver {
     pub fn new(root: &Path) -> Self {
         let path = root.join(".ccd.bg.ndjson");
         let ndjson = std::fs::OpenOptions::new().create(true).append(true).open(&path).ok();
-        Self { ndjson }
+        Self { ndjson, ndjson_path: Some(path) }
     }
 
     /// Emit one event: stderr line + one JSON line to the NDJSON file.
@@ -40,6 +48,16 @@ impl BgObserver {
     /// into the top-level NDJSON object alongside `kind` and `msg`).
     pub fn emit_with_data(&mut self, kind: &str, msg: &str, data: Option<serde_json::Value>) {
         eprintln!("[bg] {kind}: {msg}");
+        // 每次 emit 前检查文件大小,超限则轮转(仅当有路径)。
+        if let Some(ref p) = self.ndjson_path {
+            if std::fs::metadata(p).map(|m| m.len() > ROTATE_SIZE).unwrap_or(false) {
+                let _ = rotate_ndjson(p);
+                // 轮转后需重建文件句柄。
+                if let Ok(f) = std::fs::OpenOptions::new().create(true).append(true).open(p) {
+                    self.ndjson = Some(f);
+                }
+            }
+        }
         if let Some(f) = self.ndjson.as_mut() {
             let line = if let Some(d) = data {
                 let mut obj = serde_json::json!({ "kind": kind, "msg": msg });
@@ -58,6 +76,28 @@ impl BgObserver {
             let _ = f.flush();
         }
     }
+}
+
+/// 轮转 NDJSON 文件:重命名 `.ccd.bg.ndjson` → `.ccd.bg.1.ndjson`,
+/// 清理超过 MAX_ROTATED(3) 的旧轮转文件。
+fn rotate_ndjson(path: &Path) -> std::io::Result<()> {
+    // 先清理超过限额的旧轮转文件: .ccd.bg.3.ndjson → 删除。
+    let dir = path.parent().unwrap_or(Path::new("."));
+    let stem = path.file_stem().unwrap_or_default().to_string_lossy();
+    for i in (MAX_ROTATED..100).rev() {
+        let old = dir.join(format!(".ccd.bg.{i}.ndjson"));
+        let _ = std::fs::remove_file(&old);
+    }
+    // 已有轮转文件依次后移: .ccd.bg.1.ndjson → .ccd.bg.2.ndjson
+    for i in (1..MAX_ROTATED).rev() {
+        let src = dir.join(format!(".ccd.bg.{i}.ndjson"));
+        let dst = dir.join(format!(".ccd.bg.{}.ndjson", i + 1));
+        let _ = std::fs::rename(&src, &dst);
+    }
+    // 当前文件 → .ccd.bg.1.ndjson
+    let rotated = dir.join(".ccd.bg.1.ndjson");
+    std::fs::rename(path, &rotated)?;
+    Ok(())
 }
 
 #[cfg(test)]
