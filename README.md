@@ -154,6 +154,8 @@ project/
 | `CODECODER_AUTOTASK_INTERVAL_SECS` | `300` | 自动任务发现轮询间隔秒数（0 = 禁用） |
 | `CODECODER_AUTOTASK_SOURCE` | `github_issues` | 自动任务来源（当前仅支持 `github_issues`） |
 | `CODECODER_SUPERVISOR_TICK_SECS` | `1` | daemon Persistent 服务监督线程检查间隔秒数 |
+| `CODECODER_ALERT_WEBHOOK` | — | BG 失败告警 webhook URL（非空时 BG 非 0 退出即 POST JSON 至该 URL） |
+| `CODECODER_ALERT_ON_FAILURE_ONLY` | `true` | 设为 `false` 时，BG 每次退出（含成功）都触发告警；默认仅非 0 退出时告警 |
 | `CODECODER_ONDEMAND_REAPER_SECS` | `5` | OnDemand capability 自动回收延迟秒数 |
 | `GITHUB_TOKEN` | — | GitHub API token（提升 rate limit） |
 
@@ -187,6 +189,12 @@ cc ledger --detail        # 最近一次的完整 subgoals 明细
 ```
 
 systemd `OnFailure=` / cron 邮件可按非 0 退出码触发告警；账本文件 append-only，用外部 logrotate 轮转。
+
+## Auto-Memory Skill（跨 session 知识积累）
+
+`skills/auto-memory.md` 是一个内置 Skill，帮助 agent 在每次里程碑完成后自动把学到的项目知识持久化到 `memory/auto-*.md` 文件中。这些记忆跨 session 共享，agent 在后续对话中可通过 `memory` 工具读取，形成持续的跨 session 学习能力。
+
+详见 `skills/auto-memory.md`。
 
 ## 开发
 
