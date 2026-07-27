@@ -68,6 +68,48 @@ fn read_mission(root: &Path) -> String {
     }
 }
 
+/// 空 workgraph 时，通过一个 headless agent turn 调用 generate_milestones 工具
+/// 自动分解使命为里程碑并写入 workgraph.json。成功写入返回 true，失败返回 false。
+/// 注意：不注册 SIGINT（避免与主循环的 cancel token 冲突）。
+fn seed_workgraph_from_mission(
+    provider: Arc<dyn Provider>,
+    model: String,
+    max_tokens: u32,
+    temperature: f32,
+    root: PathBuf,
+    tool_cap: usize,
+) -> bool {
+    let mission = read_mission(&root);
+    let prompt = format!(
+        "你是一个项目规划助手。当前项目是一个空目录，需要你来初始化。\n\n\
+         项目使命：\n{}\n\n\
+         请先使用 list_directory 工具了解项目结构，然后使用 generate_milestones 工具\
+         将上述使命分解为 3-8 个里程碑，每个里程碑包含：\n\
+         - title（简短、可行动的标题）\n\
+         - acceptance（具体、可验证的验收标准，尽量包含可执行的命令如 cargo test）\n\n\
+         里程碑应按依赖顺序排列，前面的里程碑是后面里程碑的前提。",
+        mission
+    );
+
+    let mut agent = AgentLoop::new_background(provider, model, max_tokens, temperature, root.clone());
+    agent.set_tool_cap(tool_cap);
+    let (tx, rx) = channel::<AgentEvent>();
+    let handle = std::thread::spawn(move || {
+        agent.run_one_turn(prompt, &tx);
+        drop(tx);
+        agent
+    });
+    // Drain events (不收集，seed turn 的日志不重要)
+    for _ev in rx.into_iter() {}
+    match handle.join() {
+        Ok(_agent) => {
+            let g = crate::workgraph::WorkGraph::read(&root);
+            !g.nodes.is_empty()
+        }
+        Err(_panic) => false,
+    }
+}
+
 /// Resolve the task for a background run: an explicit non-empty `task` wins;
 /// otherwise the workgraph's next ready milestone is used. Returns the chosen
 /// task text and a human-readable label for event logging.
@@ -1039,5 +1081,47 @@ mod tests {
         std::fs::write(dir2.path().join("AGENTS.md"), "   \n\n").unwrap();
         let m2 = read_mission(dir2.path());
         assert!(m2.contains("Initialize and develop"));
+    }
+
+    #[test]
+    fn seed_workgraph_from_mission_yields_milestones_with_stub() {
+        // StubClient 不调用 generate_milestones → 返回 false
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("AGENTS.md"), "Build a CLI tool").unwrap();
+        let ok = seed_workgraph_from_mission(
+            Arc::new(StubClient), "m".into(), 4096, 0.0, dir.path().to_path_buf(), 8,
+        );
+        // Stub 不调用工具，workgraph 应为空
+        assert!(!ok, "stub should not produce milestones");
+        let g = WorkGraph::read(dir.path());
+        assert!(g.nodes.is_empty(), "stub should not write any nodes");
+    }
+
+    #[test]
+    fn seed_workgraph_from_mission_no_agents_md_does_not_panic() {
+        let dir = tempfile::tempdir().unwrap();
+        // 无 AGENTS.md → 走降级路径，不 panic
+        let ok = seed_workgraph_from_mission(
+            Arc::new(StubClient), "m".into(), 4096, 0.0, dir.path().to_path_buf(), 8,
+        );
+        // 降级后仍不调用工具 → false
+        assert!(!ok);
+    }
+
+    #[test]
+    fn seed_workgraph_panicking_turn_returns_false() {
+        struct PanicOnComplete;
+        impl crate::provider::Provider for PanicOnComplete {
+            fn name(&self) -> &str { "panic_seed" }
+            fn complete(&self, _: &crate::provider::CompletionRequest) -> anyhow::Result<crate::provider::Completion> {
+                panic!("seed provider panic");
+            }
+        }
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("AGENTS.md"), "test").unwrap();
+        let ok = seed_workgraph_from_mission(
+            Arc::new(PanicOnComplete), "m".into(), 256, 0.0, dir.path().to_path_buf(), 8,
+        );
+        assert!(!ok, "panic should return false");
     }
 }
