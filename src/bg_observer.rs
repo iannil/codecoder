@@ -3,6 +3,9 @@
 use std::io::Write;
 use std::path::Path;
 
+#[cfg(test)]
+use serde_json::json;
+
 pub struct BgObserver {
     ndjson: Option<std::fs::File>,
 }
@@ -30,9 +33,27 @@ impl BgObserver {
 
     /// Emit one event: stderr line + one JSON line to the NDJSON file.
     pub fn emit(&mut self, kind: &str, msg: &str) {
+        self.emit_with_data(kind, msg, None);
+    }
+
+    /// Emit one event with optional structured data (extra JSON fields merged
+    /// into the top-level NDJSON object alongside `kind` and `msg`).
+    pub fn emit_with_data(&mut self, kind: &str, msg: &str, data: Option<serde_json::Value>) {
         eprintln!("[bg] {kind}: {msg}");
         if let Some(f) = self.ndjson.as_mut() {
-            let line = serde_json::json!({ "kind": kind, "msg": msg }).to_string();
+            let line = if let Some(d) = data {
+                let mut obj = serde_json::json!({ "kind": kind, "msg": msg });
+                if let Some(obj_map) = obj.as_object_mut() {
+                    if let Some(data_obj) = d.as_object() {
+                        for (k, v) in data_obj {
+                            obj_map.insert(k.clone(), v.clone());
+                        }
+                    }
+                }
+                obj.to_string()
+            } else {
+                serde_json::json!({ "kind": kind, "msg": msg }).to_string()
+            };
             let _ = writeln!(f, "{line}");
             let _ = f.flush();
         }
@@ -43,6 +64,30 @@ impl BgObserver {
 mod tests {
     use super::*;
     use tempfile::tempdir;
+
+    #[test]
+    fn emit_with_data_includes_extra_fields() {
+        let dir = tempdir().unwrap();
+        let mut obs = BgObserver::new(dir.path());
+        obs.emit_with_data("llm_call", "done", Some(json!({"prompt_tokens": 100, "completion_tokens": 50})));
+        let body = std::fs::read_to_string(dir.path().join(".ccd.bg.ndjson")).unwrap();
+        let v: serde_json::Value = serde_json::from_str(body.trim()).unwrap();
+        assert_eq!(v["kind"], "llm_call");
+        assert_eq!(v["prompt_tokens"], 100);
+        assert_eq!(v["completion_tokens"], 50);
+    }
+
+    #[test]
+    fn emit_with_data_no_data_is_identical_to_emit() {
+        let dir = tempdir().unwrap();
+        let mut obs = BgObserver::new(dir.path());
+        obs.emit_with_data("tool_started", "run_command", None);
+        let body = std::fs::read_to_string(dir.path().join(".ccd.bg.ndjson")).unwrap();
+        let v: serde_json::Value = serde_json::from_str(body.trim()).unwrap();
+        assert_eq!(v["kind"], "tool_started");
+        assert_eq!(v["msg"], "run_command");
+        assert!(v.get("prompt_tokens").is_none(), "no extra fields when data=None");
+    }
 
     #[test]
     fn ndjson_appends_one_valid_json_line_per_emit() {
