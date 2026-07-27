@@ -55,6 +55,7 @@ pub fn extract_gate_command(acceptance: &str) -> Option<String> {
 }
 
 /// 跑命令门:exit 0 → Pass;非零 → NeedsFix(附输出摘要);跑不起来 → Inconclusive。
+/// 对构建类命令(如 build)，exit 0 后额外检查常见产物路径是否存在，加深验证(迭代 5)。
 pub fn run_command_gate(cmd: &str, root: &Path, cancel: Option<&CancelToken>) -> GateVerdict {
     let mut command = Command::new("sh");
     command.arg("-c").arg(cmd).current_dir(root);
@@ -63,10 +64,42 @@ pub fn run_command_gate(cmd: &str, root: &Path, cancel: Option<&CancelToken>) ->
         None => run_shell_cancellable(command, &ToolCtx::new(root)),
     };
     match r {
-        Ok(out) if !out.is_error => GateVerdict::Pass,
+        Ok(out) if !out.is_error => {
+            // build 类命令 exit 0 后，额外检查常见产物存在性(迭代 5)。
+            let build_check = build_output_check(cmd, root, cancel);
+            match build_check {
+                Some(Err(e)) => GateVerdict::NeedsFix(format!("`{cmd}` passed but build output check failed: {e}")),
+                _ => GateVerdict::Pass,
+            }
+        }
         Ok(out) => GateVerdict::NeedsFix(format!("gate `{cmd}` failed: {}", truncate(out.content, 400))),
         Err(e) => GateVerdict::Inconclusive(format!("gate `{cmd}` could not run: {e}")),
     }
+}
+
+/// 对已知构建命令检查产物文件是否存在。返回 None(非 build 命令)或 Some(Ok/Err)。
+fn build_output_check(cmd: &str, root: &Path, cancel: Option<&CancelToken>) -> Option<std::io::Result<()>> {
+    let low = cmd.to_lowercase();
+    let checks: Vec<&str> = if low.contains("vite build") || low.contains("npm run build") {
+        vec!["dist/index.html", "dist/assets/"]
+    } else if low.contains("cargo build") {
+        vec!["target/debug/", "Cargo.toml"]
+    } else if low.contains("mkdocs build") || low.contains("sphinx-build") {
+        vec!["site/index.html"]
+    } else {
+        return None;
+    };
+    let cancel_flag = cancel.map(|c| c.is_cancelled()).unwrap_or(false);
+    if cancel_flag {
+        return Some(Err(std::io::Error::new(std::io::ErrorKind::Other, "cancelled")));
+    }
+    for path in &checks {
+        let full = root.join(path);
+        if !full.exists() {
+            return Some(Err(std::io::Error::new(std::io::ErrorKind::NotFound, format!("expected build output not found: {path}"))));
+        }
+    }
+    Some(Ok(()))
 }
 
 fn truncate(s: String, n: usize) -> String {
