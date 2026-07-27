@@ -273,6 +273,7 @@ impl Tool for WriteFile {
     fn run(&self, args: Value, ctx: &mut ToolCtx) -> anyhow::Result<ToolOutput> {
         let path = args.get("path").and_then(Value::as_str).unwrap_or_default();
         let content = args.get("content").and_then(Value::as_str).unwrap_or_default();
+        let append = args.get("append").and_then(Value::as_bool).unwrap_or(false);
         if path.is_empty() {
             return Ok(ToolOutput::err("missing required arg: path"));
         }
@@ -280,8 +281,23 @@ impl Tool for WriteFile {
         if let Some(parent) = full.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        match std::fs::write(&full, content) {
-            Ok(()) => Ok(ToolOutput::ok(format!("wrote {} bytes to {}", content.len(), path))),
+        let result = if append {
+            use std::fs::OpenOptions;
+            use std::io::Write;
+            OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&full)
+                .and_then(|mut f| f.write_all(content.as_bytes()))
+                .map(|_| content.len())
+        } else {
+            std::fs::write(&full, content).map(|_| content.len())
+        };
+        match result {
+            Ok(bytes) => {
+                let action = if append { "appended" } else { "wrote" };
+                Ok(ToolOutput::ok(format!("{action} {} bytes to {}", bytes, path)))
+            }
             Err(e) => Ok(ToolOutput::err(format!("cannot write {}: {e}", full.display()))),
         }
     }
@@ -1484,5 +1500,56 @@ mod tests {
         assert_eq!(out.content.trim(), "from-capability");
 
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn write_file_append_mode_appends() {
+        let dir = std::env::temp_dir().join(format!("cc_append_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut ctx = ToolCtx::new(&dir);
+        // 先写入初始内容
+        WriteFile.run(json!({"path": "test.txt", "content": "hello "}), &mut ctx).unwrap();
+        // append 追加
+        let out = WriteFile.run(json!({"path": "test.txt", "content": "world", "append": true}), &mut ctx).unwrap();
+        assert!(!out.is_error, "append should succeed: {}", out.content);
+        let content = std::fs::read_to_string(dir.join("test.txt")).unwrap();
+        assert_eq!(content, "hello world", "append should concatenate content");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn write_file_append_creates_new_file() {
+        let dir = std::env::temp_dir().join(format!("cc_append_new_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut ctx = ToolCtx::new(&dir);
+        // 文件不存在时 append 应创建
+        let out = WriteFile.run(json!({"path": "new.txt", "content": "created", "append": true}), &mut ctx).unwrap();
+        assert!(!out.is_error, "append to new file should succeed: {}", out.content);
+        let content = std::fs::read_to_string(dir.join("new.txt")).unwrap();
+        assert_eq!(content, "created");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn write_file_overwrite_by_default() {
+        let dir = std::env::temp_dir().join(format!("cc_overwrite_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut ctx = ToolCtx::new(&dir);
+        WriteFile.run(json!({"path": "test.txt", "content": "original"}), &mut ctx).unwrap();
+        // 默认 append=false，应覆盖
+        WriteFile.run(json!({"path": "test.txt", "content": "replaced"}), &mut ctx).unwrap();
+        let content = std::fs::read_to_string(dir.join("test.txt")).unwrap();
+        assert_eq!(content, "replaced", "default should overwrite");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn write_file_permission_requires_ask() {
+        use std::path::Path;
+        let tool = WriteFile;
+        match tool.permission(&json!({"path": "x"}), Path::new(".")) {
+            Permission::Ask { key } => assert_eq!(key, "write_file"),
+            _ => panic!("expected Ask"),
+        }
     }
 }
