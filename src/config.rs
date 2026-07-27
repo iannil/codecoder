@@ -56,6 +56,10 @@ pub struct Config {
     pub fallback_api_base: Option<String>,
     /// fallback 模型的名称。env CODECODER_FALLBACK_MODEL。
     pub fallback_model: Option<String>,
+    /// 告警 webhook URL (Slack-compatible)。env CODECODER_ALERT_WEBHOOK。
+    pub alert_webhook: Option<String>,
+    /// 是否仅失败时告警。env CODECODER_ALERT_ON_FAILURE_ONLY, 默认 true。
+    pub alert_on_failure_only: bool,
 }
 
 impl Config {
@@ -128,6 +132,10 @@ impl Config {
                 .unwrap_or(1000),
             fallback_api_base: env("CODECODER_FALLBACK_API_BASE"),
             fallback_model: env("CODECODER_FALLBACK_MODEL"),
+            alert_webhook: env("CODECODER_ALERT_WEBHOOK"),
+            alert_on_failure_only: env("CODECODER_ALERT_ON_FAILURE_ONLY")
+                .map(|v| v != "0" && v != "false")
+                .unwrap_or(true),
         }
     }
 }

@@ -4,6 +4,7 @@
 #![allow(dead_code)]
 
 pub mod agent;
+pub mod alert;
 pub mod background;
 pub mod bg_gate;
 pub mod bg_ledger;
@@ -115,6 +116,29 @@ pub fn run_background(cfg: Config, task: String) -> anyhow::Result<()> {
         eprintln!("bg ledger append failed: {e}");
     }
     let code = crate::bg_ledger::mission_exit_code(&outcome.mission_state);
+
+    // 告警:当配置了 webhook 时,根据 alert_on_failure_only 决定是否发送。
+    if let Some(ref webhook) = cfg.alert_webhook {
+        let should_alert = if cfg.alert_on_failure_only { code != 0 } else { true };
+        if should_alert {
+            let mission_state_str = format!("{:?}", outcome.mission_state);
+            let summary = if outcome.final_text.trim().is_empty() {
+                format!("{} tools, {} denied", outcome.tool_calls.len(), outcome.denied.len())
+            } else {
+                let mut s = outcome.final_text.trim().to_string();
+                if s.len() > 200 {
+                    s.truncate(200);
+                    s.push_str("...");
+                }
+                s
+            };
+            let msg = crate::alert::format_bg_alert(code, &mission_state_str, &summary);
+            if let Err(e) = crate::alert::send_alert(webhook, &msg) {
+                eprintln!("alert send failed: {e}");
+            }
+        }
+    }
+
     if code == 0 {
         Ok(())
     } else {

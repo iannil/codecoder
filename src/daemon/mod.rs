@@ -364,6 +364,8 @@ mod tests {
             provider_retry_initial_ms: 1000,
             fallback_api_base: None,
             fallback_model: None,
+            alert_webhook: None,
+            alert_on_failure_only: true,
         };
         let _d = Daemon::new(cfg); // 仅构造，不 run（run 会阻塞 accept）
         let _ = std::fs::remove_dir_all(&dir);
