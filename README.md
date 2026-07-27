@@ -151,6 +151,9 @@ project/
 | `CODECODER_FALLBACK_API_BASE` | — | 可选，主 provider 不可用时回退的 API 端点 |
 | `CODECODER_FALLBACK_MODEL` | — | 可选，回退时使用的模型名称 |
 | `CODECODER_WG_TICK_SECS` | `30` | daemon 后台 workgraph 自动推进间隔秒数 |
+| `CODECODER_DAEMON_AUTO_RESTART` | `false` | daemon 崩溃后自动重启并恢复 session（stamp 文件追踪 workgraph 进度，最多 5 次重启尝试） |
+| `CODECODER_MAX_SESSIONS` | `100` | `sessions/` 目录最大文件数，超限时删除最旧的。`0` = 不限制 |
+| `CODECODER_MAX_LEDGER_LINES` | `10000` | `bg_ledger.jsonl` 最大行数，超限时截断。`0` = 不限制 |
 | `CODECODER_AUTOTASK_INTERVAL_SECS` | `300` | 自动任务发现轮询间隔秒数（0 = 禁用） |
 | `CODECODER_AUTOTASK_SOURCE` | `github_issues` | 自动任务来源（当前仅支持 `github_issues`） |
 | `CODECODER_SUPERVISOR_TICK_SECS` | `1` | daemon Persistent 服务监督线程检查间隔秒数 |

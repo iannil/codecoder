@@ -47,6 +47,7 @@
 | `registry.rs` | 扫 `skills/`+`prompts/`+`capabilities/` → 常驻目录(prompts 标 `[draft]`);**每个条目带 `SourceInfo` 溯源元数据** | 0020 0025 |
 | `capability.rs` | `Environment`/`Lifecycle`/manifest/`RunningServiceTable`、`Supervisor`(Persistent 服务崩溃→标记 Failed 可见,**不自动重启**,0021;**跨重启持久化判定状态 + 崩溃预算**,0034) | 0021 0034 |
 | `supervisor_state.rs` | **Persistent 跨重启监督状态**(ADR 0034):`supervisor_state.json` 持久化 gave_up/crash_count/manifest mtime;load/save/reset/should_skip/record_crash | 0034 |
+| `recovery.rs` | **Daemon 崩溃自动恢复**:stamp 文件 + 重启循环;`daemon_auto_restart` 启用时以最多 5 次重启尝试包装 `run_daemon`;stamp 追踪 workgraph 进度，崩溃后 daemon 从中断处继续 | — |
 | `memory.rs` | `memory/<key>` 文件级 KV + 数据索引(**跨 session 共享**) | — |
 | `workgraph.rs` | **Work Graph(一等公民 #2)**:持久化、依赖有序的里程碑图,`Milestone` 节点含 `NodeStatus`(含 `Hypothesis`/`Locked`)、`next_ready()` 调度、`render_for_prompt()` 摘要;**fs2-locked RMW**(`with_lock`,ADR 0035,防并发 lost-update);节点带 `fix_attempts`/`last_failure` 重试状态,`next_retryable(max)` 选预算内最低 id 的 needs_fix | 设计文档 0035 |
 | `review.rs` | **结构化验收裁决(一等公民 #4)**:`Verdict`(pass/needs_fix/rebuild)+ 四信号(`foundation`/`over_engineering`/`volume`/`terminology`),纯函数解析 | 设计文档 |
