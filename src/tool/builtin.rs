@@ -68,11 +68,13 @@ impl RunCommand {
     /// Permission key(ADR 0018)。简单命令按命令类(`run_command:git`);
     /// **复合命令按整条命令串**(`run_command:cd X && rm`),使其不可经良性
     /// 前缀预授权(ADR 0036,P5 加固)。
+    /// headless + CODECODER_DEFAULT_TRUST=always 时放宽:复合命令也按首 token
+    /// keying,以便 allowlist 前缀匹配(P0-4 修复)。
     fn key_for(cmd: &str) -> String {
-        if Self::is_compound(cmd) {
+        let head = cmd.split_whitespace().next().unwrap_or("");
+        if Self::is_compound(cmd) && !matches!(crate::trust::default_trust(), crate::trust::TrustDecision::Trusted) {
             format!("run_command:{cmd}")
         } else {
-            let head = cmd.split_whitespace().next().unwrap_or("");
             format!("run_command:{head}")
         }
     }
@@ -1019,6 +1021,31 @@ mod tests {
     }
 
     #[test]
+    fn run_command_compound_key_uses_full_cmd_when_untrusted() {
+        // untrusted (default): compound commands use full command as key
+        unsafe { std::env::remove_var("CODECODER_DEFAULT_TRUST"); }
+        match RunCommand.permission(&json!({ "cmd": "npm run build 2>&1" }), std::path::Path::new(".")) {
+            Permission::Ask { key } => assert_eq!(key, "run_command:npm run build 2>&1"),
+            _ => panic!("expected Ask"),
+        }
+    }
+
+    #[test]
+    fn run_command_compound_key_uses_head_token_when_trusted() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        unsafe { std::env::set_var("CODECODER_DEFAULT_TRUST", "always"); }
+        match RunCommand.permission(&json!({ "cmd": "npm run build 2>&1" }), std::path::Path::new(".")) {
+            Permission::Ask { key } => assert_eq!(key, "run_command:npm"),
+            _ => panic!("expected Ask"),
+        }
+        match RunCommand.permission(&json!({ "cmd": "find . -name '*.ts' | sort" }), std::path::Path::new(".")) {
+            Permission::Ask { key } => assert_eq!(key, "run_command:find"),
+            _ => panic!("expected Ask"),
+        }
+        unsafe { std::env::remove_var("CODECODER_DEFAULT_TRUST"); }
+    }
+
+    #[test]
     fn truncate_output_passes_short_and_truncates_long() {
         // 透传:未超 max 原样返回(无 marker)。
         assert_eq!(truncate_output("hi".into(), 10, 2), "hi");
@@ -1078,7 +1105,10 @@ mod tests {
 
     #[test]
     fn run_command_compound_keys_by_full_string() {
-        // 复合命令(含 shell 运算符)→ 整条命令串 key,不可经良性前缀预授权(ADR 0036)。
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // 复合命令(含 shell 运算符)且 CODECODER_DEFAULT_TRUST 未设→ 整条命令串 key。
+        // 仅在 trusted 时改用首 token keying(P0-4)。
+        unsafe { std::env::remove_var("CODECODER_DEFAULT_TRUST"); }
         let cases: &[(&str, &str)] = &[
             ("cd X && cargo test", "run_command:cd X && cargo test"),
             ("ls | grep foo", "run_command:ls | grep foo"),
@@ -1093,11 +1123,15 @@ mod tests {
                 _ => panic!("expected Ask for {cmd:?}"),
             }
         }
+        drop(_g);
     }
 
     #[test]
     fn run_command_simple_keys_by_first_token() {
         // 简单命令(无运算符)→ 首 token,同既有行为,可预授权。
+        // 此测试应放在 ENV_LOCK 外运行(不依赖 env),但安全起见加锁防止与 compound 测试竞争。
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        unsafe { std::env::remove_var("CODECODER_DEFAULT_TRUST"); }
         let cases: &[(&str, &str)] = &[
             ("echo hi", "run_command:echo"),
             ("cargo test", "run_command:cargo"),
@@ -1108,6 +1142,7 @@ mod tests {
                 _ => panic!("expected Ask for {cmd:?}"),
             }
         }
+        drop(_g);
     }
 
     #[test]
