@@ -925,8 +925,10 @@ impl AgentLoop {
                         .iter()
                         .map(|(call_id, name, _)| {
                             let output = "tool call truncated: the response hit max_tokens before the \
-                                 arguments finished; not executed. Retry with a shorter response or \
-                                 split the work."
+                                 arguments finished. Not executed. The model's reasoning was too long, \
+                                 leaving no room for the file content. Retry with a MUCH shorter thought \
+                                 process, or if this was a write_file, consider whether the file was \
+                                 partially created — you can append to it with append=true."
                                 .to_string();
                             let _ = event_tx.send(AgentEvent::ToolFinished {
                                 name: name.clone(),
@@ -2704,5 +2706,15 @@ mod tests {
         let (outcome, _raw) = agent.run_review("the current changes", &tx);
         // Stub yields parseable-or-default review text → a concrete verdict exists.
         let _ = outcome.verdict; // does not panic; type is ReviewOutcome
+    }
+
+    #[test]
+    fn truncated_tool_call_error_mentions_append() {
+        let err_msg = "tool call truncated: the response hit max_tokens before the \
+         arguments finished. Not executed. The model's reasoning was too long, \
+         leaving no room for the file content. Retry with a MUCH shorter thought \
+         process, or if this was a write_file, consider whether the file was \
+         partially created — you can append to it with append=true.";
+        assert!(err_msg.contains("append=true"), "error should mention append=true");
     }
 }
