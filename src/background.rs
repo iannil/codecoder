@@ -394,14 +394,52 @@ fn drain_bg_events(
     }
 }
 
-/// 构造 needs_fix 重试的修复 prompt:注入上一轮失败原因 + acceptance,要求先针对
-/// 失败做实际改动,再自评,并以内核可解析的 VERDICT 行结尾。纯函数,便于单测。
-pub(crate) fn build_repair_prompt(m: &crate::workgraph::Milestone, last_failure: &str) -> String {
+/// 构造 needs_fix 重试的修复 prompt:注入上一轮失败原因 + acceptance + touched 文件
+/// 上下文 + 跨里程碑文件归属,要求针对性修复后自评,并以 VERDICT 行结尾。纯函数,便于单测。
+pub(crate) fn build_repair_prompt(
+    m: &crate::workgraph::Milestone,
+    last_failure: &str,
+    graph: &crate::workgraph::WorkGraph,
+) -> String {
+    // 本里程碑触及的文件
+    let touched_part = if m.touched.is_empty() {
+        String::new()
+    } else {
+        format!("\n本里程碑涉及的文件:\n  {}\n", m.touched.join("\n  "))
+    };
+    // 其他里程碑对同一文件的修改(跨里程碑归属追溯)
+    let cross_touched = if !m.touched.is_empty() {
+        let mut lines = Vec::new();
+        for other in &graph.nodes {
+            if other.id == m.id || other.status == crate::workgraph::NodeStatus::Pending {
+                continue;
+            }
+            let common: Vec<&str> = m.touched.iter().filter(|f| other.touched.contains(f)).map(String::as_str).collect();
+            if !common.is_empty() {
+                lines.push(format!(
+                    "  - {} 也修改了文件: {}",
+                    other.title,
+                    common.join(", ")
+                ));
+            }
+        }
+        if lines.is_empty() {
+            String::new()
+        } else {
+            format!("\n其他里程碑也修改了相同文件:\n{}\n", lines.join("\n"))
+        }
+    } else {
+        String::new()
+    };
+
     format!(
         "workgraph milestone #{} ({}) 上一轮验收未通过,需要修复后重试。\n\
          上一轮失败原因:\n{}\n\n\
-         acceptance: {}\n\n\
+         acceptance: {}\n\
+         {}\
+         {}\
          请针对上述失败原因做出实际代码改动来修复它(不要只解释),然后自评。\
+         检查语法错误是否在本里程碑之外的文件中也存在——其他里程碑可能已引入或修复了同类问题。\
          你必须以下面这行精确格式结尾(其后不要有任何内容),以便内核解析并自动更新\
          里程碑状态:\n\
          VERDICT: <pass|needs_fix|rebuild>",
@@ -409,6 +447,8 @@ pub(crate) fn build_repair_prompt(m: &crate::workgraph::Milestone, last_failure:
         m.title,
         last_failure.trim(),
         if m.acceptance.is_empty() { "(none)" } else { &m.acceptance },
+        touched_part,
+        cross_touched,
     )
 }
 
@@ -459,7 +499,7 @@ pub fn retry_one_milestone(
             .last_failure
             .clone()
             .unwrap_or_else(|| "(无记录的失败原因)".to_string());
-        (n.id, build_repair_prompt(n, &last), n.title.clone())
+        (n.id, build_repair_prompt(n, &last, &g), n.title.clone())
     };
     // 先记账再跑:即便本次 turn 崩溃,预算也已消耗,避免无限重试。
     if let Err(e) = WorkGraph::with_lock(&root, |g| {
@@ -1013,7 +1053,7 @@ mod tests {
             last_failure: Some("gate `cargo test` failed: 2 failed".into()),
             command: None,
         };
-        let p = build_repair_prompt(&m, "gate `cargo test` failed: 2 failed");
+        let p = build_repair_prompt(&m, "gate `cargo test` failed: 2 failed", &crate::workgraph::WorkGraph::default());
         assert!(p.contains("CRDT 核心"), "含标题: {p}");
         assert!(p.contains("gate `cargo test` failed: 2 failed"), "含失败原因: {p}");
         assert!(p.contains("cargo build --release"), "含 acceptance: {p}");
@@ -1035,7 +1075,7 @@ mod tests {
             last_failure: Some("self-review: NeedsFix".into()),
             command: None,
         };
-        let p = build_repair_prompt(&m, "self-review: NeedsFix");
+        let p = build_repair_prompt(&m, "self-review: NeedsFix", &crate::workgraph::WorkGraph::default());
         assert!(p.contains("(none)"), "空 acceptance 应渲染为 (none): {p}");
     }
 
