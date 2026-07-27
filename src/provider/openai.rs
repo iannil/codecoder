@@ -183,7 +183,15 @@ fn from_wire_response(json: &Value) -> anyhow::Result<Completion> {
     }
 
     let message = Message { id: 0, role: Role::Assistant, items };
-    Ok(Completion { message, stop_reason })
+
+    let usage = json.get("usage").and_then(|u| {
+        Some(crate::provider::Usage {
+            prompt_tokens: u.get("prompt_tokens")?.as_u64()? as u32,
+            completion_tokens: u.get("completion_tokens")?.as_u64()? as u32,
+        })
+    });
+
+    Ok(Completion { message, stop_reason, usage })
 }
 
 #[cfg(test)]

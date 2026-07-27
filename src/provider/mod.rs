@@ -28,11 +28,19 @@ pub enum StopReason {
     Other,
 }
 
+/// Token usage for a single LLM completion call.
+#[derive(Debug, Clone)]
+pub struct Usage {
+    pub prompt_tokens: u32,
+    pub completion_tokens: u32,
+}
+
 /// A provider's assembled reply: the neutral Message plus why it stopped.
 #[derive(Debug)]
 pub struct Completion {
     pub message: Message,
     pub stop_reason: StopReason,
+    pub usage: Option<Usage>,
 }
 
 impl From<Message> for Completion {
@@ -50,7 +58,7 @@ impl From<Message> for Completion {
         } else {
             StopReason::Stop
         };
-        Completion { message, stop_reason }
+        Completion { message, stop_reason, usage: None }
     }
 }
 

@@ -1964,6 +1964,7 @@ mod tests {
                         }],
                     ),
                     stop_reason: StopReason::Length,
+                    usage: None,
                 })
             } else {
                 Ok(Message::text(0, Role::Assistant, "recovered").into())
@@ -2027,7 +2028,7 @@ mod tests {
                 }],
             };
             let stop = if i < self.fail_times { StopReason::Length } else { StopReason::Stop };
-            Ok(Completion { message: msg, stop_reason: stop })
+            Ok(Completion { message: msg, stop_reason: stop, usage: None })
         }
     }
 
