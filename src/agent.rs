@@ -1467,6 +1467,19 @@ impl AgentLoop {
                     "milestone #{} ({}) auto-updated: {}",
                     milestone_id, title, verdict_str,
                 )));
+
+                // Non-blocking auto-memory nudge: after a Pass, prompt the agent
+                // to write memory entries. Best-effort — failure is silently ignored.
+                if matches!(status, NodeStatus::Done) {
+                    let memory_task = format!(
+                        "Milestone #{} ({}) passed. Run `use_skill auto-memory` to write \
+                         knowledge entries about what you learned. This is non-blocking \
+                         — skip if you cannot complete it.",
+                        milestone_id, title,
+                    );
+                    self.cancel.reset();
+                    self.process_turn(memory_task, event_tx);
+                }
             } else {
                 // No VERDICT: line parsed — surface it instead of leaving the
                 // milestone silently stuck in_progress.
