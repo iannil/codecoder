@@ -51,6 +51,7 @@ tempfile = "3"
 # L2 pty smoke only (tests/l2_pty_smoke.rs). Gated behind RUN_PTY_SMOKE=1 and
 # `#[ignore]`; pulled in solely to spawn the real binary under a pseudo-terminal.
 portable-pty = "0.8"
+filetime = "0.2.29"
 
 [profile.release]
 opt-level = 3

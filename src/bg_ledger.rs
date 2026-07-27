@@ -147,6 +147,26 @@ pub fn format_utc(epoch_secs: u64) -> String {
     format!("{y:04}-{m:02}-{d:02}T{hh:02}:{mm:02}:{ss:02}Z")
 }
 
+/// Truncate the ledger to keep only the most recent `max_lines` lines.
+/// Returns the number of lines removed, or 0 if no truncation needed.
+/// When `max_lines` is 0, returns 0 (no-op).
+pub fn truncate(root: &Path, max_lines: u32) -> anyhow::Result<usize> {
+    if max_lines == 0 {
+        return Ok(0);
+    }
+    let path = ledger_path(root);
+    let all = std::fs::read_to_string(&path)?;
+    let lines: Vec<&str> = all.lines().collect();
+    if lines.len() <= max_lines as usize {
+        return Ok(0);
+    }
+    let keep = lines[lines.len() - max_lines as usize..].join("\n");
+    let tmp = path.with_extension("jsonl.tmp");
+    std::fs::write(&tmp, &keep)?;
+    std::fs::rename(&tmp, &path)?;
+    Ok(lines.len() - max_lines as usize)
+}
+
 /// 单行摘要(供 `cc ledger` 默认输出)。
 pub fn summarize_line(r: &LedgerRecord) -> String {
     let st = match &r.mission_state {
@@ -280,6 +300,64 @@ mod tests {
         let recs = read_recent(dir.path(), 10, false);
         assert_eq!(recs.len(), 1, "坏行应被跳过");
         assert_eq!(recs[0].task, "good");
+    }
+
+    #[test]
+    fn truncate_noop_when_under_limit() {
+        let dir = tempdir().unwrap();
+        for i in 0..3 {
+            let mut o = BgOutcome::default();
+            o.mission_state = MissionState::Running;
+            append(dir.path(), &o, &format!("t{i}")).unwrap();
+        }
+        let removed = truncate(dir.path(), 10).unwrap();
+        assert_eq!(removed, 0);
+        // 文件仍含 3 行
+        let content = std::fs::read_to_string(ledger_path(dir.path())).unwrap();
+        assert_eq!(content.lines().count(), 3);
+    }
+
+    #[test]
+    fn truncate_keeps_last_n() {
+        let dir = tempdir().unwrap();
+        for i in 0..10 {
+            let mut o = BgOutcome::default();
+            o.mission_state = MissionState::Running;
+            append(dir.path(), &o, &format!("t{i}")).unwrap();
+        }
+        let removed = truncate(dir.path(), 4).unwrap();
+        assert_eq!(removed, 6);
+        let content = std::fs::read_to_string(ledger_path(dir.path())).unwrap();
+        let lines: Vec<&str> = content.lines().collect();
+        assert_eq!(lines.len(), 4);
+        // 保留最后 4 条 (t6, t7, t8, t9)
+        for (i, line) in lines.iter().enumerate() {
+            let rec: LedgerRecord = serde_json::from_str(line).unwrap();
+            assert_eq!(rec.task, format!("t{}", i + 6));
+        }
+    }
+
+    #[test]
+    fn truncate_zero_max_is_noop() {
+        let dir = tempdir().unwrap();
+        for i in 0..3 {
+            let mut o = BgOutcome::default();
+            o.mission_state = MissionState::Running;
+            append(dir.path(), &o, &format!("t{i}")).unwrap();
+        }
+        let removed = truncate(dir.path(), 0).unwrap();
+        assert_eq!(removed, 0);
+        let content = std::fs::read_to_string(ledger_path(dir.path())).unwrap();
+        assert_eq!(content.lines().count(), 3);
+    }
+
+    #[test]
+    fn truncate_empty_file() {
+        let dir = tempdir().unwrap();
+        let path = ledger_path(dir.path());
+        std::fs::write(&path, "").unwrap();
+        let removed = truncate(dir.path(), 5).unwrap();
+        assert_eq!(removed, 0);
     }
 
     #[test]

@@ -6,6 +6,34 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
+/// Delete oldest session files when the count exceeds `max_sessions`.
+/// Only deletes sessions older than 7 days. Returns number deleted.
+/// Best-effort: logs errors via eprintln! but does not propagate them.
+pub fn cleanup_old_sessions(root: &Path, max_sessions: u32) -> anyhow::Result<usize> {
+    if max_sessions == 0 {
+        return Ok(0);
+    }
+    let mgr = SessionManager::new(root);
+    let mut all = mgr.list();
+    if all.len() <= max_sessions as usize {
+        return Ok(0);
+    }
+    let seven_days_ago = std::time::SystemTime::now()
+        - std::time::Duration::from_secs(7 * 24 * 3600);
+    all.sort_by(|a, b| a.mtime.cmp(&b.mtime)); // oldest first
+    let to_delete: Vec<_> = all.iter()
+        .filter(|m| m.mtime < seven_days_ago)
+        .take(all.len() - max_sessions as usize)
+        .collect();
+    for meta in &to_delete {
+        let path = sessions_dir(root).join(format!("{}.json", meta.id));
+        if let Err(e) = std::fs::remove_file(&path) {
+            eprintln!("cleanup_old_sessions: failed to remove {}: {e}", path.display());
+        }
+    }
+    Ok(to_delete.len())
+}
+
 pub const SCHEMA_VERSION: u32 = 2;
 
 pub fn sessions_dir(root: &Path) -> PathBuf {
@@ -554,5 +582,71 @@ mod tests {
         assert!(mgr.last().is_some());
         let _ = std::fs::remove_dir_all(&dir);
         let _ = SystemTime::now(); // keep import used
+    }
+
+    #[test]
+    fn cleanup_old_sessions_noop_when_under_limit() {
+        let dir = std::env::temp_dir().join(format!("cc_cleanup_under_{}", std::process::id()));
+        std::fs::create_dir_all(sessions_dir(&dir)).unwrap();
+        for name in ["s1.json", "s2.json"] {
+            std::fs::write(sessions_dir(&dir).join(name),
+                r#"{"schema_version":2,"model":"m","token_count":0,"entries":[],"leaf":null}"#).unwrap();
+        }
+        let deleted = cleanup_old_sessions(&dir, 10).unwrap();
+        assert_eq!(deleted, 0);
+        assert!(sessions_dir(&dir).join("s1.json").exists());
+        assert!(sessions_dir(&dir).join("s2.json").exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn cleanup_old_sessions_zero_max_is_noop() {
+        let dir = std::env::temp_dir().join(format!("cc_cleanup_zero_{}", std::process::id()));
+        std::fs::create_dir_all(sessions_dir(&dir)).unwrap();
+        for name in ["s1.json", "s2.json"] {
+            std::fs::write(sessions_dir(&dir).join(name),
+                r#"{"schema_version":2,"model":"m","token_count":0,"entries":[],"leaf":null}"#).unwrap();
+        }
+        let deleted = cleanup_old_sessions(&dir, 0).unwrap();
+        assert_eq!(deleted, 0);
+        assert!(sessions_dir(&dir).join("s1.json").exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn cleanup_old_sessions_skips_recent_sessions() {
+        let dir = std::env::temp_dir().join(format!("cc_cleanup_recent_{}", std::process::id()));
+        std::fs::create_dir_all(sessions_dir(&dir)).unwrap();
+        // Create 3 sessions: s1 old (touch mtime to 8 days ago), s2/s3 recent
+        for name in ["s1.json", "s2.json", "s3.json"] {
+            std::fs::write(sessions_dir(&dir).join(name),
+                r#"{"schema_version":2,"model":"m","token_count":0,"entries":[],"leaf":null}"#).unwrap();
+        }
+        // Set s1's mtime to 8 days ago
+        let s1_path = sessions_dir(&dir).join("s1.json");
+        let eight_days_ago = filetime::FileTime::from_unix_time(
+            (std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH).unwrap().as_secs()
+                - 8 * 86400) as i64,
+            0,
+        );
+        filetime::set_file_mtime(&s1_path, eight_days_ago).unwrap();
+        // Set s2's mtime to 6 days ago (within 7 days)
+        let s2_path = sessions_dir(&dir).join("s2.json");
+        let six_days_ago = filetime::FileTime::from_unix_time(
+            (std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH).unwrap().as_secs()
+                - 6 * 86400) as i64,
+            0,
+        );
+        filetime::set_file_mtime(&s2_path, six_days_ago).unwrap();
+
+        // max_sessions=2, so we need to delete 1. Only s1 (8 days old) qualifies.
+        let deleted = cleanup_old_sessions(&dir, 2).unwrap();
+        assert_eq!(deleted, 1);
+        assert!(!s1_path.exists());
+        assert!(s2_path.exists());
+        assert!(sessions_dir(&dir).join("s3.json").exists());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

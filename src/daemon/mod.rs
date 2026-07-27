@@ -49,6 +49,7 @@ impl Daemon {
             ts.push(crate::daemon::proto::ThreadStatus { name: "workgraph".into(), last_tick: None, tick_count: 0, last_event: "initializing".into() });
             ts.push(crate::daemon::proto::ThreadStatus { name: "reload".into(), last_tick: None, tick_count: 0, last_event: "initializing".into() });
             ts.push(crate::daemon::proto::ThreadStatus { name: "bg_ledger_review".into(), last_tick: None, tick_count: 0, last_event: "initializing".into() });
+            ts.push(crate::daemon::proto::ThreadStatus { name: "cleanup".into(), last_tick: None, tick_count: 0, last_event: "initializing".into() });
         }
 
         // 注册 SIGINT + SIGTERM → shutdown flag(ADR 0032 修订)。
@@ -382,6 +383,38 @@ impl Daemon {
                 }
             });
         }
+
+        // 磁盘空间清理线程：每 300 秒（5 分钟）清理一次过期 session 和截断 bg_ledger。
+        // 两个清理函数都是 best-effort：出错仅 eprintln，不终止 daemon。
+        let shutdown_cleanup = Arc::clone(&shutdown);
+        let root_cleanup = self.cfg.root.clone();
+        let max_sessions_cleanup = self.cfg.max_sessions;
+        let max_ledger_lines_cleanup = self.cfg.max_ledger_lines;
+        let ts_cleanup = Arc::clone(&thread_status);
+        std::thread::spawn(move || {
+            let mut count = 0u64;
+            while !shutdown_cleanup.load(Ordering::SeqCst) {
+                std::thread::sleep(Duration::from_secs(300));
+                count += 1;
+
+                // 清理过期 session
+                if let Err(e) = crate::session::cleanup_old_sessions(&root_cleanup, max_sessions_cleanup) {
+                    eprintln!("ccd: cleanup session error: {e}");
+                }
+                // 截断 bg_ledger
+                if let Err(e) = crate::bg_ledger::truncate(&root_cleanup, max_ledger_lines_cleanup) {
+                    eprintln!("ccd: cleanup ledger error: {e}");
+                }
+
+                let mut status = ts_cleanup.lock().unwrap();
+                if let Some(s) = status.iter_mut().find(|s| s.name == "cleanup") {
+                    s.last_tick = Some(std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH).unwrap().as_secs());
+                    s.tick_count = count;
+                    s.last_event = format!("sessions:max={max_sessions_cleanup} ledger:max={max_ledger_lines_cleanup}");
+                }
+            }
+        });
 
         // 优雅退出: SIGINT/SIGTERM → shutdown flag → 循环退出 → shutdown_all。
         // cc shutdown 设 shutdown flag 后,自连接 socket 触发 accept 退出阻塞。
