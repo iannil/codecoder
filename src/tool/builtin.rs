@@ -261,7 +261,8 @@ impl Tool for WriteFile {
             "type": "object",
             "properties": {
                 "path": { "type": "string" },
-                "content": { "type": "string" }
+                "content": { "type": "string" },
+                "append": { "type": "boolean", "description": "Append to existing file instead of overwriting. Default: false." }
             },
             "required": ["path", "content"]
         })
@@ -1208,6 +1209,14 @@ mod tests {
             Permission::Ask { key } => assert_eq!(key, "write_file"),
             _ => panic!("expected Ask"),
         }
+    }
+
+    #[test]
+    fn write_file_schema_includes_append() {
+        let tool = WriteFile;
+        let schema = tool.schema();
+        let props = schema.get("properties").unwrap();
+        assert!(props.get("append").is_some(), "schema should include append property");
     }
 
     #[test]
