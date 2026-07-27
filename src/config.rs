@@ -94,7 +94,7 @@ impl Config {
             github_token: env("GITHUB_TOKEN"),
             bg_max_auto: env("CODECODER_BG_MAX_AUTO")
                 .and_then(|v| v.parse().ok())
-                .unwrap_or(10),
+                .unwrap_or(0),
             bg_circuit_k: env("CODECODER_BG_CIRCUIT_K")
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(2),
@@ -271,7 +271,7 @@ mod tests {
             std::env::remove_var("CODECODER_BG_MILESTONE_TOOL_CAP");
         }
         let c = Config::from_env();
-        assert_eq!(c.bg_max_auto, 10);
+        assert_eq!(c.bg_max_auto, 0);
         assert_eq!(c.bg_circuit_k, 2);
         assert_eq!(c.bg_milestone_tool_cap, 8);
 
