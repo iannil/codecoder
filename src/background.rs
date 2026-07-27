@@ -383,6 +383,12 @@ fn drain_bg_events(
             }
             AgentEvent::Context { pct } => out.events.push(format!("context: {pct}%")),
             AgentEvent::SubAgentMilestone(m) => out.events.push(format!("sub-agent: {m}")),
+            AgentEvent::TokenUsage { prompt_tokens, completion_tokens } => {
+                obs.emit_with_data("llm_call", "tokens", Some(serde_json::json!({
+                    "prompt_tokens": prompt_tokens,
+                    "completion_tokens": completion_tokens,
+                })));
+            }
             _ => {}
         }
     }

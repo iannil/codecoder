@@ -103,6 +103,8 @@ pub enum AgentEvent {
     L4ScenarioProgress(crate::verify::event::L4ScenarioProgress),
     /// L4 探索进度
     L4ExploreProgress(crate::verify::event::L4ExploreProgress),
+    /// LLM token usage for a single completion call (P1-4).
+    TokenUsage { prompt_tokens: u32, completion_tokens: u32 },
     TurnComplete,
 }
 
@@ -879,8 +881,8 @@ impl AgentLoop {
                 tools: self.toolbox.wire_schemas(),
             };
 
-            let (reply, stop_reason) = match self.complete_retrying(&req, event_tx) {
-                Ok(c) => (c.message, c.stop_reason),
+            let (reply, stop_reason, usage) = match self.complete_retrying(&req, event_tx) {
+                Ok(c) => (c.message, c.stop_reason, c.usage),
                 Err(e) => {
                     // A context overflow (ADR 0027 #2) won't recover on retry; give
                     // the user an actionable hint instead of a bare error.
@@ -914,6 +916,14 @@ impl AgentLoop {
                 }
             }
             self.append(Role::Assistant, reply.items);
+
+            // 记录 LLM token usage (P1-4): 仅在 background 模式下通过 event_tx 通知。
+            if let Some(u) = &usage {
+                let _ = event_tx.send(AgentEvent::TokenUsage {
+                    prompt_tokens: u.prompt_tokens,
+                    completion_tokens: u.completion_tokens,
+                });
+            }
 
             // 截断根治(迭代 2 / ADR 0038):响应在 max_tokens 处被截断时,先 neutralize 任何
             // 半序列化的 tool call(绝不执行),再自适应上调本 turn 的有效预算重试;达封顶
