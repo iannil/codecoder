@@ -465,14 +465,16 @@ pub fn advance_one_milestone(
     let (milestone_id, task_text, title) = {
         let g = WorkGraph::read_checked(&root)?;
         let Some(n) = g.next_ready() else { return Ok(None); };
+        let checkpoint = read_bg_checkpoint(&root);
         let t = format!(
             "workgraph milestone #{}: {}\nacceptance: {}\n\n\
              Complete this milestone, then self-review. You MUST end your reply \
              with a final line in EXACTLY this format (nothing after it) so the \
              kernel can parse and auto-update the milestone status:\n\
-             VERDICT: <pass|needs_fix|rebuild>",
+             VERDICT: <pass|needs_fix|rebuild>{}",
             n.id, n.title,
             if n.acceptance.is_empty() { "(none)" } else { &n.acceptance },
+            checkpoint,
         );
         (n.id, t, n.title.clone())
     };
@@ -638,7 +640,37 @@ fn run_milestone_and_gate(
         gate_kind: crate::bg_gate::gate_kind(&m),
     });
     out.events.push(format!("milestone #{} ({}) gated: {vs_str}", milestone_id, title));
+
+    // 里程碑 Pass 后写入 checkpoint 以便重启恢复上下文。
+    if matches!(verdict, crate::bg_gate::GateVerdict::Pass) {
+        let _ = update_bg_checkpoint(&root, milestone_id, &title, &m.touched);
+    }
+
     Ok(out)
+}
+
+/// 在 `memory/` 中追加一条 checkpoint 记录:已完成里程碑 + 触及文件。
+fn update_bg_checkpoint(root: &Path, milestone_id: u64, title: &str, touched: &[String]) -> std::io::Result<()> {
+    let files = if touched.is_empty() {
+        String::new()
+    } else {
+        format!("\n  触及文件:\n    {}\n", touched.join("\n    "))
+    };
+    let line = format!("#{milestone_id} {title} ✅{files}\n");
+    let existing = crate::memory::get(root, "bg_checkpoint").unwrap_or_default();
+    crate::memory::set(root, "bg_checkpoint", &(existing + &line))
+}
+
+/// 读取 BG checkpoint 文本，用于注入 milestone prompt 提供项目上下文。
+fn read_bg_checkpoint(root: &Path) -> String {
+    match crate::memory::get(root, "bg_checkpoint") {
+        Some(cp) => format!(
+            "\n--- 项目上下文 (上次 BG 运行 checkpoint) ---\n\
+             以下里程碑已在之前完成:\n{cp}\n\
+             不要重新完成它们。请基于已有项目结构继续推进。\n",
+        ),
+        None => String::new(),
+    }
 }
 
 #[cfg(test)]
