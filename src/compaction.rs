@@ -16,11 +16,18 @@ pub fn should_compact(token_count: u64, model_window: u64) -> bool {
 
 /// Derive the working set sent to the provider from the full-fidelity messages.
 ///
-/// v1 implements **tier 1** of ADR 0023 only: when the full history crosses the
-/// threshold, drop `Reasoning` items and elide old `ToolResult` bodies. The first
-/// user message (the anchor / original goal) and the most recent `RECENT_TAIL`
-/// messages are never touched. Tier 2 (summarizing the oldest dialogue span into a
-/// synthetic System summary) is still deferred.
+/// Implements **tier 1** of ADR 0023: when the full history crosses the threshold,
+/// drop `Reasoning` items and elide old `ToolResult` bodies. The first user message
+/// (the anchor / original goal) and the most recent `RECENT_TAIL` messages are never
+/// touched.
+///
+/// When `compaction_tier2` is true and `provider` is `Some`, after tier-1 processing
+/// the function checks whether the tier-1 result is still over the window threshold.
+/// If so, it summarises the oldest dialogue span (between the anchor and the last
+/// user message) via `tier2_summarize`, replaces that span with a synthetic `System`
+/// message, and returns the combined result. This is the **no-cache** path; callers
+/// that want in-memory caching (e.g. `AgentLoop::context_working_set`) should pass
+/// `compaction_tier2: false` and manage tier-2 themselves.
 ///
 /// Two subtleties drive the design (see ADR 0023):
 /// - The decision is made against the **full** history size, never the compacted
@@ -29,7 +36,13 @@ pub fn should_compact(token_count: u64, model_window: u64) -> bool {
 /// - `Reasoning` is already skipped by the provider wire layer, so evicting it does
 ///   not shrink the real request; it realigns `count_tokens` (which does count it)
 ///   with what is actually sent. `ToolResult` elision is what shrinks the payload.
-pub fn working_set(model: &str, messages: &[Message], model_window: u64) -> Vec<Message> {
+pub fn working_set(
+    model: &str,
+    messages: &[Message],
+    model_window: u64,
+    provider: Option<&dyn crate::provider::Provider>,
+    compaction_tier2: bool,
+) -> Vec<Message> {
     if !should_compact(count_tokens(model, messages), model_window) {
         return messages.to_vec();
     }
@@ -66,6 +79,28 @@ pub fn working_set(model: &str, messages: &[Message], model_window: u64) -> Vec<
             out.push(Message { id: m.id, role: m.role, items });
         }
     }
+
+    // Tier-2: if still over threshold and enabled, summarise the oldest span.
+    if compaction_tier2 {
+        if let Some(prov) = provider {
+            if should_compact(count_tokens(model, &out), model_window) {
+                if let Some((start, end)) = summary_span(&out) {
+                    let anchor_id = out[start - 1].id;
+                    let covered_last_id = out[end - 1].id;
+                    // Build refs for the summarizable span.
+                    let span_refs: Vec<&Message> = out[start..end].iter().collect();
+                    // Check tier2_should_run against the full working set, not just the span.
+                    let out_refs: Vec<&Message> = out.iter().collect();
+                    if tier2_should_run(&out_refs, 0.5, RECENT_TAIL).is_some() {
+                        if let Ok(summary) = tier2_summarize(prov, &span_refs, model) {
+                            return apply_tier2(&out, anchor_id, covered_last_id, &summary);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     out
 }
 
@@ -313,7 +348,7 @@ mod tests {
             msg(1, Role::Assistant, vec![MessageItem::Reasoning { text: "think".into() }]),
         ];
         // Huge window → never compacts.
-        let out = working_set("gpt-4o", &msgs, 1_000_000);
+        let out = working_set("gpt-4o", &msgs, 1_000_000, None, false);
         assert_eq!(out.len(), 2);
         assert!(matches!(out[1].items[0], MessageItem::Reasoning { .. }));
     }
@@ -344,7 +379,7 @@ mod tests {
         }
 
         // Tiny window forces compaction.
-        let out = working_set("gpt-4o", &msgs, 10);
+        let out = working_set("gpt-4o", &msgs, 10, None, false);
 
         // Anchor (first user msg) survives verbatim.
         assert!(matches!(&out[0].items[0], MessageItem::Text { text } if text == "original goal"));
@@ -566,5 +601,74 @@ mod tests {
         let summary = result.unwrap();
         assert!(!summary.is_empty());
         assert!(summary.contains("stub"));
+    }
+
+    #[test]
+    fn working_set_tier2_integration() {
+        // Build a long history that will trigger BOTH tier-1 and tier-2.
+        // Use StubClient as the provider — it returns deterministic text containing "stub".
+        let mut msgs = vec![msg(
+            0,
+            Role::User,
+            vec![MessageItem::Text { text: "original goal".into() }],
+        )];
+        // Compactable region: many assistant messages so that after tier-1 the eligible
+        // span ratio (eligible / working_len) >= 0.5, triggering tier2_should_run.
+        for i in 1..8 {
+            msgs.push(msg(i, Role::Assistant, vec![MessageItem::Text { text: "x".into() }]));
+        }
+        // A user message to define the end of the summarizable span.
+        msgs.push(msg(8, Role::User, vec![MessageItem::Text { text: "next turn".into() }]));
+        // Recent tail (should survive untouched) — RECENT_TAIL=6.
+        for i in 9..15 {
+            msgs.push(msg(i, Role::Assistant, vec![MessageItem::Text { text: "t".into() }]));
+        }
+
+        // Force compaction with a tiny window.
+        let provider = crate::provider::stub::StubClient;
+        let out = working_set("gpt-4o", &msgs, 10, Some(&provider), true);
+
+        // Anchor survives.
+        assert!(matches!(&out[0].items[0], MessageItem::Text { text } if text == "original goal"));
+        // The summarizable span (ids 1..7) is replaced by a System summary.
+        assert!(out.iter().any(|m| m.role == Role::System));
+        // The summary contains the stub output.
+        let sys = out.iter().find(|m| m.role == Role::System).unwrap();
+        let sys_text = sys.items.iter().filter_map(|it| match it {
+            MessageItem::Text { text } => Some(text.as_str()),
+            _ => None,
+        }).collect::<Vec<_>>().join(" ");
+        assert!(sys_text.contains("stub"), "summary should contain StubClient output: {sys_text}");
+        // Covered ids (1..=7) are gone.
+        for id in 1..8 {
+            assert!(!out.iter().any(|m| m.id == id), "id {id} should have been replaced by summary");
+        }
+        // Tail survives.
+        assert!(out.iter().any(|m| m.id == 9));
+        // User message (id 8) is the last user and should be the current-turn prompt, NOT covered.
+        assert!(out.iter().any(|m| m.id == 8));
+    }
+
+    #[test]
+    fn working_set_tier2_disabled_does_not_summarize() {
+        // Same setup as above, but compaction_tier2=false → no System summary.
+        let mut msgs = vec![msg(
+            0,
+            Role::User,
+            vec![MessageItem::Text { text: "original goal".into() }],
+        )];
+        msgs.push(msg(1, Role::Assistant, vec![MessageItem::Text { text: "thinking".into() }]));
+        msgs.push(msg(5, Role::User, vec![MessageItem::Text { text: "next turn".into() }]));
+        for i in 6..12 {
+            msgs.push(msg(i, Role::Assistant, vec![MessageItem::Text { text: "t".into() }]));
+        }
+
+        let provider = crate::provider::stub::StubClient;
+        let out = working_set("gpt-4o", &msgs, 10, Some(&provider), false);
+
+        // No System summary — tier-1 only.
+        assert!(!out.iter().any(|m| m.role == Role::System));
+        // Anchor survives.
+        assert!(out.iter().any(|m| m.id == 0));
     }
 }

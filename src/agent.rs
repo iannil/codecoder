@@ -659,7 +659,7 @@ impl AgentLoop {
     /// if the summary call fails. Caches the summary in-memory (one call per turn).
     fn context_working_set(&mut self, event_tx: &Sender<AgentEvent>) -> Vec<Message> {
         let thread = self.session.active_thread();
-        let tier1 = compaction::working_set(&self.model, &thread, self.model_window);
+        let tier1 = compaction::working_set(&self.model, &thread, self.model_window, None, false);
         if !compaction::should_compact(
             crate::tokenizer::count_tokens(&self.model, &tier1),
             self.model_window,
