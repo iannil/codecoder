@@ -48,6 +48,7 @@ impl Daemon {
             ts.push(crate::daemon::proto::ThreadStatus { name: "supervisor".into(), last_tick: None, tick_count: 0, last_event: "initializing".into() });
             ts.push(crate::daemon::proto::ThreadStatus { name: "workgraph".into(), last_tick: None, tick_count: 0, last_event: "initializing".into() });
             ts.push(crate::daemon::proto::ThreadStatus { name: "reload".into(), last_tick: None, tick_count: 0, last_event: "initializing".into() });
+            ts.push(crate::daemon::proto::ThreadStatus { name: "bg_ledger_review".into(), last_tick: None, tick_count: 0, last_event: "initializing".into() });
         }
 
         // 注册 SIGINT + SIGTERM → shutdown flag(ADR 0032 修订)。
@@ -225,6 +226,67 @@ impl Daemon {
                         .duration_since(std::time::UNIX_EPOCH).unwrap().as_secs());
                     s.tick_count = count;
                     s.last_event = "tick_reload".into();
+                }
+            }
+        });
+
+        // bg_ledger 审查线程：每 CODECODER_WG_TICK_SECS 读取 bg_ledger.jsonl 最后一条，
+        // 写入 memory/auto-bg-ledger.md 作为摘要记忆（覆盖写，不追加）。
+        // 如果 ledger 不存在或为空，静默跳过。
+        let shutdown_ledger = Arc::clone(&shutdown);
+        let root_ledger = self.cfg.root.clone();
+        let ledger_tick = Duration::from_secs(self.cfg.wg_tick_secs);
+        let ts_ledger = Arc::clone(&thread_status);
+        let ledger_handle = std::thread::spawn(move || {
+            let mut count = 0u64;
+            while !shutdown_ledger.load(Ordering::SeqCst) {
+                std::thread::sleep(ledger_tick);
+                count += 1;
+                let last_event = {
+                    let path = crate::bg_ledger::ledger_path(&root_ledger);
+                    match std::fs::File::open(&path) {
+                        Ok(f) => {
+                            use std::io::BufRead;
+                            let lines: Vec<String> = std::io::BufReader::new(f)
+                                .lines()
+                                .filter_map(|ln| ln.ok())
+                                .collect();
+                            if let Some(last) = lines.last() {
+                                match serde_json::from_str::<crate::bg_ledger::LedgerRecord>(last) {
+                                    Ok(rec) => {
+                                        let summary = crate::bg_ledger::summarize_line(&rec);
+                                        let content = format!(
+                                            "# bg_ledger last run\n\nLast run summary: {summary}\n\n\
+                                             task: {}\nstate: {:?}\ntools: {}\ndenied: {}\nmilestones: {}\npassed: {}\nfailed: {}\n",
+                                            rec.task,
+                                            rec.mission_state,
+                                            rec.counts.tools,
+                                            rec.counts.denied,
+                                            rec.counts.milestones,
+                                            rec.counts.passed,
+                                            rec.counts.failed,
+                                        );
+                                        if let Err(e) = crate::memory::set(&root_ledger, "auto-bg-ledger", &content) {
+                                            format!("write error: {e}")
+                                        } else {
+                                            format!("wrote auto-bg-ledger: {summary}")
+                                        }
+                                    }
+                                    Err(e) => format!("parse error: {e}"),
+                                }
+                            } else {
+                                "empty ledger".into()
+                            }
+                        }
+                        Err(_) => "no ledger".into(),
+                    }
+                };
+                let mut status = ts_ledger.lock().unwrap();
+                if let Some(s) = status.iter_mut().find(|s| s.name == "bg_ledger_review") {
+                    s.last_tick = Some(std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH).unwrap().as_secs());
+                    s.tick_count = count;
+                    s.last_event = last_event;
                 }
             }
         });
