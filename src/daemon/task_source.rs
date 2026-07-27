@@ -231,9 +231,18 @@ mod tests {
         // Read the ACTUAL content of the worktree's .git file to get the
         // correct gitdir path (the directory, not the .git file itself).
         let real_git_path = std::env::current_dir().unwrap().join(".git");
-        let gitdir_content = std::fs::read_to_string(&real_git_path)
-            .expect("failed to read .git file");
-        std::fs::write(dir.join(".git"), &gitdir_content).unwrap();
+        // In a normal repo, .git is a directory. In a worktree, it's a file.
+        // We need to detect which case we're in.
+        if real_git_path.is_file() {
+            let gitdir_content = std::fs::read_to_string(&real_git_path)
+                .expect("failed to read .git file");
+            std::fs::write(dir.join(".git"), &gitdir_content).unwrap();
+        } else {
+            // In a normal repo, .git is a directory. Point the test's .git file
+            // to the canonical real .git directory.
+            let canonical = std::fs::canonicalize(&real_git_path).unwrap_or(real_git_path);
+            std::fs::write(dir.join(".git"), format!("gitdir: {}\n", canonical.display())).unwrap();
+        }
         let (owner, repo) = detect_repo(&dir).unwrap();
         // The CodeCoder repo is hosted under github.com/iannil/codecoder
         assert!(!owner.is_empty());

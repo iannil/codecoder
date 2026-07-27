@@ -249,7 +249,7 @@ impl Daemon {
                             use std::io::BufRead;
                             let lines: Vec<String> = std::io::BufReader::new(f)
                                 .lines()
-                                .filter_map(|ln| ln.ok())
+                                .map_while(Result::ok)
                                 .collect();
                             if let Some(last) = lines.last() {
                                 match serde_json::from_str::<crate::bg_ledger::LedgerRecord>(last) {
