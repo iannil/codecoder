@@ -217,11 +217,23 @@ pub(crate) fn run_background_cfg(
             return Ok(out);
         }
     };
-    // #1 honesty: a genuinely empty graph is not "success" — nothing to advance.
+    // #1 empty graph: try to auto-seed from AGENTS.md; fall back to EmptyGraph on failure.
     if graph.nodes.is_empty() {
-        obs.emit("empty", "empty workgraph — nothing to advance; seed workgraph.json first");
-        out.mission_state = crate::bg_gate::MissionState::EmptyGraph;
-        return Ok(out);
+        obs.emit("seed", "empty workgraph — attempting to seed from AGENTS.md...");
+        let seeded = seed_workgraph_from_mission(
+            provider.clone(), model.clone(), max_tokens, temperature, root.clone(), tool_cap,
+        );
+        if seeded {
+            obs.emit("seed", "workgraph seeded successfully — entering milestone loop");
+            // Reset out state (drain from seed turn is irrelevant) and fall through
+            // to the milestone loop below.
+            out = BgOutcome::default();
+            // Continue past this block into the loop
+        } else {
+            obs.emit("empty", "seed failed — empty workgraph");
+            out.mission_state = crate::bg_gate::MissionState::EmptyGraph;
+            return Ok(out);
+        }
     }
     out.mission_state = crate::bg_gate::MissionState::Running;
     let mut consecutive_fail = 0usize;
@@ -1034,6 +1046,33 @@ mod tests {
         .unwrap();
         assert_eq!(out.mission_state, MissionState::EmptyGraph);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn workgraph_self_seeds_and_advances() {
+        // 集成测试：空 workgraph + AGENTS.md → seed → 推进
+        // 用 StubClient（不调用工具），seed 失败 → EmptyGraph，不走后续循环
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("AGENTS.md"), "Build a test project").unwrap();
+        // 没有 workgraph.json → 空图
+        let out = run_background_cfg(
+            Arc::new(StubClient), "m".into(), 256, 0.0, dir.path().to_path_buf(),
+            String::new(), 3, 2, 8, 0,
+        ).unwrap();
+        // Stub 不生成里程碑 → EmptyGraph
+        assert_eq!(out.mission_state, MissionState::EmptyGraph, "{:?}", out.mission_state);
+    }
+
+    #[test]
+    fn workgraph_non_empty_still_advances_normally() {
+        let dir = tempfile::tempdir().unwrap();
+        ws(dir.path(), &[(1, "rustc --version", vec![])]); // 有节点
+        let out = run_background_cfg(
+            Arc::new(StubClient), "m".into(), 4096, 0.7, dir.path().to_path_buf(),
+            String::new(), 3, 2, 8, 0,
+        ).unwrap();
+        // 应正常推进，非 EmptyGraph
+        assert_ne!(out.mission_state, MissionState::EmptyGraph, "{:?}", out.mission_state);
     }
 
     #[test]
