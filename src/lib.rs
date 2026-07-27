@@ -29,6 +29,7 @@ pub mod verify;
 pub mod daemon;
 pub mod client;
 pub mod visual;
+pub mod recovery;
 
 use std::sync::Arc;
 

@@ -149,6 +149,23 @@ impl Daemon {
             while !shutdown_c2.load(Ordering::SeqCst) {
                 std::thread::sleep(wg_tick);
                 count += 1;
+
+                // Helper: update the stamp file with current tick info.
+                let update_stamp = || {
+                    let wg_mtime = std::fs::metadata(cfg_for_wg.root.join(".ccd_workgraph.json"))
+                        .and_then(|m| m.modified())
+                        .ok()
+                        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                        .map(|d| d.as_secs());
+                    let stamp = crate::recovery::DaemonStamp {
+                        last_tick: std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH).unwrap().as_secs(),
+                        session_id: None, // daemon session_id not tracked here
+                        workgraph_mtime: wg_mtime,
+                    };
+                    let _ = crate::recovery::write_stamp(&cfg_for_wg.root, &stamp);
+                };
+
                 // 检查暂停 flag：暂停时不推进，仅记录心跳。
                 if wg_paused.load(Ordering::SeqCst) {
                     let mut status = ts_wg.lock().unwrap();
@@ -158,6 +175,7 @@ impl Daemon {
                         s.tick_count = count;
                         s.last_event = "paused".into();
                     }
+                    update_stamp();
                     continue;
                 }
                 // 拿到 token 才推进，且跨整段 advance 持有；拿不到（有 turn 在跑）跳过。
@@ -171,6 +189,7 @@ impl Daemon {
                             s.tick_count = count;
                             s.last_event = "skipped (turn active)".into();
                         }
+                        update_stamp();
                         continue;
                     }
                 };
@@ -205,6 +224,7 @@ impl Daemon {
                         bus_for_wg.broadcast("workgraph", line);
                     }
                 }
+                update_stamp();
             }
         });
 

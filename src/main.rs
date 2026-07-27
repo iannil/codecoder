@@ -44,6 +44,12 @@ fn main() -> anyhow::Result<()> {
     match codecoder::bg_mode_from_env() {
         Some(codecoder::BgMode::Explicit(task)) => codecoder::run_background(cfg, task),
         Some(codecoder::BgMode::Workgraph) => codecoder::run_background(cfg, String::new()),
-        None => codecoder::run_daemon(cfg),
+        None => {
+            if cfg.daemon_auto_restart {
+                codecoder::recovery::run_with_recovery(cfg)
+            } else {
+                codecoder::run_daemon(cfg)
+            }
+        }
     }
 }
