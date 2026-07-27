@@ -60,6 +60,12 @@ pub struct Config {
     pub alert_webhook: Option<String>,
     /// 是否仅失败时告警。env CODECODER_ALERT_ON_FAILURE_ONLY, 默认 true。
     pub alert_on_failure_only: bool,
+    /// 是否在 daemon 崩溃后自动重启并恢复 session。env CODECODER_DAEMON_AUTO_RESTART, 默认 false。
+    pub daemon_auto_restart: bool,
+    /// sessions/ 目录最大文件数，超限时删除最旧的。0 = 不限制。env CODECODER_MAX_SESSIONS, 默认 100。
+    pub max_sessions: u32,
+    /// bg_ledger.jsonl 最大行数，超限时截断。0 = 不限制。env CODECODER_MAX_LEDGER_LINES, 默认 10000。
+    pub max_ledger_lines: u32,
 }
 
 impl Config {
@@ -136,6 +142,15 @@ impl Config {
             alert_on_failure_only: env("CODECODER_ALERT_ON_FAILURE_ONLY")
                 .map(|v| v != "0" && v != "false")
                 .unwrap_or(true),
+            daemon_auto_restart: env("CODECODER_DAEMON_AUTO_RESTART")
+                .map(|v| v == "1" || v == "true")
+                .unwrap_or(false),
+            max_sessions: env("CODECODER_MAX_SESSIONS")
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(100),
+            max_ledger_lines: env("CODECODER_MAX_LEDGER_LINES")
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(10000),
         }
     }
 }
@@ -191,6 +206,9 @@ const DOTENV_ALLOWED_KEYS: &[&str] = &[
     "CODECODER_AUTOTASK_SOURCE",
     "CODECODER_PROVIDER_RETRY_MAX",
     "CODECODER_PROVIDER_RETRY_INITIAL_MS",
+    "CODECODER_DAEMON_AUTO_RESTART",
+    "CODECODER_MAX_SESSIONS",
+    "CODECODER_MAX_LEDGER_LINES",
     // Note: FALLBACK_API_BASE and FALLBACK_MODEL are NOT in DOTENV_ALLOWED_KEYS
     // because they could redirect traffic to a malicious endpoint.
     // They must come from the real shell env.
@@ -516,5 +534,36 @@ mod tests {
             std::env::remove_var("CODECODER_PROVIDER_RETRY_MAX");
             std::env::remove_var("CODECODER_PROVIDER_RETRY_INITIAL_MS");
         }
+    }
+
+    #[test]
+    fn daemon_auto_restart_default_false() {
+        unsafe { std::env::remove_var("CODECODER_DAEMON_AUTO_RESTART"); }
+        assert!(!Config::from_env().daemon_auto_restart);
+    }
+
+    #[test]
+    fn daemon_auto_restart_can_be_enabled() {
+        unsafe { std::env::set_var("CODECODER_DAEMON_AUTO_RESTART", "true"); }
+        assert!(Config::from_env().daemon_auto_restart);
+        unsafe { std::env::remove_var("CODECODER_DAEMON_AUTO_RESTART"); }
+    }
+
+    #[test]
+    fn max_sessions_default_and_override() {
+        unsafe { std::env::remove_var("CODECODER_MAX_SESSIONS"); }
+        assert_eq!(Config::from_env().max_sessions, 100);
+        unsafe { std::env::set_var("CODECODER_MAX_SESSIONS", "50"); }
+        assert_eq!(Config::from_env().max_sessions, 50);
+        unsafe { std::env::remove_var("CODECODER_MAX_SESSIONS"); }
+    }
+
+    #[test]
+    fn max_ledger_lines_default_and_override() {
+        unsafe { std::env::remove_var("CODECODER_MAX_LEDGER_LINES"); }
+        assert_eq!(Config::from_env().max_ledger_lines, 10000);
+        unsafe { std::env::set_var("CODECODER_MAX_LEDGER_LINES", "5000"); }
+        assert_eq!(Config::from_env().max_ledger_lines, 5000);
+        unsafe { std::env::remove_var("CODECODER_MAX_LEDGER_LINES"); }
     }
 }
