@@ -1102,7 +1102,7 @@ impl AgentLoop {
         if name == "agent" {
             return self.spawn_sub_agent(call_id, &args, event_tx);
         }
-        if self.headless && (name == "ask_user" || name == "confirm" || name == "plan") {
+        if self.headless && (name == "ask_user" || name == "confirm") {
             let output = format!("denied: '{name}' requires a user, none present (headless)");
             // Emit a ToolFinished error so the denial is observable in the event
             // stream (the Background Agent runner records these into BgOutcome.denied).
@@ -1373,6 +1373,16 @@ impl AgentLoop {
                 call_id: call_id.to_string(),
                 output: "provide `steps` or `plan`".into(),
                 is_error: true,
+            });
+        }
+
+        // headless 模式:自动批准并写入 PLAN.md,不发送 PlanApproval 事件。
+        if self.headless {
+            let _ = std::fs::write(self.root.join("PLAN.md"), format!("# Plan\n\n{text}\n"));
+            return ToolOutcome::Result(MessageItem::ToolResult {
+                call_id: call_id.to_string(),
+                output: "plan approved (headless) and recorded to PLAN.md".to_string(),
+                is_error: false,
             });
         }
 
