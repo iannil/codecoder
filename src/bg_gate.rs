@@ -185,10 +185,12 @@ pub enum MissionState {
     Error(String),
 }
 
-/// `next_action` 的返回:推进到下一个 milestone,或停止并给出终态。
+/// `next_action` 的返回:推进到下一个 milestone,或停止并给出终态,或降级跳过。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum NextAction {
     Advance(u64),
+    /// 熔断时降级:跳过当前 milestone,继续推进下一个就绪里程碑(不阻塞依赖)。
+    DegradeAndAdvance(u64),
     Stop(MissionState),
 }
 
@@ -209,8 +211,13 @@ pub fn next_action(
     k: usize,
 ) -> NextAction {
     let failed = !matches!(verdict, GateVerdict::Pass);
-    // 熔断优先。
+    // 熔断降级:连续 K 次失败且存在独立就绪里程碑(未被当前失败阻塞)。
     if failed && consecutive_fail >= k {
+        if let Some(n) = graph.next_ready() {
+            if !n.deps.contains(&just_done_id) {
+                return NextAction::DegradeAndAdvance(n.id);
+            }
+        }
         return NextAction::Stop(MissionState::CircuitBreaker);
     }
     if !budget_left {
@@ -431,7 +438,20 @@ mod tests {
 
     #[test]
     fn next_action_circuit_breaker_on_k_consecutive_fails() {
+        // #3 不依赖 #1(独立就绪)→ 降级跳过,继续推进 #3。
         let g = with_status(graph_with(vec![ms(1, "x"), ms(3, "z")]), 1, NodeStatus::NeedsFix);
+        assert_eq!(
+            next_action(&g, 1, &GateVerdict::NeedsFix("e".into()), 2, true, 2),
+            NextAction::DegradeAndAdvance(3)
+        );
+    }
+
+    #[test]
+    fn next_action_circuit_breaker_stops_when_all_blocked() {
+        // #3 依赖 #1(被阻塞)→ 无可降级项 → Stop(CircuitBreaker)。
+        let mut m3 = ms(3, "z");
+        m3.deps = vec![1];
+        let g = with_status(graph_with(vec![ms(1, "x"), m3]), 1, NodeStatus::NeedsFix);
         assert_eq!(
             next_action(&g, 1, &GateVerdict::NeedsFix("e".into()), 2, true, 2),
             NextAction::Stop(MissionState::CircuitBreaker)

@@ -331,6 +331,12 @@ pub(crate) fn run_background_cfg(
             &g, sg.milestone_id, &gv, consecutive_fail, budget_left, circuit_k,
         ) {
             crate::bg_gate::NextAction::Advance(_) => continue,
+            // 熔断降级:记录日志后继续推进不依赖当前里程碑的就绪项。
+            crate::bg_gate::NextAction::DegradeAndAdvance(id) => {
+                obs.emit("degrade", &format!("#{id} continuing after consecutive failures"));
+                consecutive_fail = 0; // 降级后重置连续失败计数
+                continue;
+            }
             crate::bg_gate::NextAction::Stop(st) => {
                 out.mission_state = st;
                 break;
