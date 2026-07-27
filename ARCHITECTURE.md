@@ -42,7 +42,7 @@
 | `tool/builtin.rs` | 文件/执行/自我进化/委派/验收工具 | 0018 0020 0022 |
 | `tool/{net,dev,reason,search,wasm}.rs` | 联网 / 开发 / **推理树(reason 工具,**跨 session 检索**) / glob·grep(含 AST)/ wasm 运行器 | 0018 0021 |
 | `session.rs` | `Session`、自动落盘、前向迁移链、`/resume`、**树状会话(Phase A:parent 指针 + leaf)** | 0004 |
-| `compaction.rs` | 派生的 Context Working Set(不毁持久记录)。**tier-1 + tier-2 已实现** | 0023 |
+| `compaction.rs` | 派生的 Context Working Set(不毁持久记录)。**tier-1 + tier-2 (LLM summarization)** | 0023 |
 | `tokenizer.rs` | tiktoken 精确计数 + 模型→窗口表 | 0023 |
 | `registry.rs` | 扫 `skills/`+`prompts/`+`capabilities/` → 常驻目录(prompts 标 `[draft]`);**每个条目带 `SourceInfo` 溯源元数据** | 0020 0025 |
 | `capability.rs` | `Environment`/`Lifecycle`/manifest/`RunningServiceTable`、`Supervisor`(Persistent 服务崩溃→标记 Failed 可见,**不自动重启**,0021;**跨重启持久化判定状态 + 崩溃预算**,0034) | 0021 0034 |

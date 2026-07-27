@@ -145,7 +145,7 @@ project/
 | `CODECODER_TRUST_FILE` | `~/.codecoder/trust.json` | 全局信任决策存储路径（就近祖先匹配，见 ADR 0028） |
 | `CODECODER_MAX_TOOL_OUTPUT` | `262144` | `read_file` / `run_command` 单次输出字节上限，超长截断带 marker（ADR 0037） |
 | `CODECODER_NOOP_NUDGE_THRESHOLD` | `3` | 单 turn 连续多少「纯探索」步（read_file/glob/grep/diff）后注入一次 steering nudge，推动动手或声明阻塞（0 = 禁用；每 turn 至多一次；迭代 4，ADR 0029 修订） |
-| `CODECODER_COMMAND_TIMEOUT_SECS` | `0` | `run_command` 默认超时秒数（0 = 无超时；工具参数 `timeout_secs` 可覆盖） |
+| `CODECODER_COMPACTION_TIER2` | `true` | 是否启用 tier-2 compaction（LLM 摘要），设为 `false` 则仅执行 tier-1 压缩（ADR 0023） |
 | `CODECODER_PROVIDER_RETRY_MAX` | `3` | LLM provider 调用重试次数（0 = 禁用重试） |
 | `CODECODER_PROVIDER_RETRY_INITIAL_MS` | `1000` | LLM provider 重试初始等待毫秒数（指数退避基准） |
 | `CODECODER_FALLBACK_API_BASE` | — | 可选，主 provider 不可用时回退的 API 端点 |
