@@ -3,6 +3,7 @@
 use crate::agent::{AgentEvent, AgentLoop};
 use crate::bg_gate::MissionState;
 use crate::provider::Provider;
+use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::mpsc::channel;
@@ -55,6 +56,15 @@ impl Default for BgOutcome {
             subgoals: vec![],
             mission_state: MissionState::Running,
         }
+    }
+}
+
+/// 读取项目根目录的 AGENTS.md 作为使命描述。若文件不存在或为空，返回通用降级文本。
+fn read_mission(root: &Path) -> String {
+    let path = root.join("AGENTS.md");
+    match std::fs::read_to_string(&path) {
+        Ok(content) if !content.trim().is_empty() => content,
+        _ => "Initialize and develop the project in this directory.".to_string(),
     }
 }
 
@@ -1001,5 +1011,33 @@ mod tests {
         let backup = dir.join(format!("workgraph.json.corrupt.{}", std::process::id()));
         assert!(backup.exists(), "backup must exist at {}", backup.display());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn read_mission_returns_agents_md_content() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("AGENTS.md"), "Build a Rust CLI tool").unwrap();
+        let m = read_mission(dir.path());
+        assert_eq!(m, "Build a Rust CLI tool");
+    }
+
+    #[test]
+    fn read_mission_fallback_when_no_agents_md() {
+        let dir = tempfile::tempdir().unwrap();
+        let m = read_mission(dir.path());
+        assert!(m.contains("Initialize and develop"));
+    }
+
+    #[test]
+    fn read_mission_fallback_when_agents_md_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("AGENTS.md"), "").unwrap();
+        let m = read_mission(dir.path());
+        assert!(m.contains("Initialize and develop"));
+        // 纯空格也算空
+        let dir2 = tempfile::tempdir().unwrap();
+        std::fs::write(dir2.path().join("AGENTS.md"), "   \n\n").unwrap();
+        let m2 = read_mission(dir2.path());
+        assert!(m2.contains("Initialize and develop"));
     }
 }
