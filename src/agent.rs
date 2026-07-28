@@ -1,7 +1,7 @@
 // Agent kernel channel types (ADR 0016). OS threads + channels, no async runtime.
 use crate::compaction;
 use crate::message::{Message, MessageId, MessageItem, Role};
-use crate::permission::{PermScope, Permission, ProjectAllowlist, SessionAllowlist, scope_ceiling};
+use crate::permission::{AllowlistEntry, PermScope, Permission, ProjectAllowlist, SessionAllowlist, scope_ceiling};
 use crate::provider::{Completion, CompletionRequest, Provider, StopReason};
 use crate::registry::Registry;
 use crate::session::{self, Session};
@@ -1167,7 +1167,9 @@ impl AgentLoop {
         // Permission gate (ADR 0018): None runs freely; Ask consults the session
         // allowlist, else a blocking prompt over the embedded reply_tx (ADR 0016).
         if let Permission::Ask { key } = tool.permission(&args, &self.root) {
-            if !self.allowlist.allows(&key) && !self.project_allowlist.allows(&key) {
+            let session_allows = self.allowlist.allows(&key);
+            let project_allows = self.project_allowlist.allows(&key, &args, &self.root);
+            if !session_allows && !project_allows {
                 if self.headless {
                     // Name the root cause (ADR 0028): an untrusted project's
                     // codecoder.json allowlist is NOT loaded, so a key the operator
@@ -1211,7 +1213,7 @@ impl AgentLoop {
                         PermScope::AlwaysThisProject
                             if scope_ceiling(&key) == PermScope::AlwaysThisProject =>
                         {
-                            if let Err(e) = self.project_allowlist.grant(&self.root, key) {
+                            if let Err(e) = self.project_allowlist.grant(&self.root, AllowlistEntry::Plain(key)) {
                                 let _ = event_tx.send(AgentEvent::Notice(format!(
                                     "could not persist project permission: {e}"
                                 )));
@@ -2484,7 +2486,7 @@ mod tests {
         assert_eq!(agent.trust, TrustState::Untrusted);
         assert!(agent.system_prompt.is_empty(), "untrusted AGENTS.md must not enter the system prompt");
         assert!(
-            !agent.project_allowlist.allows("run_command:rm"),
+            !agent.project_allowlist.allows("run_command:rm", &serde_json::json!({}), &proj),
             "untrusted codecoder.json allowlist must not load"
         );
 
@@ -2576,7 +2578,7 @@ mod tests {
         let agent = AgentLoop::new(stub_provider(), "m", 256, 0.0, proj.clone());
         assert_eq!(agent.trust, TrustState::Trusted);
         assert!(agent.system_prompt.contains("IDENTITY-MARKER"), "trusted AGENTS.md loads");
-        assert!(agent.project_allowlist.allows("run_command:git"), "trusted allowlist loads");
+        assert!(agent.project_allowlist.allows("run_command:git", &serde_json::json!({}), &proj), "trusted allowlist loads");
 
         unsafe { std::env::remove_var("CODECODER_TRUST_FILE") };
         std::fs::remove_dir_all(&base).ok();
