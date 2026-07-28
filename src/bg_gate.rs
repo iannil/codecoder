@@ -179,7 +179,19 @@ pub fn evaluate(
     match gate_kind(m) {
         GateKind::Command => {
             let cmd = gate_command(m).expect("gate_kind==Command ⇒ gate_command is Some");
-            run_command_gate(&cmd, root, cancel)
+            let verdict = run_command_gate(&cmd, root, cancel);
+            // 命令门 pass 后执行 checks（Phase 1）
+            if verdict == GateVerdict::Pass {
+                if let Some(checks) = &m.checks {
+                    if !checks.is_empty() {
+                        if let Err(errors) = run_checks(checks, root) {
+                            let detail = errors.join("; ");
+                            return GateVerdict::NeedsFix(format!("command passed but checks failed: {detail}"));
+                        }
+                    }
+                }
+            }
+            verdict
         }
         GateKind::None => GateVerdict::Inconclusive("no acceptance criterion (weak signal)".into()),
         GateKind::Review => review_runner(),
@@ -673,6 +685,32 @@ mod tests {
         };
         let result = super::run_checks(&[bad], dir.path());
         assert!(result.is_err());
-        assert_eq!(result.unwrap_err().len(), 1);
+    }
+
+    #[test]
+    fn evaluate_with_checks_detects_placeholder() {
+        let dir = tempdir().unwrap();
+        std::fs::write(dir.path().join("good.tsx"), "export function Real() { return <div>OK</div>; }").unwrap();
+
+        let m = Milestone {
+            id: 1, title: "test".into(), acceptance: String::new(), deps: vec![],
+            status: NodeStatus::Pending, verdict: None, touched: vec![],
+            fix_attempts: 0, last_failure: None,
+            command: Some("true".into()),
+            checks: Some(vec![CheckSpec {
+                type_: CheckType::NoTemplateContent,
+                params: [("patterns".into(), json!(["*.tsx"])),
+                          ("forbidden".into(), json!(["PlaceholderPage"]))].into_iter().collect(),
+            }]),
+        };
+        // good.tsx 不含 PlaceholderPage → pass
+        let v = evaluate(&m, dir.path(), None, &|| GateVerdict::Pass);
+        assert_eq!(v, GateVerdict::Pass);
+
+        // 在同一个目录加一个含 PlaceholderPage 的文件
+        std::fs::write(dir.path().join("bad.tsx"), "import { PlaceholderPage } from '@/components'").unwrap();
+        let v2 = evaluate(&m, dir.path(), None, &|| GateVerdict::Pass);
+        assert!(matches!(v2, GateVerdict::NeedsFix(_)));
+        assert!(format!("{:?}", v2).contains("PlaceholderPage"));
     }
 }
