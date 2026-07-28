@@ -13,6 +13,29 @@ use std::path::{Path, PathBuf};
 
 pub const WG_SCHEMA_VERSION: u32 = 1;
 
+/// 确定性检查项的类型。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CheckType {
+    /// 跑一个命令，检查退出码是否为 0。
+    BuildExitZero,
+    /// glob 匹配文件，grep 禁止内容。
+    NoTemplateContent,
+    /// 目录下最少文件数。
+    FileCountMin,
+    /// 业务文件最少行数。
+    MinLinesPerFile,
+}
+
+/// 一条确定性的验收检查项。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CheckSpec {
+    #[serde(rename = "type")]
+    pub type_: CheckType,
+    #[serde(default)]
+    pub params: HashMap<String, serde_json::Value>,
+}
+
 /// A milestone's lifecycle state. `Blocked` is DERIVED from unmet dependencies
 /// (recomputed, never the authoritative record of intent); the others are set
 /// explicitly by an action.
@@ -84,29 +107,6 @@ pub struct Milestone {
     /// 可选确定性检查项列表（Phase 1 新增）。存在时，命令门 pass 后执行。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub checks: Option<Vec<CheckSpec>>,
-}
-
-/// 确定性检查项的类型。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum CheckType {
-    /// 跑一个命令，检查退出码是否为 0。
-    BuildExitZero,
-    /// glob 匹配文件，grep 禁止内容。
-    NoTemplateContent,
-    /// 目录下最少文件数。
-    FileCountMin,
-    /// 业务文件最少行数。
-    MinLinesPerFile,
-}
-
-/// 一条确定性的验收检查项。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CheckSpec {
-    #[serde(rename = "type")]
-    pub type_: CheckType,
-    #[serde(default)]
-    pub params: HashMap<String, serde_json::Value>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -867,7 +867,7 @@ mod tests {
             .into_iter()
             .collect(),
         };
-        let m = Milestone {
+        let mut m = Milestone {
             id: 42,
             title: "round-trip".into(),
             acceptance: "acc".into(),
