@@ -88,6 +88,25 @@ impl Tool for Diff {
         Permission::None
     }
     fn run(&self, args: Value, ctx: &mut ToolCtx) -> anyhow::Result<ToolOutput> {
+        // Check if git repo exists before running git diff
+        let git_check = Command::new("git")
+            .args(["rev-parse", "--git-dir"])
+            .current_dir(&ctx.root)
+            .output();
+        match git_check {
+            Ok(out) if !out.status.success() => {
+                return Ok(ToolOutput::err(
+                    "diff unavailable: no git repository. Run `git init` first."
+                ));
+            }
+            Err(e) => {
+                return Ok(ToolOutput::err(
+                    format!("diff unavailable: git check failed: {e}")
+                ));
+            }
+            _ => {} // git repo exists, proceed
+        }
+
         let mut a = vec!["diff"];
         if args.get("staged").and_then(Value::as_bool).unwrap_or(false) {
             a.push("--cached");
