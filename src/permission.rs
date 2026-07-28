@@ -145,7 +145,7 @@ impl ProjectAllowlist {
         self.allowlist.iter().any(|entry| match entry {
             AllowlistEntry::Plain(k) => k == key,
             AllowlistEntry::Scoped { prefix, scope } => {
-                (prefix == key || key.starts_with(prefix.as_str())) && scope.check(args, root)
+                prefix == key && scope.check(args, root)
             }
         })
     }
@@ -163,5 +163,131 @@ impl ProjectAllowlist {
         let json = serde_json::to_string_pretty(self)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
         std::fs::write(Self::path(root), json)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn plain_entry_deserializes() {
+        let entry: AllowlistEntry = serde_json::from_str(r#""run_command:git""#).unwrap();
+        assert!(matches!(entry, AllowlistEntry::Plain(k) if k == "run_command:git"));
+    }
+
+    #[test]
+    fn scoped_entry_deserializes() {
+        let entry: AllowlistEntry =
+            serde_json::from_str(r#"{"prefix":"run_command:rm","scope":{"project_bound":true}}"#)
+                .unwrap();
+        assert!(matches!(entry, AllowlistEntry::Scoped { .. }));
+        if let AllowlistEntry::Scoped { prefix, scope } = &entry {
+            assert_eq!(prefix, "run_command:rm");
+            assert!(scope.project_bound);
+        }
+    }
+
+    #[test]
+    fn scoped_entry_default_scope() {
+        // scope omitted → default ScopeConstraint (project_bound: false)
+        let entry: AllowlistEntry =
+            serde_json::from_str(r#"{"prefix":"run_command:echo"}"#).unwrap();
+        if let AllowlistEntry::Scoped { prefix, scope } = &entry {
+            assert_eq!(prefix, "run_command:echo");
+            assert!(!scope.project_bound);
+        } else {
+            panic!("expected Scoped variant");
+        }
+    }
+
+    #[test]
+    fn exact_match_no_prefix_false_positive() {
+        // Prefix "run_command:rm" must NOT match "run_command:rmdir".
+        let mut allowlist = ProjectAllowlist::default();
+        allowlist
+            .allowlist
+            .insert(AllowlistEntry::Scoped { prefix: "run_command:rm".into(), scope: ScopeConstraint::default() });
+
+        let root = Path::new("/tmp");
+        assert!(allowlist.allows("run_command:rm", &serde_json::json!({}), root));
+        assert!(!allowlist.allows("run_command:rmdir", &serde_json::json!({}), root));
+    }
+
+    #[test]
+    fn scoped_project_bound_allowed() {
+        let mut allowlist = ProjectAllowlist::default();
+        allowlist
+            .allowlist
+            .insert(AllowlistEntry::Scoped {
+                prefix: "run_command:rm".into(),
+                scope: ScopeConstraint { project_bound: true },
+            });
+
+        let root = Path::new("/home/user/project");
+        // cwd within project root → allowed
+        assert!(allowlist.allows(
+            "run_command:rm",
+            &serde_json::json!({"cwd": "/home/user/project/src"}),
+            root,
+        ));
+    }
+
+    #[test]
+    fn scoped_project_bound_denied() {
+        let mut allowlist = ProjectAllowlist::default();
+        allowlist
+            .allowlist
+            .insert(AllowlistEntry::Scoped {
+                prefix: "run_command:rm".into(),
+                scope: ScopeConstraint { project_bound: true },
+            });
+
+        let root = Path::new("/home/user/project");
+        // cwd outside project root → denied
+        assert!(!allowlist.allows(
+            "run_command:rm",
+            &serde_json::json!({"cwd": "/tmp"}),
+            root,
+        ));
+    }
+
+    #[test]
+    fn scoped_no_project_bound_always_allowed() {
+        let mut allowlist = ProjectAllowlist::default();
+        allowlist
+            .allowlist
+            .insert(AllowlistEntry::Scoped {
+                prefix: "run_command:echo".into(),
+                scope: ScopeConstraint::default(), // project_bound: false
+            });
+
+        let root = Path::new("/home/user/project");
+        // Any cwd works when project_bound is false
+        assert!(allowlist.allows(
+            "run_command:echo",
+            &serde_json::json!({"cwd": "/tmp"}),
+            root,
+        ));
+        assert!(allowlist.allows(
+            "run_command:echo",
+            &serde_json::json!({"cwd": "/home/user/project"}),
+            root,
+        ));
+    }
+
+    #[test]
+    fn scoped_cwd_defaults_to_project_root() {
+        let mut allowlist = ProjectAllowlist::default();
+        allowlist
+            .allowlist
+            .insert(AllowlistEntry::Scoped {
+                prefix: "run_command:make".into(),
+                scope: ScopeConstraint { project_bound: true },
+            });
+
+        let root = Path::new("/home/user/project");
+        // No cwd specified → defaults to project root → allowed
+        assert!(allowlist.allows("run_command:make", &serde_json::json!({}), root));
     }
 }
