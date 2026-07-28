@@ -190,6 +190,22 @@ milestone 的 `acceptance` 字段就是验收条件。`bg_gate.rs` 会扫描 `ac
 
 ---
 
+## 推荐：Headless 模式关键时序
+
+项目初始化时遵循以下固定顺序，避免因步骤错乱导致重复重试：
+
+1. **package.json → npm install**：写完 package.json 后立即执行 `npm install`，不要等所有文件写完后才装
+2. **git init → commit**：在首次 commit 前必须先 `git init`，否则 `diff`/`commit`/`review` 工具不可用
+3. **优先使用内置工具**：
+   - `list_directory` 替代 `ls`
+   - `read_file` 替代 `cat`/`head`/`tail`
+   - `glob` 替代 `grep -r`
+   - `diff`（内置工具）替代 `git diff`
+4. **避免复合 shell 命令**：`&&`/`||`/`|`/`2>&1` 会触发整串 keying 导致被拒
+5. **rm 命令范围**：`rm` 仅用于删除项目目录内的文件，不得操作外部路径
+
+---
+
 ## 陷阱与注意事项
 
 ### 1. Trust 门是加载时的第一道闸
