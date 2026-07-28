@@ -280,6 +280,7 @@ mod tests {
             fix_attempts: 0,
             last_failure: None,
             command: None,
+            checks: None,
         }
     }
 

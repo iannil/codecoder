@@ -1090,6 +1090,7 @@ mod tests {
             fix_attempts: 1,
             last_failure: Some("gate `cargo test` failed: 2 failed".into()),
             command: None,
+            checks: None,
         };
         let p = build_repair_prompt(&m, "gate `cargo test` failed: 2 failed", &crate::workgraph::WorkGraph::default());
         assert!(p.contains("CRDT 核心"), "含标题: {p}");
@@ -1112,6 +1113,7 @@ mod tests {
             fix_attempts: 0,
             last_failure: Some("self-review: NeedsFix".into()),
             command: None,
+            checks: None,
         };
         let p = build_repair_prompt(&m, "self-review: NeedsFix", &crate::workgraph::WorkGraph::default());
         assert!(p.contains("(none)"), "空 acceptance 应渲染为 (none): {p}");
