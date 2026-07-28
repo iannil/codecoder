@@ -266,14 +266,32 @@ pub(crate) fn run_background_cfg(
                     // 区分"真完成"与"卡在 needs_fix(预算耗尽)"。
                     if out.mission_state == crate::bg_gate::MissionState::Running {
                         let g = crate::workgraph::WorkGraph::read(&root);
-                        let needs_fix = g
-                            .nodes
-                            .iter()
-                            .find(|n| n.status == crate::workgraph::NodeStatus::NeedsFix);
-                        out.mission_state = match needs_fix {
-                            Some(n) => crate::bg_gate::MissionState::StuckNeedsFix(n.id),
-                            None => crate::bg_gate::MissionState::CompletedAllReady,
-                        };
+                        // 兜底检查：所有里程碑 needs_fix 且至少一个已耗尽 fix_attempts
+                        let all_needs_fix = g.nodes.iter().all(|n| n.status == crate::workgraph::NodeStatus::NeedsFix);
+                        let any_exhausted = g.nodes.iter().any(|n| {
+                            n.status == crate::workgraph::NodeStatus::NeedsFix && n.fix_attempts >= max_fix_attempts
+                        });
+                        if all_needs_fix && any_exhausted && max_fix_attempts > 0 {
+                            let fallback_id = g.nodes.first().map(|n| n.id).unwrap_or(0);
+                            out.mission_state = crate::bg_gate::MissionState::StuckNeedsFix(fallback_id);
+                            out.events.push(format!(
+                                "all {} milestones needs_fix ({} fix_attempts exhausted) — exiting",
+                                g.nodes.len(), max_fix_attempts,
+                            ));
+                            obs.emit("stuck", &format!(
+                                "all {} milestones needs_fix, at least one exhausted — giving up",
+                                g.nodes.len(),
+                            ));
+                        } else {
+                            let needs_fix = g
+                                .nodes
+                                .iter()
+                                .find(|n| n.status == crate::workgraph::NodeStatus::NeedsFix);
+                            out.mission_state = match needs_fix {
+                                Some(n) => crate::bg_gate::MissionState::StuckNeedsFix(n.id),
+                                None => crate::bg_gate::MissionState::CompletedAllReady,
+                            };
+                        }
                     }
                     break;
                 }
