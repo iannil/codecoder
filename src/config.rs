@@ -62,6 +62,12 @@ pub struct Config {
     pub alert_on_failure_only: bool,
     /// 是否在 daemon 崩溃后自动重启并恢复 session。env CODECODER_DAEMON_AUTO_RESTART, 默认 false。
     pub daemon_auto_restart: bool,
+    /// Provider 健康探针：连续失败多少次后触发告警并跳过 workgraph tick。0 = 禁用探针。
+    /// env CODECODER_PROBE_FAILURE_THRESHOLD, 默认 5。
+    pub probe_failure_threshold: u32,
+    /// 是否启用 workgraph 自动续期：全部 milestone done 后自动从 AGENTS.md 重新 seed。
+    /// env CODECODER_WG_AUTO_RENEW, 默认 true。
+    pub wg_auto_renew: bool,
     /// sessions/ 目录最大文件数，超限时删除最旧的。0 = 不限制。env CODECODER_MAX_SESSIONS, 默认 100。
     pub max_sessions: u32,
     /// bg_ledger.jsonl 最大行数，超限时截断。0 = 不限制。env CODECODER_MAX_LEDGER_LINES, 默认 10000。
@@ -145,6 +151,12 @@ impl Config {
             daemon_auto_restart: env("CODECODER_DAEMON_AUTO_RESTART")
                 .map(|v| v == "1" || v == "true")
                 .unwrap_or(false),
+            probe_failure_threshold: env("CODECODER_PROBE_FAILURE_THRESHOLD")
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(5),
+            wg_auto_renew: env("CODECODER_WG_AUTO_RENEW")
+                .map(|v| v != "0" && v != "false")
+                .unwrap_or(true),
             max_sessions: env("CODECODER_MAX_SESSIONS")
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(100),
@@ -209,6 +221,9 @@ const DOTENV_ALLOWED_KEYS: &[&str] = &[
     "CODECODER_DAEMON_AUTO_RESTART",
     "CODECODER_MAX_SESSIONS",
     "CODECODER_MAX_LEDGER_LINES",
+    // Note: PROBE_FAILURE_THRESHOLD and WG_AUTO_RENEW are safe — pure behaviour params.
+    "CODECODER_PROBE_FAILURE_THRESHOLD",
+    "CODECODER_WG_AUTO_RENEW",
     // Note: FALLBACK_API_BASE and FALLBACK_MODEL are NOT in DOTENV_ALLOWED_KEYS
     // because they could redirect traffic to a malicious endpoint.
     // They must come from the real shell env.

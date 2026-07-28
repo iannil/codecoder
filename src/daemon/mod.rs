@@ -107,6 +107,7 @@ impl Daemon {
         let sup_supervisor = Arc::clone(&supervisor);
         let sup_tick = Duration::from_secs(self.cfg.supervisor_tick_secs);
         let ts_sup = Arc::clone(&thread_status);
+        let root_for_sup = self.cfg.root.clone();
         let sup_handle = {
             std::thread::spawn(move || {
                 let mut count = 0u64;
@@ -127,6 +128,14 @@ impl Daemon {
                         bus_for_sup.broadcast("supervisor", &line);
                     }
                     std::thread::sleep(sup_tick);
+                    // Write stamp so watchdog can see this thread is alive
+                    let stamp = crate::recovery::DaemonStamp {
+                        last_tick: std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH).unwrap().as_secs(),
+                        session_id: None,
+                        workgraph_mtime: None,
+                    };
+                    let _ = crate::recovery::write_stamp(&root_for_sup, &stamp);
                 }
                 sup_supervisor.lock().unwrap().shutdown_all();
             })
@@ -147,6 +156,12 @@ impl Daemon {
         mgr.lock().unwrap().workgraph_paused = Some(Arc::clone(&wg_paused));
         let wg_handle = std::thread::spawn(move || {
             let mut count = 0u64;
+            // Health probe state, shared across wg_handle ticks.
+            let mut health_state = crate::provider_health::HealthState::new();
+            // Seed cooldown: track when we last auto-renewed the workgraph.
+            let mut last_seed_ts: u64 = 0;
+            let seed_cooldown = cfg_for_wg.wg_tick_secs * 10; // min seconds between auto-renewals
+
             while !shutdown_c2.load(Ordering::SeqCst) {
                 std::thread::sleep(wg_tick);
                 count += 1;
@@ -167,7 +182,7 @@ impl Daemon {
                     let _ = crate::recovery::write_stamp(&cfg_for_wg.root, &stamp);
                 };
 
-                // 检查暂停 flag：暂停时不推进，仅记录心跳。
+                // ── Pause check ──
                 if wg_paused.load(Ordering::SeqCst) {
                     let mut status = ts_wg.lock().unwrap();
                     if let Some(s) = status.iter_mut().find(|s| s.name == "workgraph") {
@@ -179,7 +194,8 @@ impl Daemon {
                     update_stamp();
                     continue;
                 }
-                // 拿到 token 才推进，且跨整段 advance 持有；拿不到（有 turn 在跑）跳过。
+
+                // ── Turn token check ──
                 let _guard = match turn_token_for_wg.try_lock() {
                     Ok(g) => g,
                     Err(_) => {
@@ -194,15 +210,67 @@ impl Daemon {
                         continue;
                     }
                 };
-                // advance 内部自建 agent，不复用 mgr；故此处不锁 mgr
+
+                // ── Provider health probe ──
                 let provider = crate::select_provider(&cfg_for_wg);
+                let probe_threshold = cfg_for_wg.probe_failure_threshold;
+                let probe_enabled = probe_threshold > 0;
+
+                if probe_enabled {
+                    let was_unhealthy = health_state.is_unhealthy(probe_threshold);
+                    let healthy = crate::provider_health::probe_and_update(
+                        &mut health_state,
+                        provider.as_ref(),
+                        &cfg_for_wg.model,
+                        probe_threshold,
+                    );
+
+                    if health_state.just_recovered(was_unhealthy) {
+                        // Recovery alert
+                        if let Some(ref webhook) = cfg_for_wg.alert_webhook {
+                            let msg = format!(
+                                ":white_check_mark: CodeCoder provider recovered — resuming work"
+                            );
+                            let _ = crate::alert::send_alert(webhook, &msg);
+                        }
+                        bus_for_wg.broadcast("workgraph", "provider recovered");
+                    }
+
+                    if !healthy && health_state.is_unhealthy(probe_threshold) {
+                        // Alert on crossing the threshold
+                        if health_state.consecutive_failures == probe_threshold {
+                            if let Some(ref webhook) = cfg_for_wg.alert_webhook {
+                                let err = health_state.last_failure.as_ref()
+                                    .map(|(_, e)| e.as_str())
+                                    .unwrap_or("unknown");
+                                let msg = format!(
+                                    ":rotating_light: CodeCoder provider UNHEALTHY after {probe_threshold} failures\nLast error: {err}"
+                                );
+                                let _ = crate::alert::send_alert(webhook, &msg);
+                            }
+                            bus_for_wg.broadcast("workgraph", "provider UNHEALTHY — suppressing work");
+                        }
+                        let mut status = ts_wg.lock().unwrap();
+                        if let Some(s) = status.iter_mut().find(|s| s.name == "workgraph") {
+                            s.last_tick = Some(std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH).unwrap().as_secs());
+                            s.tick_count = count;
+                            s.last_event = format!("probe failed ({}/{probe_threshold})", health_state.consecutive_failures);
+                        }
+                        update_stamp();
+                        continue;
+                    }
+                }
+
+                // ── Advance one milestone ──
                 let out = crate::background::advance_one_milestone(
-                    provider,
+                    provider.clone(),
                     cfg_for_wg.model.clone(),
                     cfg_for_wg.max_tokens,
                     cfg_for_wg.temperature,
                     cfg_for_wg.root.clone(),
                 );
+
                 {
                     let mut status = ts_wg.lock().unwrap();
                     if let Some(s) = status.iter_mut().find(|s| s.name == "workgraph") {
@@ -220,11 +288,39 @@ impl Daemon {
                         };
                     }
                 }
-                if let Ok(Some(o)) = out {
+                if let Ok(Some(o)) = &out {
                     if let Some(line) = o.events.iter().find(|e| e.starts_with("milestone")) {
                         bus_for_wg.broadcast("workgraph", line);
                     }
                 }
+
+                // ── Workgraph auto-renew: if Ok(None) and all done, re-seed from mission ──
+                if matches!(&out, Ok(None)) && cfg_for_wg.wg_auto_renew {
+                    let now = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+                    if now - last_seed_ts >= seed_cooldown {
+                        let g = crate::workgraph::WorkGraph::read(&cfg_for_wg.root);
+                        let all_done = g.nodes.is_empty()
+                            || g.nodes.iter().all(|n| n.status == crate::workgraph::NodeStatus::Done);
+                        if all_done {
+                            let ok = crate::background::seed_workgraph_from_mission(
+                                provider.clone(),
+                                cfg_for_wg.model.clone(),
+                                cfg_for_wg.max_tokens,
+                                cfg_for_wg.temperature,
+                                cfg_for_wg.root.clone(),
+                                cfg_for_wg.bg_milestone_tool_cap,
+                            );
+                            if ok {
+                                bus_for_wg.broadcast("workgraph", "auto-renewed workgraph from mission");
+                                last_seed_ts = now;
+                            } else {
+                                bus_for_wg.broadcast("workgraph", "auto-renew failed (seed returned no milestones)");
+                            }
+                        }
+                    }
+                }
+
                 update_stamp();
             }
         });
@@ -248,6 +344,14 @@ impl Daemon {
                     s.tick_count = count;
                     s.last_event = "tick_reload".into();
                 }
+                // Write stamp so watchdog can see this thread is alive
+                let stamp = crate::recovery::DaemonStamp {
+                    last_tick: std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH).unwrap().as_secs(),
+                    session_id: None,
+                    workgraph_mtime: None,
+                };
+                let _ = crate::recovery::write_stamp(&root_for_reload, &stamp);
             }
         });
 
@@ -309,6 +413,14 @@ impl Daemon {
                     s.tick_count = count;
                     s.last_event = last_event;
                 }
+                // Write stamp so watchdog can see this thread is alive
+                let stamp = crate::recovery::DaemonStamp {
+                    last_tick: std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH).unwrap().as_secs(),
+                    session_id: None,
+                    workgraph_mtime: None,
+                };
+                let _ = crate::recovery::write_stamp(&root_ledger, &stamp);
             }
         });
 
@@ -380,6 +492,14 @@ impl Daemon {
                         s.tick_count = count;
                         s.last_event = last_event;
                     }
+                    // Write stamp so watchdog can see this thread is alive
+                    let stamp = crate::recovery::DaemonStamp {
+                        last_tick: std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH).unwrap().as_secs(),
+                        session_id: None,
+                        workgraph_mtime: None,
+                    };
+                    let _ = crate::recovery::write_stamp(&root_auto, &stamp);
                 }
             });
         }
@@ -413,6 +533,14 @@ impl Daemon {
                     s.tick_count = count;
                     s.last_event = format!("sessions:max={max_sessions_cleanup} ledger:max={max_ledger_lines_cleanup}");
                 }
+                // Write stamp so watchdog can see this thread is alive
+                let stamp = crate::recovery::DaemonStamp {
+                    last_tick: std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH).unwrap().as_secs(),
+                    session_id: None,
+                    workgraph_mtime: None,
+                };
+                let _ = crate::recovery::write_stamp(&root_cleanup, &stamp);
             }
         });
 
@@ -484,6 +612,8 @@ mod tests {
             daemon_auto_restart: false,
             max_sessions: 100,
             max_ledger_lines: 10000,
+            probe_failure_threshold: 5,
+            wg_auto_renew: true,
         };
         let _d = Daemon::new(cfg); // 仅构造，不 run（run 会阻塞 accept）
         let _ = std::fs::remove_dir_all(&dir);

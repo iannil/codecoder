@@ -1,0 +1,8 @@
+{
+  "name": "daemon-watchdog",
+  "description": "External daemon health watchdog: checks .ccd_stamp.json freshness and alerts/restarts if stale. Designed for periodic cron or systemd timer.",
+  "environment": "Shell",
+  "lifecycle": "OnDemand",
+  "entry": "sh capabilities/daemon-watchdog/run.sh",
+  "usage": "cc run_capability daemon-watchdog --root /path/to/project"
+}

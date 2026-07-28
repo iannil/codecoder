@@ -16,6 +16,7 @@ pub mod memory;
 pub mod message;
 pub mod permission;
 pub mod provider;
+pub mod provider_health;
 pub mod registry;
 pub mod retry;
 pub mod review;

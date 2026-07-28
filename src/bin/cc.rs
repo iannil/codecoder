@@ -39,6 +39,7 @@ fn main() -> anyhow::Result<()> {
             println!("  cc autotask on         Start autotask polling");
             println!("  cc autotask off        Stop autotask polling");
             println!("  cc autotask status     Show autotask polling status");
+            println!("  cc health               Show daemon health status");
             println!();
             println!("NOTE: First-run users — set up a `.ccd.env` in the project root for");
             println!("persistent config (CODECODER_API_KEY, CODECODER_MODEL, etc.).");
@@ -65,6 +66,7 @@ fn main() -> anyhow::Result<()> {
         [one, cmd] if one == "autotask" && cmd == "status" => send_one(&sock, ClientRequest::AutotaskStatus),
         [one, cmd] if one == "autotask" && cmd == "on" => send_one(&sock, ClientRequest::AutotaskOn),
         [one, cmd] if one == "autotask" && cmd == "off" => send_one(&sock, ClientRequest::AutotaskOff),
+        [one] if one == "health" => send_one(&sock, ClientRequest::HealthCheck),
         [one, id] if one == "milestone-reset" => {
             let id: u64 = id.parse().map_err(|e| anyhow::anyhow!("milestone-reset <id>: {e}"))?;
             send_one(&sock, ClientRequest::MilestoneReset { id })

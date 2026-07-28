@@ -225,6 +225,20 @@ pub fn print_event(ev: &ServerEvent) -> bool {
             println!("  ticks:      {}", s.tick_count);
             false
         }
+        ServerEvent::HealthStatus(s) => {
+            println!("daemon health:");
+            println!("  alive: {}s", s.alive_secs);
+            for t in &s.threads {
+                let last = t.last_tick.map(|ts| format!("tick={}", ts)).unwrap_or_else(|| "none".into());
+                println!("  {} ({} ticks, last: {}, event: {})", t.name, t.tick_count, last, t.last_event);
+            }
+            if let Some(mtime) = s.workgraph_mtime {
+                println!("  workgraph mtime: {} ({})",
+                    mtime,
+                    crate::bg_ledger::format_utc(mtime));
+            }
+            false
+        }
     }
 }
 

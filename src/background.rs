@@ -71,7 +71,7 @@ fn read_mission(root: &Path) -> String {
 /// 空 workgraph 时，通过一个 headless agent turn 调用 generate_milestones 工具
 /// 自动分解使命为里程碑并写入 workgraph.json。成功写入返回 true，失败返回 false。
 /// 注意：不注册 SIGINT（避免与主循环的 cancel token 冲突）。
-fn seed_workgraph_from_mission(
+pub(crate) fn seed_workgraph_from_mission(
     provider: Arc<dyn Provider>,
     model: String,
     max_tokens: u32,

@@ -166,6 +166,8 @@ mod tests {
             daemon_auto_restart: false,
             max_sessions: 100,
             max_ledger_lines: 10000,
+            probe_failure_threshold: 5,
+            wg_auto_renew: true,
         };
 
         // Don't actually call run_with_recovery here since run_daemon

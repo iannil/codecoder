@@ -338,6 +338,33 @@ pub fn handle_connection(
                 let _ = body_tx.send(ServerEvent::AutotaskStatus(status));
                 let _ = body_tx.send(ServerEvent::TurnComplete);
             }
+            ClientRequest::HealthCheck => {
+                let (alive_secs, threads, workgraph_mtime) = {
+                    let g = mgr.lock().unwrap();
+                    let ts = g.thread_status.clone();
+                    let alive = g.started_at.elapsed().as_secs();
+                    // Read workgraph mtime if available
+                    let wg_path = g.root().join("workgraph.json");
+                    let mtime = std::fs::metadata(&wg_path).ok()
+                        .and_then(|m| m.modified().ok())
+                        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                        .map(|d| d.as_secs());
+                    // Collect thread statuses
+                    let thread_list = ts.as_ref()
+                        .and_then(|t| t.lock().ok())
+                        .map(|guard| guard.clone())
+                        .unwrap_or_default();
+                    (alive, thread_list, mtime)
+                };
+                let _ = body_tx.send(ServerEvent::HealthStatus(
+                    crate::daemon::proto::HealthStatus {
+                        alive_secs,
+                        threads,
+                        workgraph_mtime,
+                    }
+                ));
+                let _ = body_tx.send(ServerEvent::TurnComplete);
+            }
         }
     }
 

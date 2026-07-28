@@ -117,6 +117,8 @@ pub enum ClientRequest {
     AutotaskOn,
     /// 停止 autotask 轮询（`cc autotask off`）。
     AutotaskOff,
+    /// 查询 daemon 健康状态（`cc health`）。
+    HealthCheck,
 }
 
 /// 对 Status 请求的响应（daemon 健康状态快照）。
@@ -154,6 +156,14 @@ pub struct AutotaskStatus {
     pub tick_count: u64,
 }
 
+/// daemon 健康状态（`cc health`），独立于详细 Status 命令。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HealthStatus {
+    pub alive_secs: u64,
+    pub threads: Vec<ThreadStatus>,
+    pub workgraph_mtime: Option<u64>,
+}
+
 /// daemon → 客户端的事件。一个 `SendMessage` 会产生一串事件，以 `TurnComplete` 或
 /// `Error` 收尾。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -182,6 +192,8 @@ pub enum ServerEvent {
     WorkgraphStatus(WorkgraphStatus),
     /// 当前 autotask 状态快照。
     AutotaskStatus(AutotaskStatus),
+    /// 对 HealthCheck 请求的响应（daemon 健康状态快照）。
+    HealthStatus(HealthStatus),
 }
 
 /// 服务列表的序列化 payload（包装 Vec 避免 serde tagged newtype 序列化问题）。

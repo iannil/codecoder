@@ -99,7 +99,30 @@ fn build_output_check(cmd: &str, root: &Path, cancel: Option<&CancelToken>) -> O
             return Some(Err(std::io::Error::new(std::io::ErrorKind::NotFound, format!("expected build output not found: {path}"))));
         }
     }
+    // 额外运行时验证:如果检查到 dist/index.html,验证其内容合理性。
+    if checks.iter().any(|p| p.contains("index.html")) {
+        if let Err(e) = runtime_verify_html(root) {
+            return Some(Err(e));
+        }
+    }
     Some(Ok(()))
+}
+
+/// 运行时验证:检查构建产物的 HTML 文件内容是否合理(非空、有基本结构)。
+fn runtime_verify_html(root: &Path) -> std::io::Result<()> {
+    let html_path = root.join("dist/index.html");
+    if !html_path.exists() {
+        return Ok(()); // 无 HTML 产物,跳过验证
+    }
+    let content = std::fs::read_to_string(&html_path)?;
+    if content.trim().is_empty() {
+        return Err(std::io::Error::new(std::io::ErrorKind::Other, "dist/index.html is empty"));
+    }
+    if !content.contains("<html") && !content.contains("<!DOCTYPE html") && !content.contains("<div") && !content.contains("<body") {
+        return Err(std::io::Error::new(std::io::ErrorKind::Other,
+            "dist/index.html appears to be missing HTML structure (no <html>/<div>/<body> tags)"));
+    }
+    Ok(())
 }
 
 fn truncate(s: String, n: usize) -> String {
