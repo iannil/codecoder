@@ -1,0 +1,113 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "iannil/skills/project-metadata",
+  "title": "Project Metadata",
+  "description": "Structured metadata bridging init-project → engineer-architect → engineer-orchestrator. Written by init-project, read by architect, consumed by orchestrator.",
+  "type": "object",
+  "required": ["project", "progress_file", "blueprint_file"],
+  "properties": {
+    "project": {
+      "type": "object",
+      "required": ["name", "description", "type", "language"],
+      "properties": {
+        "name": { "type": "string", "description": "项目名" },
+        "description": { "type": "string", "description": "一句话描述" },
+        "type": {
+          "type": "string",
+          "enum": ["api-server", "cli-tool", "library", "web-app", "desktop-app", "mobile-app", "other"]
+        },
+        "language": { "type": "string", "description": "主要语言" },
+        "framework": { "type": "string", "description": "主要框架" },
+        "package_manager": { "type": "string", "description": "包管理器" },
+        "database": { "type": ["string", "null"], "description": "数据库" },
+        "has_frontend": { "type": "boolean" },
+        "frontend_framework": { "type": ["string", "null"] },
+        "deployment": {
+          "type": "object",
+          "properties": {
+            "type": { "type": "string", "enum": ["local", "docker", "serverless", "cloud-vm"] },
+            "ci_cd": { "type": "string", "enum": ["github-actions", "gitlab-ci", "manual", "none"] },
+            "docker": { "type": "boolean" }
+          }
+        },
+        "testing": {
+          "type": "object",
+          "properties": {
+            "framework": { "type": "string" },
+            "types": { "type": "array", "items": { "type": "string", "enum": ["unit", "integration", "e2e"] } }
+          }
+        },
+        "license": { "type": "string" },
+        "features": { "type": "array", "items": { "type": "string" }, "description": "核心功能列表" },
+        "detected_complexity": { "type": "string", "enum": ["simple", "moderate", "complex"], "description": "Phase 0 启发式检测的项目复杂度" },
+        "skip_requirements": { "type": "boolean", "description": "是否跳过 Phase 1 需求分析" },
+        "skip_frontend": { "type": "boolean", "description": "是否跳过 Phase 3 前端设计" },
+        "complexity_reasoning": { "type": "string", "description": "检测理由（一句话）" }
+      }
+    },
+    "architect": {
+      "type": "object",
+      "description": "由 engineer-architect 在 Phase 1 完成后补充",
+      "properties": {
+        "blueprint_commit": { "type": "string" },
+        "milestones": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["id", "name", "dependencies"],
+            "properties": {
+              "id": { "type": "string", "pattern": "^M[0-9]+$" },
+              "name": { "type": "string" },
+              "description": { "type": "string" },
+              "dependencies": { "type": "array", "items": { "type": "string" } },
+              "type": {
+                "type": "string",
+                "enum": ["data-model", "business-logic", "api", "cross-cutting", "frontend", "integration"]
+              },
+              "estimated_files": { "type": "number" },
+              "estimated_lines": { "type": "number" },
+              "acceptance_criteria": { "type": "array", "items": { "type": "string" } }
+            }
+          }
+        },
+        "glossary_terms": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "term_cn": { "type": "string" },
+              "term_en": { "type": "string" },
+              "definition": { "type": "string" },
+              "boundary": { "type": "string" }
+            }
+          }
+        },
+        "frontend_direction": {
+          "type": "object",
+          "properties": {
+            "has_frontend": { "type": "boolean" },
+            "design_defined": { "type": "boolean" },
+            "design_vibe": { "type": ["string", "null"] },
+            "primary_color": { "type": ["string", "null"] },
+            "typography_heading": { "type": ["string", "null"] },
+            "typography_body": { "type": ["string", "null"] }
+          }
+        },
+        "adr_count": { "type": "number" }
+      }
+    },
+    "run_gate": {
+      "type": "object",
+      "description": "Phase 4.5 运行门禁结果",
+      "properties": {
+        "status": { "type": "string", "enum": ["PASS", "DOES_NOT_RUN", "SKIPPED"] },
+        "attempts": { "type": "number" },
+        "build_command": { "type": "string" },
+        "test_command": { "type": "string" },
+        "last_error": { "type": ["string", "null"] }
+      }
+    },
+    "progress_file": { "type": "string", "description": "job.state.json 路径", "default": ".agents/job.state.json" },
+    "blueprint_file": { "type": "string", "description": "CONTEXT.md 路径", "default": "CONTEXT.md" }
+  }
+}

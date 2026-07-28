@@ -7,5 +7,6 @@
 /coverage_report
 /.superpowers
 /.ccd.env
+/.ccd.**.env
 /skills/**/evals
 .ccd.bg.ndjson

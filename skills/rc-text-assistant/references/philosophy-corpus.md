@@ -1,0 +1,1 @@
+../../rc-philosophy-advisor/references/philosophy-corpus.md

@@ -299,6 +299,78 @@ cat workgraph.json | python3 -m json.tool | grep -A5 '"status"'
 CODECODER_BG_WORKGRAPH=1 cargo run
 ```
 
+### 场景 4：使用 engineer-* skills 的 headless 开发流程
+
+当需要 codecoder 按 engineer-* 方法论自主构建项目时，推荐在 workgraph 中预置以下里程碑序列：
+
+```json
+[
+  {
+    "id": 1,
+    "title": "需求分析与架构设计",
+    "acceptance": "REQUIREMENTS.md 和 CONTEXT.md 已生成，包含领域词汇表、数据模型、API 契约、里程碑依赖树",
+    "deps": [],
+    "status": "pending"
+  },
+  {
+    "id": 2,
+    "title": "核心数据模型与数据库",
+    "acceptance": "数据模型已实现，数据库迁移脚本可运行，单元测试通过",
+    "deps": [1],
+    "status": "pending"
+  },
+  {
+    "id": 3,
+    "title": "后端 API 核心业务逻辑",
+    "acceptance": "核心 API 端点已实现，集成测试通过，cargo test 全部通过",
+    "deps": [2],
+    "status": "pending"
+  },
+  {
+    "id": 4,
+    "title": "前端框架与页面框架",
+    "acceptance": "前端项目已初始化，路由框架已搭建，基础组件已实现",
+    "deps": [3],
+    "status": "pending"
+  },
+  {
+    "id": 5,
+    "title": "功能页面与集成",
+    "acceptance": "所有功能页面已实现，前后端联调通过，E2E 测试通过",
+    "deps": [4],
+    "status": "pending"
+  }
+]
+```
+
+**关键规则：** 后端里程碑（1-3）必须优先于前端里程碑（4-5）。AGENTS.md 中已包含 engineer-* 方法论，codecoder 在推进每个里程碑时会自动调用对应的 skill。
+
+### 场景 5：使用 `use_skill` 手动激活 engineer-* 技能
+
+在交互式模式中，你可以随时手动激活技能：
+
+```bash
+# 启动 daemon 后连接客户端
+cargo run --bin cc
+
+# 在 cc 中输入以下命令（交互式）
+# use_skill engineer-architect
+# use_skill engineer-inspector
+# use_skill engineer-qa
+```
+
+### 推荐环境变量组合
+
+```bash
+# 使用 engineer-* 方法论进行全自动构建
+export CODECODER_DEFAULT_TRUST=always
+export CODECODER_BG_WORKGRAPH=1
+export CODECODER_MAX_TOKENS=16384
+export CODECODER_BG_MAX_AUTO=10
+export CODECODER_BG_MAX_FIX_ATTEMPTS=3
+export CODECODER_BG_CIRCUIT_K=2
+```
+
 ---
 
 ## 运行时架构速查

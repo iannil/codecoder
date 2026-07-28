@@ -1,0 +1,50 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "POC Coverage Ledger",
+  "description": "Single source of truth for POC full-function coverage — every page/component/state/flow node with its fidelity tier and coverage status. Drives loop-until-dry and cross-session recovery.",
+  "type": "object",
+  "required": ["meta", "nodes"],
+  "properties": {
+    "meta": {
+      "type": "object",
+      "required": ["project", "industry", "mode"],
+      "properties": {
+        "project": { "type": "string" },
+        "industry": { "type": "string", "description": "Matched industry archetype from industry-patterns.md" },
+        "mode": { "type": "string", "enum": ["normal", "auto", "silent"] },
+        "tech_stack": { "type": "string" },
+        "do_not_fake": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Boundaries that must be 占位未实现 (payment/third-party/pure-server)"
+        }
+      }
+    },
+    "nodes": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "kind", "coverage_status", "fidelity"],
+        "properties": {
+          "id": { "type": "string", "description": "Route path or click-sequence key or component name" },
+          "kind": { "type": "string", "enum": ["page", "component", "state", "flow", "role_view"] },
+          "title": { "type": "string" },
+          "parent": { "type": "string", "description": "Parent node id, if any" },
+          "coverage_status": { "type": "string", "enum": ["planned", "implemented", "placeholder", "skipped"] },
+          "fidelity": { "type": "string", "enum": ["真实交互", "mock 数据", "占位未实现"] },
+          "ui_states": {
+            "type": "array",
+            "items": { "type": "string", "enum": ["loading", "empty", "error", "normal", "edge"] },
+            "description": "UI states covered for this page/component"
+          },
+          "mock_endpoints": {
+            "type": "array",
+            "items": { "type": "string" },
+            "description": "Mock adapter endpoints this node consumes (for the evolution map)"
+          },
+          "notes": { "type": "string" }
+        }
+      }
+    }
+  }
+}

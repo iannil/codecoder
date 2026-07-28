@@ -1,0 +1,10 @@
+{
+  "_comment": "语言/框架 → build/test 命令映射。run-gate agent 的回退参考；项目原生配置（Makefile/package.json/pyproject.toml/Cargo.toml/go.mod）优先。",
+  "python": { "build": "pip install -e .", "test": "pytest -q" },
+  "python/fastapi": { "build": "pip install -e .", "test": "pytest -q" },
+  "python/flask": { "build": "pip install -e .", "test": "pytest -q" },
+  "node": { "build": "npm run build --if-present", "test": "npm test --if-present" },
+  "typescript": { "build": "npm run build --if-present", "test": "npm test --if-present" },
+  "rust": { "build": "cargo build", "test": "cargo test" },
+  "go": { "build": "go build ./...", "test": "go test ./..." }
+}

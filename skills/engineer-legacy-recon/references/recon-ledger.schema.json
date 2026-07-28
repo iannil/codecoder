@@ -1,0 +1,120 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "iannil/skills/recon-ledger",
+  "title": "Legacy-Recon Coverage Ledger",
+  "description": "Feature inventory + coverage state for engineer-legacy-recon static inference. Seeded from the pasted navigation tree (Phase 1), filled during per-page extraction (Phase 2), resumable across sessions, the single source of truth for full-feature coverage. Observation source is user-provided material ONLY — never a live site.",
+  "type": "object",
+  "required": ["source", "loop_state", "features"],
+  "properties": {
+    "source": {
+      "type": "object",
+      "required": ["ends"],
+      "properties": {
+        "system_name": { "type": ["string", "null"], "description": "遗留系统名称 / legacy system name (e.g. 无人机合格证管理系统)" },
+        "ends": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "识别出的端 / ends identified (e.g. 管理端, 机构端)"
+        },
+        "roles": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "识别出的角色 / roles identified (e.g. superadmin, 机构管理员)"
+        },
+        "material_forms": {
+          "type": "array",
+          "items": { "type": "string", "enum": ["pasted_text", "nav_menu", "screenshot", "exported_html", "code_snippet"] },
+          "description": "用户提供的材料形态 / forms of material the user provided"
+        },
+        "browsed_live": {
+          "type": "boolean",
+          "const": false,
+          "description": "本技能恒为 false：只读既有材料，绝不联网 / always false — static material only, never live"
+        }
+      }
+    },
+    "loop_state": {
+      "type": "object",
+      "required": ["dry_rounds", "pass_count"],
+      "properties": {
+        "dry_rounds": { "type": "integer", "minimum": 0, "description": "连续无新增要素的轮数 / consecutive rounds with no new elements" },
+        "pass_count": { "type": "integer", "minimum": 0, "description": "已完成的提取轮数 / extraction passes completed" },
+        "complete": { "type": "boolean", "description": "loop-until-dry 是否收敛 / whether extraction converged" }
+      }
+    },
+    "features": {
+      "type": "array",
+      "description": "功能账本条目——每个导航叶子一个 / feature ledger entries, one per nav leaf",
+      "items": {
+        "type": "object",
+        "required": ["id", "nav_path", "name", "extraction_status"],
+        "properties": {
+          "id": { "type": "string", "description": "稳定主键 / stable key" },
+          "nav_path": { "type": "string", "description": "端 + 菜单路径作主键，区分多端重名 / end + menu path (e.g. 管理端/合格证管理/合格证列表)" },
+          "name": { "type": "string", "description": "页面/功能名 / page name" },
+          "end": { "type": ["string", "null"], "description": "所属端 / which end" },
+          "roles_visible": {
+            "type": "array",
+            "items": { "type": "string" },
+            "description": "可见此页的角色 / roles that can see this page"
+          },
+          "entity_fields": {
+            "type": "array",
+            "description": "从表头/表单推断的字段 / fields inferred from columns/forms",
+            "items": {
+              "type": "object",
+              "required": ["field", "tier"],
+              "properties": {
+                "field": { "type": "string" },
+                "type_guess": { "type": ["string", "null"], "description": "推断类型 / inferred type" },
+                "tier": { "type": "string", "enum": ["明示", "推断", "缺口"] }
+              }
+            }
+          },
+          "filters": {
+            "type": "array",
+            "items": { "type": "string" },
+            "description": "筛选/查询维度与枚举取值 / filter dimensions and enum values"
+          },
+          "actions": {
+            "type": "array",
+            "items": { "type": "string" },
+            "description": "按钮/操作动词 / buttons and action verbs"
+          },
+          "states": {
+            "type": "array",
+            "items": { "type": "string" },
+            "description": "标签页揭示的状态集 / states revealed by tabs"
+          },
+          "aggregates": {
+            "type": "array",
+            "items": { "type": "string" },
+            "description": "统计头/汇总指标 / stat headers and summary metrics"
+          },
+          "material_ref": {
+            "type": ["string", "null"],
+            "description": ".agents/recon.material/ 下对应材料的引用 / reference to the archived material for this page"
+          },
+          "extraction_status": {
+            "type": "string",
+            "enum": ["seeded", "partial", "extracted", "no_material"],
+            "description": "seeded=从导航树种下未提取, partial=部分提取待复查, extracted=已抽干, no_material=无对应材料(进缺口清单)"
+          }
+        }
+      }
+    },
+    "gaps": {
+      "type": "array",
+      "description": "缺口清单——材料缺失的关键信息，供 RECON-FIDELITY.md 与用户追问 / gap list feeding RECON-FIDELITY.md and user follow-up",
+      "items": {
+        "type": "object",
+        "required": ["about", "question"],
+        "properties": {
+          "about": { "type": "string", "description": "缺什么 / what is missing" },
+          "nav_path": { "type": ["string", "null"], "description": "涉及的页面 / related page" },
+          "question": { "type": "string", "description": "要向用户追问的具体问题 / concrete question to ask the user" }
+        }
+      }
+    }
+  }
+}

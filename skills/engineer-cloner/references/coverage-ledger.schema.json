@@ -1,0 +1,86 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "iannil/skills/clone-ledger",
+  "title": "Clone Coverage Ledger",
+  "description": "Feature inventory + coverage state for engineer-cloner reverse observation. Written during Phase 2 (authenticated traversal), resumable across sessions, the single source of truth for full-feature coverage.",
+  "type": "object",
+  "required": ["target", "loop_state", "features"],
+  "properties": {
+    "target": {
+      "type": "object",
+      "required": ["url"],
+      "properties": {
+        "url": { "type": "string", "description": "目标站点地址 / target site URL" },
+        "authorized": { "type": "boolean", "description": "授权确认标记 / authorization confirmed" },
+        "inferred_stack": { "type": ["string", "null"], "description": "从指纹推断的原栈 / stack inferred from fingerprint" },
+        "roles": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "已遍历的角色 / roles traversed"
+        },
+        "do_not_clone": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "不克隆边界：支付/第三方/密钥 / out-of-scope surfaces"
+        }
+      }
+    },
+    "loop_state": {
+      "type": "object",
+      "required": ["dry_rounds", "pass_count"],
+      "properties": {
+        "dry_rounds": { "type": "integer", "minimum": 0, "description": "连续无新发现的轮数 / consecutive rounds with no new features" },
+        "pass_count": { "type": "integer", "minimum": 0, "description": "已完成的遍历轮数 / traversal passes completed" },
+        "complete": { "type": "boolean", "description": "loop-until-dry 是否收敛 / whether discovery converged" }
+      }
+    },
+    "features": {
+      "type": "array",
+      "description": "功能账本条目 / feature ledger entries",
+      "items": {
+        "type": "object",
+        "required": ["id", "entry_path", "name", "coverage_status"],
+        "properties": {
+          "id": { "type": "string", "description": "稳定主键 / stable key" },
+          "entry_path": { "type": "string", "description": "URL 或点击序列（SPA）/ URL or click-sequence for SPAs" },
+          "name": { "type": "string", "description": "功能名 / feature name" },
+          "roles_visible": {
+            "type": "array",
+            "items": { "type": "string" },
+            "description": "可见此功能的角色 / roles that can see this feature"
+          },
+          "ui_states": {
+            "type": "array",
+            "items": { "type": "string" },
+            "description": "观测到的 UI 状态：默认/空态/错误态/加载 / observed UI states"
+          },
+          "actions": {
+            "type": "array",
+            "items": { "type": "string" },
+            "description": "可执行操作 / actionable operations"
+          },
+          "forms": {
+            "type": "array",
+            "items": { "type": "string" },
+            "description": "表单字段与校验 / form fields and validations"
+          },
+          "api_calls": {
+            "type": "array",
+            "items": { "type": "string" },
+            "description": "观测到的 API 调用引用 / references to observed API calls"
+          },
+          "screenshots": {
+            "type": "array",
+            "items": { "type": "string" },
+            "description": ".agents/clone.observations/ 下的截图路径 / screenshot paths"
+          },
+          "coverage_status": {
+            "type": "string",
+            "enum": ["discovered", "explored", "extracted"],
+            "description": "discovered=已发现未展开, explored=已遍历状态, extracted=契约与设计已提取"
+          }
+        }
+      }
+    }
+  }
+}
