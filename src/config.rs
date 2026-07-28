@@ -106,7 +106,7 @@ impl Config {
                 .unwrap_or(2),
             bg_milestone_tool_cap: env("CODECODER_BG_MILESTONE_TOOL_CAP")
                 .and_then(|v| v.parse().ok())
-                .unwrap_or(8),
+                .unwrap_or(15),
             bg_max_fix_attempts: env("CODECODER_BG_MAX_FIX_ATTEMPTS")
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(3),
@@ -288,7 +288,7 @@ mod tests {
         let c = Config::from_env();
         assert_eq!(c.bg_max_auto, 0);
         assert_eq!(c.bg_circuit_k, 2);
-        assert_eq!(c.bg_milestone_tool_cap, 8);
+        assert_eq!(c.bg_milestone_tool_cap, 15);
 
         unsafe {
             std::env::set_var("CODECODER_BG_MAX_AUTO", "5");

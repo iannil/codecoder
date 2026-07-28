@@ -146,7 +146,7 @@ mod tests {
             github_token: None,
             bg_max_auto: 3,
             bg_circuit_k: 2,
-            bg_milestone_tool_cap: 8,
+            bg_milestone_tool_cap: 15,
             bg_max_fix_attempts: 3,
             supervisor_crash_budget: 3,
             max_tool_output: 256 * 1024,
