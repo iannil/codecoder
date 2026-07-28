@@ -3,6 +3,69 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeSet, HashSet};
 use std::path::{Path, PathBuf};
 
+
+/// A single entry in the allowlist. Supports plain string keys (backward compatible)
+/// and scoped entries with path constraints.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum AllowlistEntry {
+    /// Plain key: "run_command:npm"
+    Plain(String),
+    /// Scoped entry with optional constraints:
+    /// {"prefix": "run_command:rm", "scope": {"project_bound": true}}
+    Scoped {
+        prefix: String,
+        #[serde(default)]
+        scope: ScopeConstraint,
+    },
+}
+
+/// Constraints on an allowlist entry's usage scope.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ScopeConstraint {
+    /// When true, the tool call is only allowed when its cwd is within the project root.
+    #[serde(default)]
+    pub project_bound: bool,
+}
+
+impl ScopeConstraint {
+    /// Check whether a tool call's args satisfy this constraint.
+    /// `root` is the project root directory. Returns true if the constraint passes.
+    pub fn check(&self, args: &serde_json::Value, root: &Path) -> bool {
+        if !self.project_bound {
+            return true;
+        }
+        match args.get("cwd").and_then(serde_json::Value::as_str) {
+            None => true, // no cwd specified → defaults to project root
+            Some(cwd) => {
+                let cwd_path = Path::new(cwd);
+                cwd_path.is_absolute() && cwd_path.starts_with(root)
+            }
+        }
+    }
+}
+
+impl Ord for AllowlistEntry {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        serde_json::to_string(self).unwrap_or_default()
+            .cmp(&serde_json::to_string(other).unwrap_or_default())
+    }
+}
+
+impl PartialOrd for AllowlistEntry {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl PartialEq for AllowlistEntry {
+    fn eq(&self, other: &Self) -> bool {
+        serde_json::to_string(self).ok() == serde_json::to_string(other).ok()
+    }
+}
+
+impl Eq for AllowlistEntry {}
+
 /// Durability of a permission grant.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PermScope {
@@ -58,7 +121,7 @@ pub fn scope_ceiling(key: &str) -> PermScope {
 pub struct ProjectAllowlist {
     // BTreeSet → deterministic on-disk order, so the file doesn't churn.
     #[serde(default)]
-    allowlist: BTreeSet<PermissionKey>,
+    allowlist: BTreeSet<AllowlistEntry>,
 }
 
 impl ProjectAllowlist {
@@ -76,14 +139,21 @@ impl ProjectAllowlist {
             .unwrap_or_default()
     }
 
-    pub fn allows(&self, key: &str) -> bool {
-        self.allowlist.contains(key)
+    /// Check if a permission key is allowed. For Scoped entries, also checks
+    /// path constraints against the tool call's args and project root.
+    pub fn allows(&self, key: &str, args: &serde_json::Value, root: &Path) -> bool {
+        self.allowlist.iter().any(|entry| match entry {
+            AllowlistEntry::Plain(k) => k == key,
+            AllowlistEntry::Scoped { prefix, scope } => {
+                (prefix == key || key.starts_with(prefix.as_str())) && scope.check(args, root)
+            }
+        })
     }
 
-    /// Insert `key` and persist to disk. A no-op write is skipped when the key is
+    /// Insert `entry` and persist to disk. A no-op write is skipped when the entry is
     /// already present. Returns the IO error if the file cannot be written.
-    pub fn grant(&mut self, root: &Path, key: PermissionKey) -> std::io::Result<()> {
-        if self.allowlist.insert(key) {
+    pub fn grant(&mut self, root: &Path, entry: AllowlistEntry) -> std::io::Result<()> {
+        if self.allowlist.insert(entry) {
             self.save(root)?;
         }
         Ok(())
