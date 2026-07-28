@@ -87,7 +87,14 @@ pub(crate) fn seed_workgraph_from_mission(
          将上述使命分解为 3-8 个里程碑，每个里程碑包含：\n\
          - title（简短、可行动的标题）\n\
          - acceptance（具体、可验证的验收标准，尽量包含可执行的命令如 cargo test）\n\n\
-         里程碑应按依赖顺序排列，前面的里程碑是后面里程碑的前提。",
+         里程碑应按依赖顺序排列，前面的里程碑是后面里程碑的前提。\n\n\
+         关键约束（必须遵守）：\n\
+         1. 先写 package.json → 再 npm install → 再写源代码 → 最后 npm run build 验证\n\
+         2. 首次 commit 前必须 git init\n\
+         3. 优先使用内置工具（list_directory 替代 ls，read_file 替代 cat 等）\n\
+         4. 避免复合 shell 命令（&&, ||, |, 2>&1）\n\
+         5. 超过 200 行的文件分多步写入（write_file + edit_file 追加）\n\
+         6. 每个里程碑应产生真实代码，使用 PlaceholderPage 或空壳组件会被拒绝",
         mission
     );
 
@@ -1108,6 +1115,7 @@ mod tests {
             fix_attempts: 1,
             last_failure: Some("gate `cargo test` failed: 2 failed".into()),
             command: None,
+            checks: None,
         };
         let p = build_repair_prompt(&m, "gate `cargo test` failed: 2 failed", &crate::workgraph::WorkGraph::default());
         assert!(p.contains("CRDT 核心"), "含标题: {p}");
@@ -1130,6 +1138,7 @@ mod tests {
             fix_attempts: 0,
             last_failure: Some("self-review: NeedsFix".into()),
             command: None,
+            checks: None,
         };
         let p = build_repair_prompt(&m, "self-review: NeedsFix", &crate::workgraph::WorkGraph::default());
         assert!(p.contains("(none)"), "空 acceptance 应渲染为 (none): {p}");

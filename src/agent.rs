@@ -317,9 +317,15 @@ impl AgentLoop {
         let trust = match trust::decide(&root) {
             Some(TrustDecision::Trusted) => TrustState::Trusted,
             Some(TrustDecision::Untrusted) => TrustState::Untrusted,
-            None if headless => match trust::default_trust() {
-                TrustDecision::Trusted => TrustState::Trusted,
-                TrustDecision::Untrusted => TrustState::Untrusted,
+            None if headless => {
+                if trust::default_trust() == TrustDecision::Trusted {
+                    TrustState::Trusted
+                } else if trust::has_project_allowlist(&root) {
+                    eprintln!("ccd: codecoder.json found → auto-trusted for headless");
+                    TrustState::Trusted
+                } else {
+                    TrustState::Untrusted
+                }
             },
             // A sub-agent has no user channel to prompt (ADR 0019) → safe default.
             None if !persist => TrustState::Untrusted,

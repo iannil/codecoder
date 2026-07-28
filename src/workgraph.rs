@@ -8,6 +8,7 @@
 // (src/tool/dev.rs) owns I/O and rendering, the AgentLoop owns dispatch.
 
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 pub const WG_SCHEMA_VERSION: u32 = 1;
@@ -80,6 +81,32 @@ pub struct Milestone {
     /// 缺失→回退 extract_gate_command(acceptance) 启发式,再回退 review 门。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub command: Option<String>,
+    /// 可选确定性检查项列表（Phase 1 新增）。存在时，命令门 pass 后执行。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub checks: Option<Vec<CheckSpec>>,
+}
+
+/// 确定性检查项的类型。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CheckType {
+    /// 跑一个命令，检查退出码是否为 0。
+    BuildExitZero,
+    /// glob 匹配文件，grep 禁止内容。
+    NoTemplateContent,
+    /// 目录下最少文件数。
+    FileCountMin,
+    /// 业务文件最少行数。
+    MinLinesPerFile,
+}
+
+/// 一条确定性的验收检查项。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CheckSpec {
+    #[serde(rename = "type")]
+    pub type_: CheckType,
+    #[serde(default)]
+    pub params: HashMap<String, serde_json::Value>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -232,6 +259,7 @@ impl WorkGraph {
             fix_attempts: 0,
             last_failure: None,
             command: None,
+            checks: None,
         });
         if let Err(e) = self.validate() {
             self.nodes.pop();
@@ -460,6 +488,7 @@ fn migrate_todos(raw: &str) -> Option<WorkGraph> {
             fix_attempts: 0,
             last_failure: None,
             command: None,
+            checks: None,
         })
         .collect();
     Some(WorkGraph { schema_version: WG_SCHEMA_VERSION, nodes })
@@ -547,8 +576,8 @@ mod tests {
         let g = WorkGraph {
             schema_version: WG_SCHEMA_VERSION,
             nodes: vec![
-                Milestone { id: 1, title: "a".into(), acceptance: String::new(), deps: vec![2], status: NodeStatus::Pending, verdict: None, touched: vec![], fix_attempts: 0, last_failure: None, command: None },
-                Milestone { id: 2, title: "b".into(), acceptance: String::new(), deps: vec![1], status: NodeStatus::Pending, verdict: None, touched: vec![], fix_attempts: 0, last_failure: None, command: None },
+                Milestone { id: 1, title: "a".into(), acceptance: String::new(), deps: vec![2], status: NodeStatus::Pending, verdict: None, touched: vec![], fix_attempts: 0, last_failure: None, command: None, checks: None },
+                Milestone { id: 2, title: "b".into(), acceptance: String::new(), deps: vec![1], status: NodeStatus::Pending, verdict: None, touched: vec![], fix_attempts: 0, last_failure: None, command: None, checks: None },
             ],
         };
         assert!(g.validate().is_err());
@@ -802,5 +831,64 @@ mod tests {
         }
         assert_eq!(WorkGraph::read(&dir).nodes.len(), 5);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn check_type_deserializes() {
+        let ct: CheckType = serde_json::from_str(r#""build_exit_zero""#).unwrap();
+        assert_eq!(ct, CheckType::BuildExitZero);
+        let ct: CheckType = serde_json::from_str(r#""no_template_content""#).unwrap();
+        assert_eq!(ct, CheckType::NoTemplateContent);
+        let ct: CheckType = serde_json::from_str(r#""file_count_min""#).unwrap();
+        assert_eq!(ct, CheckType::FileCountMin);
+        let ct: CheckType = serde_json::from_str(r#""min_lines_per_file""#).unwrap();
+        assert_eq!(ct, CheckType::MinLinesPerFile);
+    }
+
+    #[test]
+    fn check_spec_deserializes_with_params() {
+        let spec: CheckSpec = serde_json::from_str(
+            r#"{"type":"no_template_content","params":{"patterns":["src/**/*.tsx"],"forbidden":["PlaceholderPage"]}}"#,
+        )
+        .unwrap();
+        assert_eq!(spec.type_, CheckType::NoTemplateContent);
+        let patterns = spec.params.get("patterns").and_then(|v| v.as_array());
+        assert!(patterns.is_some(), "patterns should be an array");
+    }
+
+    #[test]
+    fn milestone_checks_round_trip() {
+        let spec = CheckSpec {
+            type_: CheckType::NoTemplateContent,
+            params: [(
+                "patterns".to_string(),
+                serde_json::json!(["src/**/*.tsx"]),
+            )]
+            .into_iter()
+            .collect(),
+        };
+        let m = Milestone {
+            id: 42,
+            title: "round-trip".into(),
+            acceptance: "acc".into(),
+            deps: vec![],
+            status: NodeStatus::Pending,
+            verdict: None,
+            touched: vec![],
+            fix_attempts: 0,
+            last_failure: None,
+            command: Some("true".into()),
+            checks: Some(vec![spec]),
+        };
+        let json = serde_json::to_string(&m).unwrap();
+        let back: Milestone = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.checks, m.checks);
+    }
+
+    #[test]
+    fn milestone_checks_defaults_none() {
+        let raw = r#"{"id":1,"title":"t","acceptance":"a","deps":[],"status":"pending","touched":[]}"#;
+        let m: Milestone = serde_json::from_str(raw).unwrap();
+        assert_eq!(m.checks, None);
     }
 }

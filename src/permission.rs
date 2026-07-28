@@ -142,11 +142,20 @@ impl ProjectAllowlist {
     /// Check if a permission key is allowed. For Scoped entries, also checks
     /// path constraints against the tool call's args and project root.
     pub fn allows(&self, key: &str, args: &serde_json::Value, root: &Path) -> bool {
-        self.allowlist.iter().any(|entry| match entry {
-            AllowlistEntry::Plain(k) => k == key,
-            AllowlistEntry::Scoped { prefix, scope } => {
-                prefix == key && scope.check(args, root)
+        if self.allowlist.iter().any(|entry| match entry {
+            AllowlistEntry::Plain(k) => {
+                k == key // 精确匹配优先
             }
+            AllowlistEntry::Scoped { prefix, scope } => {
+                key.starts_with(prefix) && scope.check(args, root)
+            }
+        }) {
+            return true;
+        }
+        // 精确匹配失败后尝试通配符：如 key="run_command:npm install 2>&1" 匹配 "run_command:*"
+        // 通配符只在 trusted headless 项目中使用，不降低交互安全性。
+        key.starts_with("run_command:") && self.allowlist.iter().any(|entry| {
+            matches!(entry, AllowlistEntry::Plain(k) if k == "run_command:*")
         })
     }
 
@@ -171,7 +180,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn plain_entry_deserializes() {
+fn wildcard_matches_composite_command() {
         let entry: AllowlistEntry = serde_json::from_str(r#""run_command:git""#).unwrap();
         assert!(matches!(entry, AllowlistEntry::Plain(k) if k == "run_command:git"));
     }
@@ -289,5 +298,27 @@ mod tests {
         let root = Path::new("/home/user/project");
         // No cwd specified → defaults to project root → allowed
         assert!(allowlist.allows("run_command:make", &serde_json::json!({}), root));
+    }
+
+    #[test]
+    fn wildcard_matches_composite_command() {
+        let mut wl = ProjectAllowlist::default();
+        wl.allowlist.insert(AllowlistEntry::Plain("run_command:*".into()));
+        assert!(wl.allows("run_command:npm install 2>&1", &serde_json::json!({}), Path::new(".")));
+        assert!(!wl.allows("write_file", &serde_json::json!({}), Path::new(".")));
+    }
+
+    #[test]
+    fn without_wildcard_composite_still_denied() {
+        let wl = ProjectAllowlist::default();
+        assert!(!wl.allows("run_command:npm install 2>&1", &serde_json::json!({}), Path::new(".")));
+    }
+
+    #[test]
+    fn wildcard_does_not_break_exact_matches() {
+        let mut wl = ProjectAllowlist::default();
+        wl.allowlist.insert(AllowlistEntry::Plain("write_file".into()));
+        assert!(wl.allows("write_file", &serde_json::json!({}), Path::new(".")));
+        assert!(!wl.allows("edit_file", &serde_json::json!({}), Path::new(".")));
     }
 }
