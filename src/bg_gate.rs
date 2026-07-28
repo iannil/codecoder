@@ -7,9 +7,11 @@
 use crate::agent::CancelToken;
 use crate::tool::ToolCtx;
 use crate::tool::builtin::run_shell_cancellable;
-use crate::workgraph::{Milestone, NodeStatus, WorkGraph};
+use crate::workgraph::{CheckSpec, CheckType, Milestone, NodeStatus, WorkGraph};
 use std::path::Path;
 use std::process::Command;
+#[cfg(test)]
+use serde_json::json;
 
 /// 客观验收门的判定结果。**覆盖** agent 自报 verdict。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -263,6 +265,132 @@ pub fn next_action(
     }
 }
 
+/// ── checks 引擎 ────────────────────────────────────────────────────────
+
+/// 执行 checks 列表。全部成功 → Ok(())，任何失败 → Err(失败信息列表)。
+pub fn run_checks(specs: &[CheckSpec], root: &Path) -> Result<(), Vec<String>> {
+    let mut errors = Vec::new();
+    for spec in specs {
+        if let Err(e) = execute_check(spec, root) {
+            errors.push(e);
+        }
+    }
+    if errors.is_empty() { Ok(()) } else { Err(errors) }
+}
+
+fn execute_check(spec: &CheckSpec, root: &Path) -> Result<(), String> {
+    match spec.type_ {
+        CheckType::BuildExitZero => {
+            let cmd = spec.params.get("command")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| "BuildExitZero check missing 'command' param".to_string())?;
+            let mut command = Command::new("sh");
+            command.arg("-c").arg(cmd).current_dir(root);
+            let output = command.output().map_err(|e| format!("BuildExitZero command failed: {e}"))?;
+            if output.status.success() {
+                Ok(())
+            } else {
+                Err(format!("BuildExitZero: `{cmd}` exited with {}", output.status))
+            }
+        }
+        CheckType::NoTemplateContent => {
+            let patterns = spec.params.get("patterns")
+                .and_then(|v| v.as_array())
+                .ok_or_else(|| "NoTemplateContent check missing 'patterns' param".to_string())?;
+            let forbidden = spec.params.get("forbidden")
+                .and_then(|v| v.as_array())
+                .ok_or_else(|| "NoTemplateContent check missing 'forbidden' param".to_string())?;
+            let forbidden_strs: Vec<&str> = forbidden.iter()
+                .filter_map(|v| v.as_str()).collect();
+
+            let mut found_issues = Vec::new();
+            for pattern_val in patterns {
+                let pattern = pattern_val.as_str()
+                    .ok_or_else(|| "Invalid pattern (not a string)".to_string())?;
+                let pattern_str = if pattern.starts_with("src/") {
+                    root.join(pattern).to_string_lossy().to_string()
+                } else {
+                    root.join(pattern).to_string_lossy().to_string()
+                };
+                match glob::glob(&pattern_str) {
+                    Ok(entries) => {
+                        for entry in entries.flatten() {
+                            if let Ok(content) = std::fs::read_to_string(&entry) {
+                                for forbidden in &forbidden_strs {
+                                    if content.contains(forbidden) {
+                                        found_issues.push(format!(
+                                            "{} contains forbidden text '{}'",
+                                            entry.display(), forbidden
+                                        ));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        found_issues.push(format!("glob pattern '{pattern}' failed: {e}"));
+                    }
+                }
+            }
+            if found_issues.is_empty() { Ok(()) } else { Err(found_issues.join("; ")) }
+        }
+        CheckType::FileCountMin => {
+            let path = spec.params.get("path")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| "FileCountMin check missing 'path' param".to_string())?;
+            let min = spec.params.get("min")
+                .and_then(|v| v.as_u64())
+                .ok_or_else(|| "FileCountMin check missing 'min' param".to_string())? as usize;
+            let full = root.join(path);
+            if !full.is_dir() {
+                return Err(format!("FileCountMin: {path} is not a directory"));
+            }
+            let count = std::fs::read_dir(&full)
+                .map_err(|e| format!("FileCountMin: cannot read {path}: {e}"))?
+                .filter_map(|e| e.ok())
+                .filter(|e| e.file_type().map(|t| t.is_file()).unwrap_or(false))
+                .count();
+            if count >= min { Ok(()) } else { Err(format!("FileCountMin: {path} has {count} files, expected at least {min}")) }
+        }
+        CheckType::MinLinesPerFile => {
+            let paths_pattern = spec.params.get("paths")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| "MinLinesPerFile check missing 'paths' param".to_string())?;
+            let min = spec.params.get("min")
+                .and_then(|v| v.as_u64())
+                .ok_or_else(|| "MinLinesPerFile check missing 'min' param".to_string())? as usize;
+            let exclude = spec.params.get("exclude_patterns")
+                .and_then(|v| v.as_array())
+                .map(|a| a.iter().filter_map(|v| v.as_str()).collect::<Vec<&str>>())
+                .unwrap_or_default();
+
+            let pattern_abs = root.join(paths_pattern).to_string_lossy().to_string();
+            let mut issues = Vec::new();
+            match glob::glob(&pattern_abs) {
+                Ok(entries) => {
+                    for entry in entries.flatten() {
+                        let name = entry.to_string_lossy().to_string();
+                        let is_excluded = exclude.iter().any(|e| {
+                            name.contains(e.trim_start_matches("**/"))
+                        });
+                        if is_excluded { continue; }
+                        if let Ok(content) = std::fs::read_to_string(&entry) {
+                            let lines = content.lines().count();
+                            if lines < min {
+                                issues.push(format!("{} has {} lines, expected at least {}", entry.display(), lines, min));
+                            }
+                        }
+                    }
+                }
+                Err(e) => {
+                    issues.push(format!("glob '{paths_pattern}' failed: {e}"));
+                }
+            }
+            if issues.is_empty() { Ok(()) } else { Err(issues.join("; ")) }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -489,5 +617,62 @@ mod tests {
             next_action(&g, 1, &GateVerdict::Pass, 0, false, 2),
             NextAction::Stop(MissionState::CompletedAllReady)
         );
+    }
+
+    // ── checks 引擎 ──
+
+    #[test]
+    fn checks_no_template_content_detects_forbidden_text() {
+        let dir = tempdir().unwrap();
+        std::fs::write(dir.path().join("page.tsx"), "import PlaceholderPage from '...'").unwrap();
+        std::fs::write(dir.path().join("real.tsx"), "export default function RealPage()").unwrap();
+
+        let spec = CheckSpec {
+            type_: CheckType::NoTemplateContent,
+            params: [("patterns".into(), json!(["*.tsx"])), ("forbidden".into(), json!(["PlaceholderPage"]))].into_iter().collect(),
+        };
+        let result = super::execute_check(&spec, dir.path());
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("PlaceholderPage"));
+    }
+
+    #[test]
+    fn checks_build_exit_zero_with_true() {
+        let spec = CheckSpec {
+            type_: CheckType::BuildExitZero,
+            params: [("command".into(), json!("true"))].into_iter().collect(),
+        };
+        let result = super::execute_check(&spec, Path::new("/"));
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn checks_file_count_min() {
+        let dir = tempdir().unwrap();
+        std::fs::write(dir.path().join("a.tsx"), "a").unwrap();
+        std::fs::write(dir.path().join("b.tsx"), "b").unwrap();
+        let spec = CheckSpec {
+            type_: CheckType::FileCountMin,
+            params: [("path".into(), json!(".")), ("min".into(), json!(2))].into_iter().collect(),
+        };
+        assert!(super::execute_check(&spec, dir.path()).is_ok());
+        let spec3 = CheckSpec {
+            type_: CheckType::FileCountMin,
+            params: [("path".into(), json!(".")), ("min".into(), json!(3))].into_iter().collect(),
+        };
+        assert!(super::execute_check(&spec3, dir.path()).is_err());
+    }
+
+    #[test]
+    fn checks_run_checks_collects_errors() {
+        let dir = tempdir().unwrap();
+        // 两条 checks:一条 expect 至少 2 个文件(只有一个) → 应失败
+        let bad = CheckSpec {
+            type_: CheckType::FileCountMin,
+            params: [("path".into(), json!(".")), ("min".into(), json!(2))].into_iter().collect(),
+        };
+        let result = super::run_checks(&[bad], dir.path());
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().len(), 1);
     }
 }
