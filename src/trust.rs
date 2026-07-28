@@ -170,6 +170,11 @@ pub fn default_trust() -> TrustDecision {
     default_trust_from(std::env::var("CODECODER_DEFAULT_TRUST").ok().as_deref())
 }
 
+/// 项目是否存在 codecoder.json allowlist 文件。headless 自动 trust 使用。
+pub fn has_project_allowlist(root: &Path) -> bool {
+    root.join("codecoder.json").is_file()
+}
+
 fn default_trust_from(v: Option<&str>) -> TrustDecision {
     match v {
         Some("always") | Some("once") => TrustDecision::Trusted,
@@ -241,5 +246,13 @@ mod tests {
         assert_eq!(default_trust_from(Some("never")), TrustDecision::Untrusted);
         assert_eq!(default_trust_from(Some("always")), TrustDecision::Trusted);
         assert_eq!(default_trust_from(Some("once")), TrustDecision::Trusted);
+    }
+
+    #[test]
+    fn has_project_allowlist_true_when_file_exists() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(!has_project_allowlist(dir.path()));
+        std::fs::write(dir.path().join("codecoder.json"), "{}").unwrap();
+        assert!(has_project_allowlist(dir.path()));
     }
 }
