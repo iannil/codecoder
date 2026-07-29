@@ -137,11 +137,6 @@ impl AgentGraph {
 
         // Find roots (no parent, or parent not in nodes)
         let roots = children_of.remove(&None).unwrap_or_default();
-        // Plus orphan agents whose parent is not in the graph
-        for (_key, _nodes) in &children_of {
-            // Only add if not already rendered as child of something
-            // (simplified: just render all top-level nodes)
-        }
 
         // Sort by launch_seq
         let mut sorted_roots: Vec<&AgentNode> = roots.iter().copied().collect();
@@ -153,9 +148,15 @@ impl AgentGraph {
 
         // Remaining nodes not connected to any root
         let mut remaining: Vec<&AgentNode> = Vec::new();
+        let mut visited = std::collections::HashSet::new();
+        // Mark all nodes already rendered as part of the root tree
+        for root in &sorted_roots {
+            visited.insert(root.span_id.as_str());
+            collect_visited_ids(root, &children_of, &mut visited);
+        }
         for (_key, nodes) in &children_of {
             for node in nodes {
-                if !sorted_roots.contains(&node) {
+                if !visited.contains(node.span_id.as_str()) {
                     remaining.push(node);
                 }
             }
@@ -189,6 +190,19 @@ fn count_turns(children: &[SpanNode]) -> usize {
     count
 }
 
+fn collect_visited_ids<'a>(
+    node: &AgentNode,
+    children_of: &HashMap<Option<String>, Vec<&'a AgentNode>>,
+    visited: &mut std::collections::HashSet<&'a str>,
+) {
+    if let Some(children) = children_of.get(&Some(node.span_id.clone())) {
+        for child in children {
+            visited.insert(child.span_id.as_str());
+            collect_visited_ids(child, children_of, visited);
+        }
+    }
+}
+
 fn render_agent_node(
     node: &AgentNode,
     depth: usize,
@@ -207,13 +221,7 @@ fn render_agent_node(
     } else {
         String::new()
     };
-    out.push_str(&format!("{indent}├─ {status_str} sub-agent: \"{label}\" {id}{turn_info}\n",
-        indent=indent,
-        status_str=status_str,
-        label=node.label,
-        id=node.span_id,
-        turn_info=turn_info,
-    ));
+    out.push_str(&format!("{indent}├─ {status_str} sub-agent: \"{label}\" {id}{turn_info}\n", indent = indent, status_str = status_str, label = node.label, id = node.span_id, turn_info = turn_info));
     // Render children
     if let Some(children) = children_of.get(&Some(node.span_id.clone())) {
         let mut sorted = children.clone();
