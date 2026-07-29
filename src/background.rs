@@ -269,6 +269,16 @@ pub(crate) fn run_background_cfg(
             ) {
                 Ok(Some(s)) => (s, true),
                 Ok(None) => {
+                    // 无可重试 needs_fix。先检查是否有 pending 里程碑可推进。
+                    let has_pending = {
+                        let g = crate::workgraph::WorkGraph::read(&root);
+                        g.nodes.iter().any(|n| n.status == crate::workgraph::NodeStatus::Pending)
+                    };
+                    if has_pending {
+                        // 有 pending 里程碑但当前无 ready(可能被阻塞)→继续循环让下一轮
+                        // advance_one_milestone 的 next_ready() 自行判断。
+                        continue;
+                    }
                     // 既无就绪、也无可重试 needs_fix → 终态。仅在仍 Running 时置态,
                     // 区分"真完成"与"卡在 needs_fix(预算耗尽)"。
                     if out.mission_state == crate::bg_gate::MissionState::Running {

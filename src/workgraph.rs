@@ -313,6 +313,9 @@ impl WorkGraph {
                 n.status == NodeStatus::NeedsFix
                     && self.deps_done(n)
                     && n.fix_attempts < max_attempts
+                    // 排除 GateKind::None 的里程碑 — 这类 failures 是"验收标准缺失"
+                    // 而非代码问题,重试也无法解决。允许其他 pending 里程碑继续推进。
+                    && crate::bg_gate::gate_kind(n) != crate::bg_gate::GateKind::None
             })
             .min_by_key(|n| n.id)
     }

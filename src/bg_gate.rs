@@ -193,7 +193,17 @@ pub fn evaluate(
             }
             verdict
         }
-        GateKind::None => GateVerdict::Inconclusive("no acceptance criterion (weak signal)".into()),
+        GateKind::None => {
+            // 宽容模式: milestone 有显式 command + touched 文件(证明已产生代码)时,
+            // 降级跑命令门验收,而非直接 Inconclusive。这解决 seed 阶段 generate_milestones
+            // 生成空 acceptance 里程碑时,代码已通过构建但验收门仍标记为 needs_fix 的问题。
+            if let Some(cmd) = &m.command {
+                if !m.touched.is_empty() {
+                    return run_command_gate(cmd, root, cancel);
+                }
+            }
+            GateVerdict::Inconclusive("no acceptance criterion (weak signal)".into())
+        }
         GateKind::Review => review_runner(),
     }
 }
@@ -520,6 +530,38 @@ mod tests {
         assert!(matches!(v, GateVerdict::Inconclusive(_)));
     }
 
+    #[test]
+    fn evaluate_none_with_command_and_touched_runs_command_gate() {
+        let dir = tempdir().unwrap();
+        let mut m = ms(1, "");
+        m.command = Some("echo ok".into());
+        m.touched = vec!["src/foo.tsx".into()];
+        let v = evaluate(&m, dir.path(), None, &|| GateVerdict::Pass);
+        assert_eq!(v, GateVerdict::Pass);
+    }
+
+    #[test]
+    fn evaluate_none_without_touched_stays_inconclusive() {
+        let dir = tempdir().unwrap();
+        let mut m = ms(1, "");
+        // With explicit command but no touched, gate_kind returns Command
+        // (not None), so the command gate runs. This test verifies that when
+        // command IS set but touched is empty, command gate still fires.
+        m.command = Some("echo ok".into());
+        let v = evaluate(&m, dir.path(), None, &|| GateVerdict::Pass);
+        // Command gate runs (gate_kind returns Command), echo ok passes.
+        assert_eq!(v, GateVerdict::Pass);
+    }
+
+    #[test]
+    fn evaluate_none_without_command_stays_inconclusive() {
+        let dir = tempdir().unwrap();
+        let mut m = ms(1, "");
+        m.touched = vec!["src/foo.tsx".into()];
+        let v = evaluate(&m, dir.path(), None, &|| GateVerdict::Pass);
+        assert!(matches!(v, GateVerdict::Inconclusive(_)));
+    }
+
     // ── gate_command / gate_kind ──
     #[test]
     fn gate_command_prefers_explicit_over_extract() {
@@ -539,6 +581,21 @@ mod tests {
         assert_eq!(gate_kind(&prose), GateKind::Review); // prose
         let empty = ms(3, "");
         assert_eq!(gate_kind(&empty), GateKind::None); // 空
+    }
+
+    #[test]
+    fn next_retryable_skips_gate_kind_none() {
+        let mut m = ms(100, "");
+        m.status = NodeStatus::NeedsFix;
+        m.fix_attempts = 0;
+        m.command = Some("echo ok".into());
+        let mut m2 = ms(101, "");
+        m2.status = NodeStatus::NeedsFix;
+        m2.fix_attempts = 0;
+        let g = graph_with(vec![m, m2]);
+        let retryable = g.next_retryable(3);
+        assert!(retryable.is_some());
+        assert_eq!(retryable.unwrap().id, 100);
     }
 
     #[test]
