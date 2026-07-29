@@ -366,33 +366,6 @@ impl AgentLoop {
         } else { String::new() };
         let project_allowlist = if trusted { ProjectAllowlist::load(&root) } else { ProjectAllowlist::default() };
 
-        Self {
-            provider,
-            session: Session::new(model.clone()),
-            toolbox,
-            allowlist: SessionAllowlist::default(),
-            project_allowlist,
-            root,
-            session_path,
-            system_prompt,
-            persist,
-            model_window: crate::tokenizer::model_window(&model),
-            model,
-            max_tokens,
-            max_tokens_ceiling: crate::config::Config::from_env().max_tokens_ceiling,
-            noop_nudge_threshold: crate::config::Config::from_env().noop_nudge_threshold,
-            temperature,
-            next_id: 0,
-            cancel: CancelToken::default(),
-            tool_cap: MAX_TOOL_ITERATIONS,
-            headless,
-            trust,
-            steer: SteerQueue::default(),
-            tier2: None,
-            last_error: None,
-            shared_registry,
-        };
-
         // Initialize trace_emitter from the root path (must happen after root is moved into Self).
         let mut agent = Self {
             provider,
@@ -423,13 +396,6 @@ impl AgentLoop {
         };
         agent.trace_emitter = crate::trace::init_trace(&agent.root);
         agent
-    };
-        // 最后设置 trace_emitter（需要在 root 被 move 之前取引用）
-        loop {} // never reached
-    }
-
-    #[allow(unreachable_code)]
-    fn build(
     }
 
     /// Load the project's disk "self" now that it is trusted (ADR 0028): AGENTS.md

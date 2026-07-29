@@ -168,6 +168,7 @@ mod tests {
             max_ledger_lines: 10000,
             probe_failure_threshold: 5,
             wg_auto_renew: true,
+            trace_enabled: false,
         };
 
         // Don't actually call run_with_recovery here since run_daemon
