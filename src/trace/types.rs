@@ -68,6 +68,15 @@ pub enum PermissionDecision {
     AutoGranted,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SubAgentStatus {
+    Spawned,
+    Running,
+    Done,
+    Failed,
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum EventKind {
@@ -87,6 +96,56 @@ pub enum EventKind {
     LlmFullOutput { model: String, content: String },
     /// Compaction 丢弃的内容摘要
     CompactionDrop { span_id: String, dropped_bytes: u64, summary: String },
+    // === New variants (2026-07-29 unified observability) ===
+    UserInput {
+        source: MessageSource,
+        length: usize,
+        preview: String,
+    },
+    ToolCallBegin {
+        name: String,
+        args: serde_json::Value,
+    },
+    ToolCallEnd {
+        name: String,
+        is_error: bool,
+        output_size: usize,
+        duration_ms: u64,
+        output_preview: String,
+    },
+    SubAgentLifecycle {
+        agent_id: String,
+        status: SubAgentStatus,
+        parent_span_id: String,
+    },
+    ContextSnapshot {
+        before_bytes: u64,
+        after_bytes: u64,
+        dropped_events: usize,
+    },
+    PermissionFull {
+        key: String,
+        decision: PermissionDecision,
+        tool: String,
+        headless: bool,
+    },
+    MilestoneStatus {
+        id: u64,
+        title: String,
+        old_status: String,
+        new_status: String,
+    },
+    RetryEvent {
+        kind: String,
+        attempt: u32,
+        max_retries: u32,
+        error: String,
+    },
+    ProcessIdentity {
+        pid: u32,
+        agent_type: String,
+        session_id: String,
+    },
 }
 
 /// A span start event.
