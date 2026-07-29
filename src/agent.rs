@@ -759,15 +759,6 @@ impl AgentLoop {
             let summary_text = format!("{}{}", prose, compaction::render_file_blocks(&read, &modified));
             let mut messages = compaction::apply_tier2(&tier1, anchor_id, covered_last_id, &summary_text);
 
-            // Inject self-observation from previous turn as a System message
-            if let Some(ref obs) = self.self_observation {
-                if !obs.is_empty() {
-                    messages.push(Message::text(u64::MAX, Role::System, format!(
-                        "## Previous Turn Trace\n{}", obs
-                    )));
-                }
-            }
-
             messages
         };
 
