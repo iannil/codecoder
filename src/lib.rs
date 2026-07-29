@@ -26,6 +26,7 @@ pub mod tokenizer;
 pub mod trust;
 pub mod workgraph;
 pub mod tool;
+pub mod trace;
 pub mod verify;
 pub mod daemon;
 pub mod client;
