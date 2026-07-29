@@ -6,8 +6,10 @@ use crate::trace::reader::TraceReader;
 use crate::trace::types::*;
 use std::collections::HashMap;
 
+use serde::Serialize;
+
 /// Status of an agent node.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub enum AgentStatus {
     Running,
     Completed,
@@ -15,7 +17,7 @@ pub enum AgentStatus {
     Cancelled,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct AgentNode {
     pub span_id: String,
     pub agent_id: String,
@@ -27,7 +29,7 @@ pub struct AgentNode {
     pub turn_count: usize,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct AgentEdge {
     pub parent_span_id: String,
     pub child_span_id: String,
@@ -35,7 +37,7 @@ pub struct AgentEdge {
     pub launch_seq: u32,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct AgentGraph {
     pub nodes: Vec<AgentNode>,
     pub edges: Vec<AgentEdge>,

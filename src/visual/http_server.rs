@@ -143,6 +143,9 @@ impl HttpServer {
                                .trim_end_matches("/events");
                     self.serve_session_events(request, &self.root_path, id);
                 }
+                ("GET", "/api/v1/trace/agents") => {
+                    self.serve_trace_agents(request);
+                }
                 ("GET", path) if path.starts_with("/api/v1/") => {
                     // Other API endpoints (Phases 2-4): respond 404 for now
                     let resp = Response::from_string("{\"error\":\"not_implemented\"}")
@@ -398,6 +401,28 @@ impl HttpServer {
                 break;
             }
         }
+    }
+
+    fn serve_trace_agents(&self, request: tiny_http::Request) {
+        use crate::trace::agent_graph::AgentGraph;
+        use crate::trace::reader::TraceReader;
+
+        let reader = TraceReader::from_root(&self.root_path);
+        let graph = match AgentGraph::from_reader(&reader) {
+            Ok(g) => g,
+            Err(_) => AgentGraph::new(),
+        };
+
+        let rendered = graph.render_tree();
+        let json = serde_json::json!({
+            "nodes": graph.nodes,
+            "edges": graph.edges,
+            "tree": rendered,
+        });
+        let body = serde_json::to_string_pretty(&json).unwrap_or_else(|_| "{}".to_string());
+        let resp = Response::from_string(body)
+            .with_header(Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap());
+        let _ = request.respond(resp);
     }
 }
 
