@@ -27,6 +27,10 @@ pub enum SpanKind {
     Milestone,
     Reasoning,
     Compaction,
+    /// compaction 前的完整上下文保存 span
+    ContextSnapshot,
+    /// 完整推理链 span（区别于流式 Reasoning）
+    FullReasoning,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -37,6 +41,14 @@ pub enum TouchType {
     Edit,
     Create,
     Delete,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct AgentGraphEdge {
+    pub parent_span_id: String,
+    pub child_span_id: String,
+    pub label: String,
+    pub launch_seq: u32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -67,6 +79,14 @@ pub enum EventKind {
     SubAgentResult { agent_id: String, summary: String },
     WorkgraphStatus { total: usize, pending: usize, done: usize, needs_fix: usize },
     ExitCode { code: i32 },
+    /// 子 agent 调用边（用于重建调用树）
+    AgentGraphEdge(AgentGraphEdge),
+    /// LLM 完整 input（CODECODER_TRACE_FULL=1 门控）
+    LlmFullInput { model: String, messages: Vec<serde_json::Value> },
+    /// LLM 完整 output（CODECODER_TRACE_FULL=1 门控）
+    LlmFullOutput { model: String, content: String },
+    /// Compaction 丢弃的内容摘要
+    CompactionDrop { span_id: String, dropped_bytes: u64, summary: String },
 }
 
 /// A span start event.
