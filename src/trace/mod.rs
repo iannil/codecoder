@@ -8,6 +8,7 @@ pub mod reader;
 pub mod replay_buffer;
 pub mod agent_graph;
 pub mod observer_set;
+pub mod observers;
 
 pub use types::*;
 pub use emitter::TraceEmitter;
