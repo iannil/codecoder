@@ -326,6 +326,15 @@ fn parse_point_event(v: &serde_json::Value) -> PointEvent {
                 summary: meta["summary"].as_str().unwrap_or("").to_string(),
             }
         }
+        Some("agent_graph_edge") => {
+            let meta = v.get("meta").cloned().unwrap_or_default();
+            EventKind::AgentGraphEdge(AgentGraphEdge {
+                parent_span_id: meta["parent_span_id"].as_str().unwrap_or("").to_string(),
+                child_span_id: meta["child_span_id"].as_str().unwrap_or("").to_string(),
+                label: meta["label"].as_str().unwrap_or("").to_string(),
+                launch_seq: meta["launch_seq"].as_u64().unwrap_or(0) as u32,
+            })
+        }
         _ => {
             EventKind::Notice {
                 text: v["meta"]["text"].as_str().unwrap_or("").to_string(),
