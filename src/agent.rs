@@ -235,6 +235,8 @@ pub struct AgentLoop {
     last_error: Option<String>,
     /// daemon 共享目录（ADR 0020）。`None` 时 build_system_prompt 自扫（TUI/sub-agent）。
     shared_registry: Option<Arc<std::sync::RwLock<Registry>>>,
+    /// Trace observability emitter (spec 2026-07-29). None = disabled.
+    trace_emitter: Option<crate::trace::TraceEmitter>,
 }
 
 impl AgentLoop {
@@ -389,7 +391,45 @@ impl AgentLoop {
             tier2: None,
             last_error: None,
             shared_registry,
-        }
+        };
+
+        // Initialize trace_emitter from the root path (must happen after root is moved into Self).
+        let mut agent = Self {
+            provider,
+            session: Session::new(model.clone()),
+            toolbox,
+            allowlist: SessionAllowlist::default(),
+            project_allowlist,
+            root,
+            session_path,
+            system_prompt,
+            persist,
+            model_window: crate::tokenizer::model_window(&model),
+            model,
+            max_tokens,
+            max_tokens_ceiling: crate::config::Config::from_env().max_tokens_ceiling,
+            noop_nudge_threshold: crate::config::Config::from_env().noop_nudge_threshold,
+            temperature,
+            next_id: 0,
+            cancel: CancelToken::default(),
+            tool_cap: MAX_TOOL_ITERATIONS,
+            headless,
+            trust,
+            steer: SteerQueue::default(),
+            tier2: None,
+            last_error: None,
+            shared_registry,
+            trace_emitter: None, // filled below
+        };
+        agent.trace_emitter = crate::trace::init_trace(&agent.root);
+        agent
+    };
+        // 最后设置 trace_emitter（需要在 root 被 move 之前取引用）
+        loop {} // never reached
+    }
+
+    #[allow(unreachable_code)]
+    fn build(
     }
 
     /// Load the project's disk "self" now that it is trusted (ADR 0028): AGENTS.md
@@ -844,6 +884,8 @@ impl AgentLoop {
         // no-op 探索兜底(迭代 4):统计连续「纯探索」迭代,达阈值注入一次 nudge。
         let mut consecutive_explore_iters = 0usize;
         let mut nudged_this_turn = false;
+        // Trace: turn span
+        let turn_span = self.trace_emitter.as_mut().map(|t| t.on_turn_start());
         for _ in 0..self.tool_cap {
             if self.cancel.is_cancelled() {
                 hit_tool_cap = false;
@@ -1041,6 +1083,11 @@ impl AgentLoop {
             let _ = event_tx.send(AgentEvent::Notice(format!(
                 "turn stopped at the {}-tool-iteration cap; the task may be incomplete — send another message to continue.", self.tool_cap
             )));
+        }
+
+        // Trace: end turn span
+        if let (Some(ref mut t), Some(span_id)) = (self.trace_emitter.as_mut(), turn_span) {
+            t.span_end(&span_id, serde_json::json!({}));
         }
 
         let _ = event_tx.send(AgentEvent::TurnComplete);
