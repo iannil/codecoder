@@ -5,11 +5,13 @@ pub mod types;
 pub mod emitter;
 pub mod writer;
 pub mod reader;
+pub mod replay_buffer;
 
 pub use types::*;
 pub use emitter::TraceEmitter;
 pub use writer::TraceWriter;
 pub use reader::TraceReader;
+pub use replay_buffer::ReplayBuffer;
 
 pub fn init_trace(root: &std::path::Path) -> Option<TraceEmitter> {
     let enabled = std::env::var("CODECODER_TRACE")
