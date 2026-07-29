@@ -935,14 +935,25 @@ impl AgentLoop {
                     ts: crate::trace::types::now_ts(),
                     kind: ObservationKind::LlmCall {
                         model: self.model.clone(),
-                        prompt_tokens: 0,
+                        prompt_tokens: used as u32,
                     },
                 });
             }
 
+            // Trace: full LLM input (CODECODER_TRACE_FULL)
+            let llm_span = self.trace_emitter.as_mut().map(|t| {
+                let messages_json = serde_json::to_value(&req.messages).unwrap_or_default();
+                t.emit_llm_full_input(&self.model, vec![messages_json]);
+                t.on_llm_call_start(&self.model, used as u32, "")
+            });
+
             let (reply, stop_reason, usage) = match self.complete_retrying(&req, event_tx) {
                 Ok(c) => (c.message, c.stop_reason, c.usage),
                 Err(e) => {
+                    // End LLM span on error
+                    if let (Some(ref mut t), Some(ref span_id)) = (self.trace_emitter.as_mut(), llm_span) {
+                        t.span_end(span_id, serde_json::json!({"is_error": true, "error": e.to_string()}));
+                    }
                     // A context overflow (ADR 0027 #2) won't recover on retry; give
                     // the user an actionable hint instead of a bare error.
                     let msg = e.to_string();
@@ -969,6 +980,24 @@ impl AgentLoop {
                         duration_ms: 0,
                     },
                 });
+            }
+
+            // Trace: full LLM output (CODECODER_TRACE_FULL)
+            if let Some(ref mut t) = self.trace_emitter {
+                if let Some(ref span_id) = llm_span {
+                    let reply_preview: String = reply.items.iter()
+                        .filter_map(|item| match item {
+                            MessageItem::Text { text } => Some(text.clone()),
+                            _ => None,
+                        })
+                        .collect::<Vec<_>>()
+                        .join(" ");
+                    let ct = usage.as_ref().map(|u| u.completion_tokens).unwrap_or(0);
+                    let dr = 0u64; // duration not tracked here
+                    let stop_str = format!("{:?}", stop_reason);
+                    t.emit_llm_full_output(&self.model, &reply_preview);
+                    t.on_llm_call_end(span_id, ct, &stop_str, dr);
+                }
             }
 
             // Surface assistant text/reasoning, then record the assistant turn.
@@ -1679,6 +1708,7 @@ mod tests {
     use crate::provider::{Completion, CompletionRequest, StopReason};
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
+    use crate::config::SELF_OBSERVE_ENV_LOCK;
 
     /// Call 1 asks for a read_file tool call; call 2 (after the result is fed back)
     /// returns final text. read_file is Permission::None, so no prompt is needed.
@@ -2832,5 +2862,48 @@ mod tests {
          process, or if this was a write_file, consider whether the file was \
          partially created — you can append to it with append=true.";
         assert!(err_msg.contains("append=true"), "error should mention append=true");
+    }
+
+    #[test]
+    fn self_observe_injects_previous_turn_trace_when_enabled() {
+        let _g = SELF_OBSERVE_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        unsafe { std::env::set_var("CODECODER_SELF_OBSERVE", "1"); }
+        let dir = tempfile::tempdir().unwrap();
+        let provider = Arc::new(ScriptedProvider {
+            calls: AtomicUsize::new(0),
+            path: String::new(),
+            saw_result: Arc::new(Mutex::new(false)),
+        });
+        let mut agent = AgentLoop::new(provider, "m", 256, 0.0, dir.path().to_path_buf());
+        // After build, self_observe should have initialized replay_buffer
+        assert!(agent.replay_buffer.is_some(), "replay_buffer should be Some when CODECODER_SELF_OBSERVE=1");
+        // self_observation starts as None
+        assert!(agent.self_observation.is_none());
+        // Run a turn to populate the buffer
+        let (tx, _rx) = std::sync::mpsc::channel();
+        agent.process_turn("hello".into(), &tx);
+        // After a turn, self_observation should be set
+        assert!(agent.self_observation.is_some(), "self_observation should be set after a turn");
+        let obs = agent.self_observation.as_ref().unwrap();
+        assert!(obs.contains("Tool Call Sequence") || obs.contains("turn") || obs.contains("LLM"),
+            "self-observation should contain execution summary, got: {obs}");
+        unsafe { std::env::remove_var("CODECODER_SELF_OBSERVE"); }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn self_observe_disabled_by_default() {
+        let _g = SELF_OBSERVE_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        unsafe { std::env::remove_var("CODECODER_SELF_OBSERVE"); }
+        let dir = tempfile::tempdir().unwrap();
+        let mut agent = AgentLoop::new(
+            Arc::new(crate::provider::stub::StubClient),
+            "m", 256, 0.0, dir.path().to_path_buf(),
+        );
+        assert!(agent.replay_buffer.is_none(), "replay_buffer should be None by default");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        agent.process_turn("hello".into(), &tx);
+        assert!(agent.self_observation.is_none(), "self_observation should stay None when disabled");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

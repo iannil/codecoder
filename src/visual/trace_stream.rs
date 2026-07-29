@@ -29,16 +29,13 @@ impl TraceStream {
         std::thread::spawn(move || {
             // Read existing content first
             let mut last_len = 0u64;
-            if let Ok(meta) = std::fs::metadata(&path) {
-                last_len = meta.len();
-                // Send existing content
-                if let Ok(content) = std::fs::read_to_string(&path) {
-                    for line in content.lines() {
-                        let line = line.trim();
-                        if !line.is_empty() {
-                            if tx.send(line.to_string()).is_err() {
-                                return;
-                            }
+            if let Ok(content) = std::fs::read_to_string(&path) {
+                last_len = content.len() as u64;
+                for line in content.lines() {
+                    let line = line.trim();
+                    if !line.is_empty() {
+                        if tx.send(line.to_string()).is_err() {
+                            return;
                         }
                     }
                 }

@@ -4,6 +4,8 @@ use std::path::PathBuf;
 /// Serializes tests (across modules in this lib test binary) that read/mutate the
 /// process-global `CODECODER_MAX_TOKENS_CEILING` env var.
 pub(crate) static MAX_TOKENS_CEILING_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+/// Serializes tests that read/mutate the CODECODER_SELF_OBSERVE env var.
+pub(crate) static SELF_OBSERVE_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 #[derive(Debug, Clone)]
 pub struct Config {
