@@ -10,18 +10,23 @@ pub struct TraceEmitter {
     next_span_id: u64,
     session_id_short: String,
     emit_stream_delta: bool,
+    trace_full: bool,
 }
 
 impl TraceEmitter {
     /// Create a new TraceEmitter. `session_id` is the root session's ID string.
     pub fn new(tx: Sender<TraceEvent>, session_id: &str) -> Self {
         let short = if session_id.len() > 12 { &session_id[..12] } else { session_id };
+        let trace_full = std::env::var("CODECODER_TRACE_FULL")
+            .map(|v| v == "1" || v == "true")
+            .unwrap_or(false);
         TraceEmitter {
             tx,
             span_stack: Vec::new(),
             next_span_id: 1,
             session_id_short: short.to_string(),
             emit_stream_delta: false,
+            trace_full,
         }
     }
 
@@ -52,6 +57,31 @@ impl TraceEmitter {
     pub fn emit(&mut self, kind: EventKind, meta: serde_json::Value) {
         let event = TraceEvent::point(kind, meta);
         let _ = self.tx.send(event);
+    }
+
+    /// Emit an agent graph edge (sub-agent parent/child relationship).
+    pub fn emit_agent_graph_edge(&mut self, parent_span_id: String, child_span_id: String, label: String, launch_seq: u32) {
+        let edge = AgentGraphEdge { parent_span_id, child_span_id, label, launch_seq };
+        self.emit(EventKind::AgentGraphEdge(edge), serde_json::json!({}));
+    }
+
+    /// Emit the full LLM request input (gated by CODECODER_TRACE_FULL=1).
+    pub fn emit_llm_full_input(&mut self, model: &str, messages: Vec<serde_json::Value>) {
+        self.emit(EventKind::LlmFullInput { model: model.into(), messages }, serde_json::json!({}));
+    }
+
+    /// Emit the full LLM response output (gated by CODECODER_TRACE_FULL=1).
+    pub fn emit_llm_full_output(&mut self, model: &str, content: &str) {
+        self.emit(EventKind::LlmFullOutput { model: model.into(), content: content.into() }, serde_json::json!({}));
+    }
+
+    /// Emit a compaction drop event: records what was discarded and its span context.
+    pub fn emit_compaction_drop(&mut self, span_id: &str, dropped_bytes: u64, summary: &str) {
+        self.emit(EventKind::CompactionDrop {
+            span_id: span_id.into(),
+            dropped_bytes,
+            summary: summary.into(),
+        }, serde_json::json!({}));
     }
 
     /// Translate an AgentEvent into trace events.
@@ -102,10 +132,15 @@ impl TraceEmitter {
         }))
     }
 
-    pub fn on_tool_start(&mut self, name: &str, input_preview: &str) -> String {
+    pub fn on_tool_start(&mut self, name: &str, input_preview: &str, full_input: Option<&str>) -> String {
+        let preview = if self.trace_full {
+            full_input.unwrap_or(input_preview)
+        } else {
+            input_preview
+        };
         self.span_start(SpanKind::ToolCall, serde_json::json!({
             "tool": name,
-            "input_preview": input_preview,
+            "input_preview": preview,
         }))
     }
 
