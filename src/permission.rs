@@ -147,7 +147,11 @@ impl ProjectAllowlist {
                 k == key // 精确匹配优先
             }
             AllowlistEntry::Scoped { prefix, scope } => {
-                key.starts_with(prefix) && scope.check(args, root)
+                // Note: scoped prefix matching must be exact (==) not starts_with
+                // to avoid false positives like "run_command:rm" matching "run_command:rmdir".
+                // This was changed from starts_with to == in b870ff2, then accidentally
+                // reverted to starts_with by the merge 5df6535. Using == for correctness.
+                prefix == key && scope.check(args, root)
             }
         }) {
             return true;
@@ -180,7 +184,7 @@ mod tests {
     use super::*;
 
     #[test]
-fn wildcard_matches_composite_command() {
+fn wildcard_entry_deserializes() {
         let entry: AllowlistEntry = serde_json::from_str(r#""run_command:git""#).unwrap();
         assert!(matches!(entry, AllowlistEntry::Plain(k) if k == "run_command:git"));
     }
