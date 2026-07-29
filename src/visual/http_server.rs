@@ -24,7 +24,7 @@ const SSE_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(15);
 /// head ourselves (status line + headers + terminating blank line), all with CRLF
 /// line endings per RFC 7230, before any SSE frame. Omitting it yields an invalid
 /// HTTP response that browsers' EventSource rejects.
-fn write_sse_head<W: Write>(writer: &mut W) -> std::io::Result<()> {
+pub(crate) fn write_sse_head<W: Write>(writer: &mut W) -> std::io::Result<()> {
     write!(writer, "HTTP/1.1 200 OK\r\n")?;
     for (name, val) in SSE_HEADERS {
         write!(writer, "{name}: {val}\r\n")?;
@@ -121,6 +121,9 @@ impl HttpServer {
                 }
                 ("GET", "/api/v1/workgraph/stream") => {
                     self.serve_workgraph_stream(request);
+                }
+                ("GET", "/api/v1/trace/stream") => {
+                    self.serve_trace_stream(request);
                 }
                 ("GET", "/api/v1/sessions") => {
                     self.serve_sessions(request, &self.root_path);
@@ -356,6 +359,42 @@ impl HttpServer {
         }
 
         router.remove_sse(id);
+    }
+
+    fn serve_trace_stream(&self, request: tiny_http::Request) {
+        use std::sync::mpsc;
+
+        let stream = crate::visual::trace_stream::TraceStream::new(&self.root_path);
+        let rx = match stream.follow() {
+            Ok(rx) => rx,
+            Err(e) => {
+                let resp = Response::from_string(format!("{{\"error\":\"failed to start trace stream: {e}\"}}"))
+                    .with_status_code(StatusCode(500));
+                let _ = request.respond(resp);
+                return;
+            }
+        };
+
+        let mut writer = std::io::BufWriter::new(request.into_writer());
+        if write_sse_head(&mut writer).is_err() {
+            return;
+        }
+
+        // Keepalive interval: 15s
+        loop {
+            match rx.recv_timeout(Duration::from_secs(15)) {
+                Ok(line) => {
+                    let _ = write!(&mut writer, "data: {line}\n\n");
+                }
+                Err(mpsc::RecvTimeoutError::Timeout) => {
+                    let _ = write!(&mut writer, ": keepalive\n\n");
+                }
+                Err(_) => break,
+            }
+            if let Err(_) = writer.flush() {
+                break;
+            }
+        }
     }
 }
 
