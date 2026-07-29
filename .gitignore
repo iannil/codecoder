@@ -10,3 +10,6 @@
 /.ccd.**.env
 /skills/**/evals
 .ccd.bg.ndjson
+
+# Trace observability NDJSON
+.ccd.trace*.ndjson

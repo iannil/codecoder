@@ -614,7 +614,6 @@ mod tests {
             max_ledger_lines: 10000,
             probe_failure_threshold: 5,
             wg_auto_renew: true,
-            trace_enabled: false,
         };
         let _d = Daemon::new(cfg); // 仅构造，不 run（run 会阻塞 accept）
         let _ = std::fs::remove_dir_all(&dir);

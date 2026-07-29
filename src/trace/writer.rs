@@ -9,7 +9,7 @@ const ROTATE_SIZE: u64 = 10 * 1024 * 1024;
 const MAX_ROTATED: usize = 3;
 
 pub struct TraceWriter {
-    rx: Receiver<TraceEvent>,
+
     ndjson: Option<std::fs::File>,
     ndjson_path: PathBuf,
     bytes_written: u64,
@@ -24,20 +24,17 @@ impl TraceWriter {
         let path = root.join(".ccd.trace.ndjson");
         std::thread::spawn(move || {
             let mut writer = TraceWriter {
-                rx,
                 ndjson: None,
                 ndjson_path: path,
                 bytes_written: 0,
                 initial_metadata_written: false,
             };
-            writer.run();
+            writer.run(rx);
         });
         tx
     }
 
-    fn run(&mut self) {
-        // Take ownership of the receiver so we can iterate
-        let rx = std::mem::replace(&mut self.rx, std::sync::mpsc::channel::<TraceEvent>().1);
+    fn run(&mut self, rx: Receiver<TraceEvent>) {
         for event in rx {
             if !self.initial_metadata_written {
                 self.initial_metadata_written = true;
@@ -154,6 +151,7 @@ mod tests {
         let lines: Vec<&str> = body.lines().collect();
         let ev: serde_json::Value = serde_json::from_str(lines[1]).unwrap();
         assert_eq!(ev["type"], "p");
+        // EventKind is serialized as adjacently-tagged JSON object
         assert!(ev["kind"].is_object(), "kind should be an object, got: {:?}", ev["kind"]);
     }
 }

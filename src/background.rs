@@ -401,9 +401,13 @@ fn drain_bg_events(
     rx: std::sync::mpsc::Receiver<AgentEvent>,
     out: &mut BgOutcome,
     obs: &mut crate::bg_observer::BgObserver,
-    _trace: Option<&mut crate::trace::TraceEmitter>,
+    mut trace: Option<&mut crate::trace::TraceEmitter>,
 ) {
     for ev in rx.into_iter() {
+        // Forward to trace emitter BEFORE pattern-matching (which may move fields)
+        if let Some(ref mut t) = trace {
+            t.on_agent_event(&ev);
+        }
         match ev {
             AgentEvent::StreamDelta(s) => out.final_text.push_str(&s),
             AgentEvent::ToolStarted { name, .. } => {

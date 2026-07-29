@@ -9,12 +9,16 @@ use std::path::Path;
 // ============================================================================
 
 /// A reconstructed span node in the span tree.
+#[derive(Clone)]
 pub struct SpanNode {
     pub span: SpanStart,
     pub end: Option<SpanEnd>,
     pub children: Vec<SpanNode>,
+    /// All point events attached to this span (includes direct_events).
     pub events: Vec<PointEvent>,
-    /// Point events that are NOT attached to any child span (direct children).
+    /// Point events directly on this span (not inherited from children).
+    /// These are a subset of `events` — callers should iterate `events`
+    /// for the full list, or `direct_events` for only local events.
     pub direct_events: Vec<PointEvent>,
 }
 
@@ -153,7 +157,7 @@ impl TraceReader {
         let body = std::fs::read_to_string(&self.path)?;
         let lines: Vec<&str> = body.lines().filter(|l| !l.trim().is_empty()).collect();
         // 跳过 meta 行
-        let start = if lines.len() > n + 1 { lines.len() - n } else { 1 };
+        let start = lines.len().saturating_sub(n).max(1);
         Ok(lines[start..].iter().map(|s| (*s).to_string()).collect())
     }
 
@@ -363,7 +367,6 @@ fn attach_event(node: &mut SpanNode, event: &PointEvent) {
     }
     // 没有合适的子节点 → 附加到当前节点
     node.direct_events.push(event.clone());
-    node.events.push(event.clone());
 }
 
 fn render_node(node: &SpanNode, depth: usize, count: &mut usize, max: usize) -> String {
@@ -447,18 +450,13 @@ fn filter_tree_by_file<'a>(
     results: &mut Vec<(SpanNode, Vec<PointEvent>)>,
 ) {
     for node in tree {
-        let matching: Vec<PointEvent> = node.events.iter()
+        // Check both events and direct_events for file touches
+        let matching: Vec<PointEvent> = node.events.iter().chain(node.direct_events.iter())
             .filter(|e| matches!(&e.kind, EventKind::FileTouch { path: p, .. } if p == path))
             .cloned()
             .collect();
         if !matching.is_empty() {
-            results.push((/* shallow clone */ SpanNode {
-                span: node.span.clone(),
-                end: node.end.clone(),
-                children: Vec::new(),
-                events: matching.clone(),
-                direct_events: Vec::new(),
-            }, matching));
+            results.push((node.clone(), matching));
         }
         filter_tree_by_file(&node.children, path, results);
     }
