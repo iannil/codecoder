@@ -90,9 +90,13 @@ impl ObserverSet {
                 continue;
             }
             if self.soft_fail {
-                let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     obs.on_span_start(span);
                 }));
+                if let Err(e) = result {
+                    let msg = panic_message(&e);
+                    eprintln!("[trace] observer panicked in on_span_start: {msg}");
+                }
             } else {
                 obs.on_span_start(span);
             }
@@ -106,9 +110,12 @@ impl ObserverSet {
                 continue;
             }
             if self.soft_fail {
-                let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     obs.on_span_end(span);
                 }));
+                if let Err(e) = result {
+                    eprintln!("[trace] observer panicked in on_span_end: {}", panic_message(&e));
+                }
             } else {
                 obs.on_span_end(span);
             }
@@ -122,9 +129,13 @@ impl ObserverSet {
                 continue;
             }
             if self.soft_fail {
-                let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     obs.on_point(event);
                 }));
+                if let Err(e) = result {
+                    let msg = panic_message(&e);
+                    eprintln!("[trace] observer panicked in on_point: {msg}");
+                }
             } else {
                 obs.on_point(event);
             }
@@ -138,9 +149,13 @@ impl ObserverSet {
                 continue;
             }
             if self.soft_fail {
-                let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     obs.flush();
                 }));
+                if let Err(e) = result {
+                    let msg = panic_message(&e);
+                    eprintln!("[trace] observer panicked in flush: {msg}");
+                }
             } else {
                 obs.flush();
             }
@@ -151,9 +166,9 @@ impl ObserverSet {
     // Convenience methods matching existing TraceEmitter API
     // ---------------------------------------------------------------
 
-    /// Emit a turn-start span.
+    /// Emit a turn-start span. The span_id uses a timestamp-based suffix for uniqueness.
     pub fn on_turn_start(&mut self) -> Option<String> {
-        let span_id = span_id("sess", 0);
+        let span_id = span_id("turn", crate::trace::types::now_ts() as u64);
         let span = SpanStart {
             span_id: span_id.clone(),
             parent_id: None,
@@ -255,6 +270,17 @@ impl ObserverSet {
 impl Default for ObserverSet {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// Extract a human-readable message from a panic payload.
+fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
+    if let Some(s) = payload.downcast_ref::<&str>() {
+        s.to_string()
+    } else if let Some(s) = payload.downcast_ref::<String>() {
+        s.clone()
+    } else {
+        "unknown panic".to_string()
     }
 }
 
