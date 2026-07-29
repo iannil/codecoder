@@ -443,6 +443,21 @@ mod tests {
     }
 
     #[test]
+    fn next_retryable_skips_gate_kind_none() {
+        let mut m = ms(100, "");
+        m.status = NodeStatus::NeedsFix;
+        m.fix_attempts = 0;
+        m.command = Some("echo ok".into());
+        let mut m2 = ms(101, "");
+        m2.status = NodeStatus::NeedsFix;
+        m2.fix_attempts = 0;
+        let g = graph_with(vec![m, m2]);
+        let retryable = g.next_retryable(3);
+        assert!(retryable.is_some());
+        assert_eq!(retryable.unwrap().id, 100);
+    }
+
+    #[test]
     fn evaluate_uses_explicit_command_over_review() {
         let dir = tempdir().unwrap();
         let mut m = ms(1, "渲染输出正确"); // prose acceptance
