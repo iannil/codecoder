@@ -191,7 +191,7 @@ pub(crate) fn run_background_cfg(
             drop(tx);
             agent
         });
-        drain_bg_events(rx, &mut out, &mut obs);
+        drain_bg_events(rx, &mut out, &mut obs, None);
         match handle.join() {
             Ok(agent) => {
                 if let Some(e) = agent.last_error() {
@@ -401,6 +401,7 @@ fn drain_bg_events(
     rx: std::sync::mpsc::Receiver<AgentEvent>,
     out: &mut BgOutcome,
     obs: &mut crate::bg_observer::BgObserver,
+    _trace: Option<&mut crate::trace::TraceEmitter>,
 ) {
     for ev in rx.into_iter() {
         match ev {
@@ -591,7 +592,7 @@ fn run_milestone_and_gate(
         drop(tx);
         agent // hand the agent back so we can read last_error()
     });
-    drain_bg_events(rx, &mut out, &mut obs);
+    drain_bg_events(rx, &mut out, &mut obs, None);
     let agent = match handle.join() {
         Ok(agent) => agent,
         Err(panic) => {
