@@ -72,6 +72,8 @@ pub struct Config {
     pub max_sessions: u32,
     /// bg_ledger.jsonl 最大行数，超限时截断。0 = 不限制。env CODECODER_MAX_LEDGER_LINES, 默认 10000。
     pub max_ledger_lines: u32,
+    /// 是否启用 trace 观测系统（CODECODER_TRACE=1）。
+    pub trace_enabled: bool,
 }
 
 impl Config {
@@ -163,6 +165,9 @@ impl Config {
             max_ledger_lines: env("CODECODER_MAX_LEDGER_LINES")
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(10000),
+            trace_enabled: env("CODECODER_TRACE")
+                .map(|v| v == "1" || v == "true")
+                .unwrap_or(false),
         }
     }
 }
@@ -224,6 +229,7 @@ const DOTENV_ALLOWED_KEYS: &[&str] = &[
     // Note: PROBE_FAILURE_THRESHOLD and WG_AUTO_RENEW are safe — pure behaviour params.
     "CODECODER_PROBE_FAILURE_THRESHOLD",
     "CODECODER_WG_AUTO_RENEW",
+    "CODECODER_TRACE",
     // Note: FALLBACK_API_BASE and FALLBACK_MODEL are NOT in DOTENV_ALLOWED_KEYS
     // because they could redirect traffic to a malicious endpoint.
     // They must come from the real shell env.
