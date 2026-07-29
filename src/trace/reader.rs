@@ -231,6 +231,19 @@ impl TraceReader {
         Ok(results)
     }
 
+    /// Render the complete trace as a full replay text (no truncation).
+    pub fn render_full_trace(&self) -> std::io::Result<String> {
+        let (_meta, tree) = self.read_tree()?;
+        let mut out = String::new();
+        let mut count = 0usize;
+
+        for root in &tree {
+            render_node_detailed(root, 0, &mut count, usize::MAX, &mut out);
+        }
+
+        Ok(out)
+    }
+
     /// 统计摘要。
     pub fn aggregate_stats(&self) -> std::io::Result<TraceStats> {
         let (_meta, tree) = self.read_tree()?;
@@ -450,6 +463,76 @@ fn collect_file_touches(tree: &[SpanNode], out: &mut Vec<String>) {
             }
         }
         collect_file_touches(&node.children, out);
+    }
+}
+
+fn render_node_detailed(
+    node: &SpanNode,
+    depth: usize,
+    count: &mut usize,
+    max: usize,
+    out: &mut String,
+) {
+    if *count >= max { return; }
+    *count += 1;
+    let indent = "  ".repeat(depth);
+    let kind_str = format!("{:?}", node.span.kind);
+    let duration = node.end.as_ref()
+        .and_then(|e| e.meta.get("duration_ms").and_then(|v| v.as_f64()))
+        .map(|d| format!(" ({:.0}ms)", d))
+        .unwrap_or_default();
+    let tool_info = node.span.meta.get("tool")
+        .and_then(|v| v.as_str())
+        .map(|t| format!(" [{}]", t))
+        .unwrap_or_default();
+
+    out.push_str(&format!("{indent}{kind_str}{duration}{tool_info}\n"));
+
+    // Full details for LLM call
+    if let Some(model) = node.span.meta.get("model").and_then(|v| v.as_str()) {
+        let pt = node.span.meta.get("prompt_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
+        let ct = node.end.as_ref()
+            .and_then(|e| e.meta.get("completion_tokens").and_then(|v| v.as_u64()))
+            .unwrap_or(0);
+        out.push_str(&format!("{indent}  模型: {} | tokens: {}→{}\n", model, pt, ct));
+        // Full input/output if available
+        if let Some(input) = node.span.meta.get("full_input") {
+            let text = input.as_str().unwrap_or("");
+            out.push_str(&format!("{indent}  Full input: {}\n", text));
+        }
+        if let Some(output) = node.end.as_ref().and_then(|e| e.meta.get("full_output")) {
+            let text = output.as_str().unwrap_or("");
+            out.push_str(&format!("{indent}  Full output: {}\n", text));
+        }
+    }
+
+    // All direct events
+    for ev in &node.direct_events {
+        match &ev.kind {
+            EventKind::Notice { text } => {
+                out.push_str(&format!("{indent}  📝 {}\n", text));
+            }
+            EventKind::UserMessage { source, summary } => {
+                let src = match source {
+                    MessageSource::Manual => "手动",
+                    MessageSource::Auto => "自动",
+                    MessageSource::Injected => "注入",
+                };
+                out.push_str(&format!("{indent}  💬 [{}] {}\n", src, summary));
+            }
+            EventKind::CompactionDrop { span_id, dropped_bytes, summary } => {
+                out.push_str(&format!("{indent}  🗑 Compaction: dropped {} bytes from {span_id}: {summary}\n", dropped_bytes));
+            }
+            EventKind::AgentGraphEdge(edge) => {
+                out.push_str(&format!("{indent}  🔗 Agent edge: {} → {} (seq {})\n",
+                    edge.parent_span_id, edge.child_span_id, edge.launch_seq));
+            }
+            _ => {}
+        }
+    }
+
+    for child in &node.children {
+        render_node_detailed(child, depth + 1, count, max, out);
     }
 }
 
