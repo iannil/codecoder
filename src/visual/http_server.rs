@@ -113,6 +113,9 @@ impl HttpServer {
                 ("GET", "/") | ("GET", "/index.html") => {
                     self.serve_static(request, &self.static_dir, "index.html");
                 }
+                ("GET", "/trace.html") | ("GET", "/trace") => {
+                    self.serve_static(request, &self.static_dir, "trace.html");
+                }
                 ("GET", "/api/v1/events") => {
                     self.serve_sse(request);
                 }

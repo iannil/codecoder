@@ -1,0 +1,203 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Trace — CodeCoder Web</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #1a1b1e; color: #e1e4e8; padding: 16px; }
+  .header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; }
+  .header h1 { font-size: 18px; font-weight: 600; }
+  .stats { display: flex; gap: 16px; font-size: 12px; color: #9aa0a6; }
+  .stats span { background: #2d2d30; padding: 4px 8px; border-radius: 4px; }
+  .timeline { background: #25262b; border-radius: 8px; padding: 12px; min-height: 400px; overflow-y: auto; font-family: 'SF Mono', 'Monaco', monospace; font-size: 13px; }
+  .event { padding: 6px 8px; margin: 2px 0; border-radius: 4px; }
+  .event.turn { background: #2d2d30; }
+  .event.llm { border-left: 3px solid #4fc3f7; }
+  .event.tool { border-left: 3px solid #34d399; }
+  .event.error { border-left: 3px solid #f87171; background: rgba(248, 113, 113, 0.1); }
+  .event.file-touch { border-left: 3px solid #a78bfa; }
+  .event .preview { color: #9aa0a6; font-size: 12px; margin-left: 16px; }
+  .timeline-bar { background: #2d2d30; border-radius: 4px; height: 24px; margin: 12px 0; display: flex; overflow: hidden; }
+  .timeline-bar .seg { height: 100%; transition: width 0.3s; }
+  .timeline-bar .llm-seg { background: #4fc3f7; }
+  .timeline-bar .tool-seg { background: #34d399; }
+  .timeline-bar .error-seg { background: #f87171; }
+  #status { margin-bottom: 8px; font-size: 12px; color: #9aa0a6; }
+  .controls { display: flex; gap: 8px; margin-bottom: 12px; }
+  .controls button { background: #2d2d30; border: none; color: #e1e4e8; padding: 4px 12px; border-radius: 4px; cursor: pointer; }
+  .controls button:hover { background: #3d3d40; }
+  .heatmap { background: #25262b; border-radius: 8px; padding: 12px; margin-top: 16px; }
+  .heatmap h3 { font-size: 14px; margin-bottom: 8px; }
+  .heatmap .file { display: flex; align-items: center; margin: 4px 0; font-size: 12px; }
+  .heatmap .file .bar { height: 16px; border-radius: 2px; margin-right: 8px; min-width: 4px; }
+  .heatmap .file .bar.read { background: #4fc3f7; }
+  .heatmap .file .bar.edit { background: #fbbf24; }
+  .heatmap .file .bar.hit { background: #6b7280; }
+</style>
+</head>
+<body>
+  <div class="header">
+    <h1>📡 Trace 回放</h1>
+    <div class="controls">
+      <button onclick="clearTimeline()">清空</button>
+    </div>
+  </div>
+  <div class="stats" id="stats">
+    <span>LLM: <span id="llm_count">0</span></span>
+    <span>工具: <span id="tool_count">0</span></span>
+    <span>错误: <span id="error_count">0</span></span>
+    <span>文件 touch: <span id="touch_count">0</span></span>
+    <span>tokens: <span id="token_count">0</span></span>
+    <span id="status">未连接</span>
+  </div>
+  <div class="timeline-bar" id="timelineBar"></div>
+  <div class="timeline" id="timeline"></div>
+  <div class="heatmap" id="heatmap"><h3>文件热力图</h3><div id="heatmapContent"></div></div>
+
+  <script>
+    const timeline = document.getElementById('timeline');
+    const timelineBar = document.getElementById('timelineBar');
+    const heatmapContent = document.getElementById('heatmapContent');
+    let events = [];
+    let fileTouches = {};
+
+    const es = new EventSource('/api/v1/trace/stream');
+    es.onopen = () => document.getElementById('status').textContent = '已连接';
+    es.onerror = () => document.getElementById('status').textContent = '连接断开';
+
+    es.onmessage = (e) => {
+      try {
+        const data = JSON.parse(e.data);
+        processEvent(data);
+      } catch { /* skip non-JSON lines */ }
+    };
+
+    function processEvent(data) {
+      events.push(data);
+      const type = data.type || '';
+      const kind = data.kind || '';
+
+      let eventClass = 'event';
+      let label = '';
+      let detail = '';
+
+      if (type === 's') {
+        eventClass += ' turn';
+        label = '▶ ' + (data.kind || 'span') + ' start';
+        if (data.kind === 'llm_call') { eventClass = 'event llm'; label = 'LLM Call'; }
+        if (data.kind === 'tool_call') { eventClass = 'event tool'; label = 'Tool: ' + (data.meta?.tool || ''); }
+        if (data.kind === 'sub_agent') { eventClass = 'event'; label = 'Sub-agent: ' + (data.meta?.label || ''); }
+      } else if (type === 'e') {
+        eventClass += ' turn';
+        label = '⏹ end';
+        if (data.meta?.is_error) { eventClass = 'event error'; label = '❌ Error'; }
+        detail = data.meta?.duration_ms ? '(' + data.meta.duration_ms + 'ms)' : '';
+      } else if (type === 'p') {
+        if (kind === 'file_touch') {
+          eventClass = 'event file-touch';
+          const path = data.meta?.path || '';
+          const touch = data.meta?.touch || '';
+          label = '📄 ' + touch + ': ' + path;
+          fileTouches[path] = fileTouches[path] || { read: 0, edit: 0, hit: 0 };
+          if (touch === 'read') fileTouches[path].read++;
+          else if (touch === 'edit') fileTouches[path].edit++;
+          else fileTouches[path].hit++;
+          renderHeatmap();
+        } else if (kind === 'notice') {
+          label = '📝 ' + (data.meta?.text || '');
+        } else if (kind === 'user_message') {
+          label = '💬 ' + (data.meta?.summary || '');
+        }
+      }
+
+      if (label) {
+        const div = document.createElement('div');
+        div.className = eventClass;
+        div.textContent = label;
+        if (detail) {
+          const span = document.createElement('span');
+          span.className = 'preview';
+          span.textContent = ' ' + detail;
+          div.appendChild(span);
+        }
+        timeline.appendChild(div);
+        timeline.scrollTop = timeline.scrollHeight;
+      }
+
+      updateStats();
+      updateTimelineBar();
+    }
+
+    function updateStats() {
+      let llm = 0, tools = 0, errors = 0, touches = 0, tokens = 0;
+      for (const e of events) {
+        if (e.type === 's' && e.kind === 'llm_call') llm++;
+        if (e.type === 's' && e.kind === 'tool_call') tools++;
+        if (e.type === 'e' && e.meta?.is_error) errors++;
+        if (e.type === 'p' && e.kind === 'file_touch') touches++;
+      }
+      document.getElementById('llm_count').textContent = llm;
+      document.getElementById('tool_count').textContent = tools;
+      document.getElementById('error_count').textContent = errors;
+      document.getElementById('touch_count').textContent = touches;
+      document.getElementById('token_count').textContent = tokens;
+    }
+
+    function updateTimelineBar() {
+      timelineBar.innerHTML = '';
+      const segs = events.slice(-50);
+      if (segs.length === 0) return;
+      for (const e of segs) {
+        const div = document.createElement('div');
+        div.className = 'seg';
+        if (e.type === 's' && e.kind === 'llm_call') div.classList.add('llm-seg');
+        else if (e.kind === 'tool_call') div.classList.add('tool-seg');
+        else if (e.meta?.is_error) div.classList.add('error-seg');
+        div.style.width = (100 / segs.length) + '%';
+        timelineBar.appendChild(div);
+      }
+    }
+
+    function renderHeatmap() {
+      heatmapContent.innerHTML = '';
+      const entries = Object.entries(fileTouches).sort((a, b) => (b[1].read + b[1].edit + b[1].hit) - (a[1].read + a[1].edit + a[1].hit)).slice(0, 20);
+      const maxCount = Math.max(...entries.map(([, v]) => v.read + v.edit + v.hit), 1);
+      for (const [path, counts] of entries) {
+        const div = document.createElement('div');
+        div.className = 'file';
+        if (counts.read > 0) {
+          const bar = document.createElement('div');
+          bar.className = 'bar read';
+          bar.style.width = (counts.read / maxCount) * 200 + 'px';
+          div.appendChild(bar);
+        }
+        if (counts.edit > 0) {
+          const bar = document.createElement('div');
+          bar.className = 'bar edit';
+          bar.style.width = (counts.edit / maxCount) * 200 + 'px';
+          div.appendChild(bar);
+        }
+        if (counts.hit > 0) {
+          const bar = document.createElement('div');
+          bar.className = 'bar hit';
+          bar.style.width = (counts.hit / maxCount) * 200 + 'px';
+          div.appendChild(bar);
+        }
+        div.appendChild(document.createTextNode(path + ' (R:' + counts.read + ' E:' + counts.edit + ' H:' + counts.hit + ')'));
+        heatmapContent.appendChild(div);
+      }
+    }
+
+    function clearTimeline() {
+      events = [];
+      fileTouches = {};
+      timeline.innerHTML = '';
+      timelineBar.innerHTML = '';
+      heatmapContent.innerHTML = '';
+      updateStats();
+    }
+  </script>
+</body>
+</html>
