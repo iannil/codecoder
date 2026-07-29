@@ -72,6 +72,9 @@ pub struct Config {
     pub max_sessions: u32,
     /// bg_ledger.jsonl 最大行数，超限时截断。0 = 不限制。env CODECODER_MAX_LEDGER_LINES, 默认 10000。
     pub max_ledger_lines: u32,
+    /// 是否启用 LLM 自省（CODECODER_SELF_OBSERVE）。
+    /// 启用后每 turn 结束后将上轮 trace 摘要注入下一轮 system prompt。
+    pub self_observe: bool,
 }
 
 impl Config {
@@ -163,6 +166,9 @@ impl Config {
             max_ledger_lines: env("CODECODER_MAX_LEDGER_LINES")
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(10000),
+            self_observe: env("CODECODER_SELF_OBSERVE")
+                .map(|v| v == "1" || v == "true")
+                .unwrap_or(false),
         }
     }
 }

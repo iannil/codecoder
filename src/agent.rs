@@ -5,6 +5,7 @@ use crate::permission::{AllowlistEntry, PermScope, Permission, ProjectAllowlist,
 use crate::provider::{Completion, CompletionRequest, Provider, StopReason};
 use crate::registry::Registry;
 use crate::session::{self, Session};
+use crate::trace::replay_buffer::{ObservationEvent, ObservationKind};
 use crate::trust::{self, TrustDecision};
 use crate::tool::{ToolCtx, Toolbox};
 use std::collections::BTreeSet;
@@ -237,6 +238,10 @@ pub struct AgentLoop {
     shared_registry: Option<Arc<std::sync::RwLock<Registry>>>,
     /// Trace observability emitter (spec 2026-07-29). None = disabled.
     trace_emitter: Option<crate::trace::TraceEmitter>,
+    /// Replay buffer for LLM self-observation (CODECODER_SELF_OBSERVE).
+    replay_buffer: Option<crate::trace::replay_buffer::ReplayBuffer>,
+    /// Cached self-observation text to inject into next turn's system prompt.
+    self_observation: Option<String>,
 }
 
 impl AgentLoop {
@@ -393,6 +398,12 @@ impl AgentLoop {
             last_error: None,
             shared_registry,
             trace_emitter: None, // filled below
+            replay_buffer: if crate::config::Config::from_env().self_observe {
+                Some(crate::trace::replay_buffer::ReplayBuffer::new())
+            } else {
+                None
+            },
+            self_observation: None,
         };
         agent.trace_emitter = crate::trace::init_trace(&agent.root);
         agent
@@ -671,81 +682,105 @@ impl AgentLoop {
     /// Derive the Context Working Set: tier-1 always; tier-2 (summarize the oldest
     /// span) only when tier-1 is still over the window threshold. Degrades to tier-1
     /// if the summary call fails. Caches the summary in-memory (one call per turn).
+    /// Also injects self-observation System message if available.
     fn context_working_set(&mut self, event_tx: &Sender<AgentEvent>) -> Vec<Message> {
         let thread = self.session.active_thread();
         let tier1 = compaction::working_set(&self.model, &thread, self.model_window, None, false);
-        if !compaction::should_compact(
+        let mut messages = if !compaction::should_compact(
             crate::tokenizer::count_tokens(&self.model, &tier1),
             self.model_window,
         ) {
-            return tier1;
-        }
-        let Some((start, end)) = compaction::summary_span(&thread) else {
-            return tier1;
+            tier1
+        } else {
+            let Some((start, end)) = compaction::summary_span(&thread) else {
+                return tier1;
+            };
+            let anchor_id = thread[start - 1].id;
+            let covered_last_id = thread[end - 1].id;
+
+            let mut read = BTreeSet::new();
+            let mut modified = BTreeSet::new();
+            let prose: String;
+
+            match self.tier2.as_ref() {
+                // Span unchanged → full reuse, no LLM call, no Notice.
+                Some(c) if c.covered_last_id == covered_last_id => {
+                    read = c.read_files.clone();
+                    modified = c.modified_files.clone();
+                    prose = c.text.clone();
+                }
+                // Span grew → summarize only the increment, seeded by cached summary + files.
+                Some(c) if c.covered_last_id < covered_last_id => {
+                    read = c.read_files.clone();
+                    modified = c.modified_files.clone();
+                    let inc_start = thread[start..end]
+                        .iter()
+                        .position(|m| m.id > c.covered_last_id)
+                        .map(|p| start + p)
+                        .unwrap_or(start);
+                    let slice = &thread[inc_start..end];
+                    compaction::collect_file_paths(slice, &mut read, &mut modified);
+                    let rendered = compaction::render_span(slice);
+                    let prev = c.text.clone();
+                    match self.summarize_span(&rendered, Some(&prev)) {
+                        Ok(t) => {
+                            let _ = event_tx.send(AgentEvent::Notice(
+                                "compacting context (summarizing earlier turns)…".into(),
+                            ));
+                            prose = t;
+                        }
+                        Err(_) => return tier1,
+                    }
+                }
+                // No cache, or id rewound (e.g. after /resume) → summarize the whole span.
+                _ => {
+                    let slice = &thread[start..end];
+                    compaction::collect_file_paths(slice, &mut read, &mut modified);
+                    let rendered = compaction::render_span(slice);
+                    match self.summarize_span(&rendered, None) {
+                        Ok(t) => {
+                            let _ = event_tx.send(AgentEvent::Notice(
+                                "compacting context (summarizing earlier turns)…".into(),
+                            ));
+                            prose = t;
+                        }
+                        Err(_) => return tier1,
+                    }
+                }
+            }
+
+            self.tier2 = Some(Tier2Summary {
+                covered_last_id,
+                text: prose.clone(),
+                read_files: read.clone(),
+                modified_files: modified.clone(),
+            });
+
+            let summary_text = format!("{}{}", prose, compaction::render_file_blocks(&read, &modified));
+            let mut messages = compaction::apply_tier2(&tier1, anchor_id, covered_last_id, &summary_text);
+
+            // Inject self-observation from previous turn as a System message
+            if let Some(ref obs) = self.self_observation {
+                if !obs.is_empty() {
+                    messages.push(Message::text(u64::MAX, Role::System, format!(
+                        "## Previous Turn Trace\n{}", obs
+                    )));
+                }
+            }
+
+            messages
         };
-        let anchor_id = thread[start - 1].id;
-        let covered_last_id = thread[end - 1].id;
 
-        let mut read = BTreeSet::new();
-        let mut modified = BTreeSet::new();
-        let prose: String;
-
-        match self.tier2.as_ref() {
-            // Span unchanged → full reuse, no LLM call, no Notice.
-            Some(c) if c.covered_last_id == covered_last_id => {
-                read = c.read_files.clone();
-                modified = c.modified_files.clone();
-                prose = c.text.clone();
-            }
-            // Span grew → summarize only the increment, seeded by cached summary + files.
-            Some(c) if c.covered_last_id < covered_last_id => {
-                read = c.read_files.clone();
-                modified = c.modified_files.clone();
-                let inc_start = thread[start..end]
-                    .iter()
-                    .position(|m| m.id > c.covered_last_id)
-                    .map(|p| start + p)
-                    .unwrap_or(start);
-                let slice = &thread[inc_start..end];
-                compaction::collect_file_paths(slice, &mut read, &mut modified);
-                let rendered = compaction::render_span(slice);
-                let prev = c.text.clone();
-                match self.summarize_span(&rendered, Some(&prev)) {
-                    Ok(t) => {
-                        let _ = event_tx.send(AgentEvent::Notice(
-                            "compacting context (summarizing earlier turns)…".into(),
-                        ));
-                        prose = t;
-                    }
-                    Err(_) => return tier1,
-                }
-            }
-            // No cache, or id rewound (e.g. after /resume) → summarize the whole span.
-            _ => {
-                let slice = &thread[start..end];
-                compaction::collect_file_paths(slice, &mut read, &mut modified);
-                let rendered = compaction::render_span(slice);
-                match self.summarize_span(&rendered, None) {
-                    Ok(t) => {
-                        let _ = event_tx.send(AgentEvent::Notice(
-                            "compacting context (summarizing earlier turns)…".into(),
-                        ));
-                        prose = t;
-                    }
-                    Err(_) => return tier1,
-                }
+        // Inject self-observation from previous turn as a System message
+        if let Some(ref obs) = self.self_observation {
+            if !obs.is_empty() {
+                messages.push(Message::text(u64::MAX, Role::System, format!(
+                    "## Previous Turn Trace\n{}", obs
+                )));
             }
         }
 
-        self.tier2 = Some(Tier2Summary {
-            covered_last_id,
-            text: prose.clone(),
-            read_files: read.clone(),
-            modified_files: modified.clone(),
-        });
-
-        let summary_text = format!("{}{}", prose, compaction::render_file_blocks(&read, &modified));
-        compaction::apply_tier2(&tier1, anchor_id, covered_last_id, &summary_text)
+        messages
     }
 
     /// One turn: query → if the reply calls tools, execute them (permission-gated),
@@ -844,6 +879,14 @@ impl AgentLoop {
         self.resolve_trust_if_pending(event_tx);
         self.append(Role::User, vec![MessageItem::Text { text }]);
 
+        // ReplayBuffer: turn start
+        if let Some(ref mut rb) = self.replay_buffer {
+            rb.push(ObservationEvent {
+                ts: crate::trace::types::now_ts(),
+                kind: ObservationKind::TurnStart,
+            });
+        }
+
         let mut hit_tool_cap = true; // cleared on every non-exhaustion exit
         // 自适应截断根治(迭代 2):有效 max_tokens 每 turn 从配置值起,命中 Length 翻倍上调。
         let mut effective_max_tokens = self.max_tokens;
@@ -895,6 +938,17 @@ impl AgentLoop {
                 tools: self.toolbox.wire_schemas(),
             };
 
+            // ReplayBuffer: LLM call
+            if let Some(ref mut rb) = self.replay_buffer {
+                rb.push(ObservationEvent {
+                    ts: crate::trace::types::now_ts(),
+                    kind: ObservationKind::LlmCall {
+                        model: self.model.clone(),
+                        prompt_tokens: 0,
+                    },
+                });
+            }
+
             let (reply, stop_reason, usage) = match self.complete_retrying(&req, event_tx) {
                 Ok(c) => (c.message, c.stop_reason, c.usage),
                 Err(e) => {
@@ -912,6 +966,19 @@ impl AgentLoop {
                     break;
                 }
             };
+
+            // ReplayBuffer: LLM response received
+            if let Some(ref mut rb) = self.replay_buffer {
+                let ct = usage.as_ref().map(|u| u.completion_tokens).unwrap_or(0);
+                rb.push(ObservationEvent {
+                    ts: crate::trace::types::now_ts(),
+                    kind: ObservationKind::LlmEnd {
+                        completion_tokens: ct,
+                        stop_reason: format!("{:?}", stop_reason),
+                        duration_ms: 0,
+                    },
+                });
+            }
 
             // Surface assistant text/reasoning, then record the assistant turn.
             let mut tool_calls = Vec::new();
@@ -1002,6 +1069,17 @@ impl AgentLoop {
             let mut results = Vec::new();
             let mut cancelled = false;
             for (call_id, name, args) in tool_calls {
+                // ReplayBuffer: tool call
+                if let Some(ref mut rb) = self.replay_buffer {
+                    let preview = preview_args(&args);
+                    rb.push(ObservationEvent {
+                        ts: crate::trace::types::now_ts(),
+                        kind: ObservationKind::ToolCall {
+                            name: name.clone(),
+                            input_preview: preview,
+                        },
+                    });
+                }
                 let result = self.dispatch_tool(&call_id, &name, args, event_tx);
                 match result {
                     ToolOutcome::Result(item) => results.push(item),
@@ -1049,6 +1127,11 @@ impl AgentLoop {
             let _ = event_tx.send(AgentEvent::Notice(format!(
                 "turn stopped at the {}-tool-iteration cap; the task may be incomplete — send another message to continue.", self.tool_cap
             )));
+        }
+
+        // Generate self-observation for next turn
+        if let Some(ref mut rb) = self.replay_buffer {
+            self.self_observation = Some(rb.to_self_observation());
         }
 
         // Trace: end turn span

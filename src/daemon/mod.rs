@@ -612,6 +612,7 @@ mod tests {
             daemon_auto_restart: false,
             max_sessions: 100,
             max_ledger_lines: 10000,
+            self_observe: false,
             probe_failure_threshold: 5,
             wg_auto_renew: true,
         };
