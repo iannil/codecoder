@@ -8,3 +8,6 @@ pub use trace_writer::TraceWriterObserver;
 
 pub mod replay_buffer;
 pub use replay_buffer::ReplayBufferObserver;
+
+pub mod sse_observer;
+pub use sse_observer::SseObserver;
