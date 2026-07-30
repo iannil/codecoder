@@ -5,3 +5,6 @@
 
 pub mod trace_writer;
 pub use trace_writer::TraceWriterObserver;
+
+pub mod replay_buffer;
+pub use replay_buffer::ReplayBufferObserver;
