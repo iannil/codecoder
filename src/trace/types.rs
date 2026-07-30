@@ -119,8 +119,8 @@ pub enum EventKind {
         parent_span_id: String,
     },
     ContextSnapshot {
-        before_bytes: u64,
-        after_bytes: u64,
+        before_tokens: u64,
+        after_tokens: u64,
         dropped_events: usize,
     },
     PermissionFull {

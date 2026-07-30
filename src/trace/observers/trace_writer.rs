@@ -267,6 +267,6 @@ mod tests {
         // Ensure the trace file still exists
         let path = dir.path().join(".ccd.trace.ndjson");
         std::thread::sleep(std::time::Duration::from_millis(50));
-        assert!(path.exists() || true, "no panic on send");
+        assert!(path.exists(), "trace file should exist after no-panic send");
     }
 }

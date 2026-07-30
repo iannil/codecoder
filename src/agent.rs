@@ -778,8 +778,8 @@ impl AgentLoop {
             self.observer_set.on_point(&crate::trace::types::PointEvent {
                 ts: crate::trace::types::now_ts(),
                 kind: crate::trace::types::EventKind::ContextSnapshot {
-                    before_bytes: before_size,
-                    after_bytes: after_size,
+                    before_tokens: before_size,
+                    after_tokens: after_size,
                     dropped_events: 1,
                 },
                 meta: serde_json::json!({}),
@@ -989,6 +989,20 @@ impl AgentLoop {
             }
 
             // Trace: full LLM input (CODECODER_TRACE_FULL)
+            let trace_full = std::env::var("CODECODER_TRACE_FULL")
+                .map(|v| v == "1" || v == "true")
+                .unwrap_or(false);
+            if trace_full {
+                let messages_json = serde_json::to_value(&req.messages).unwrap_or_default();
+                self.observer_set.on_point(&crate::trace::types::PointEvent {
+                    ts: crate::trace::types::now_ts(),
+                    kind: crate::trace::types::EventKind::LlmFullInput {
+                        model: self.model.clone(),
+                        messages: if let Some(arr) = messages_json.as_array() { arr.clone() } else { vec![messages_json] },
+                    },
+                    meta: serde_json::json!({}),
+                });
+            }
             let llm_span = self.observer_set.on_llm_call_start(&self.model, used as u32, "");
 
             let (reply, stop_reason, usage) = match self.complete_retrying(&req, event_tx) {
@@ -1012,6 +1026,25 @@ impl AgentLoop {
                     break;
                 }
             };
+
+            // Trace: full LLM output (CODECODER_TRACE_FULL)
+            if trace_full {
+                let reply_text: String = reply.items.iter()
+                    .filter_map(|item| match item {
+                        crate::message::MessageItem::Text { text } => Some(text.clone()),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                self.observer_set.on_point(&crate::trace::types::PointEvent {
+                    ts: crate::trace::types::now_ts(),
+                    kind: crate::trace::types::EventKind::LlmFullOutput {
+                        model: self.model.clone(),
+                        content: reply_text,
+                    },
+                    meta: serde_json::json!({}),
+                });
+            }
 
             // ReplayBuffer: LLM response received
             if let Some(ref mut rb) = self.replay_buffer {
@@ -1094,6 +1127,14 @@ impl AgentLoop {
                     let _ = event_tx.send(AgentEvent::Notice(format!(
                         "response truncated at max_tokens; raising to {effective_max_tokens} and retrying"
                     )));
+                    // Trace: Notice point event
+                    self.observer_set.on_point(&crate::trace::types::PointEvent {
+                        ts: crate::trace::types::now_ts(),
+                        kind: crate::trace::types::EventKind::Notice {
+                            text: format!("response truncated at max_tokens; raising to {effective_max_tokens} and retrying"),
+                        },
+                        meta: serde_json::json!({}),
+                    });
                     continue; // 带更大预算重试
                 }
                 // 已达封顶:tool_calls 情形已追加 is_error(交模型重试);空 tool_calls 情形收尾。
@@ -1167,6 +1208,14 @@ impl AgentLoop {
                 let _ = event_tx.send(AgentEvent::Notice(format!(
                     "no-op backstop: nudged to act after {n} exploration-only steps"
                 )));
+                // Trace: Notice point event
+                self.observer_set.on_point(&crate::trace::types::PointEvent {
+                    ts: crate::trace::types::now_ts(),
+                    kind: crate::trace::types::EventKind::Notice {
+                        text: format!("no-op backstop: nudged to act after {n} exploration-only steps"),
+                    },
+                    meta: serde_json::json!({}),
+                });
                 nudged_this_turn = true;
             }
             if cancelled {
@@ -1448,6 +1497,15 @@ impl AgentLoop {
             name: name.to_string(),
             preview: preview_args(&args),
         });
+        // Trace: ToolCallBegin point event
+        self.observer_set.on_point(&crate::trace::types::PointEvent {
+            ts: crate::trace::types::now_ts(),
+            kind: crate::trace::types::EventKind::ToolCallBegin {
+                name: name.to_string(),
+                args: args.clone(),
+            },
+            meta: serde_json::json!({}),
+        });
         let mut ctx = ToolCtx::with_cancel(&self.root, &self.cancel);
         let mut output = match self.toolbox.get(name).unwrap().run(args, &mut ctx) {
             Ok(o) => o,
@@ -1460,6 +1518,18 @@ impl AgentLoop {
             name: name.to_string(),
             is_error: output.is_error,
             output: output.content.clone(),
+        });
+        // Trace: ToolCallEnd point event
+        self.observer_set.on_point(&crate::trace::types::PointEvent {
+            ts: crate::trace::types::now_ts(),
+            kind: crate::trace::types::EventKind::ToolCallEnd {
+                name: name.to_string(),
+                is_error: output.is_error,
+                output_size: output.content.len(),
+                duration_ms: 0,
+                output_preview: output.content.chars().take(200).collect(),
+            },
+            meta: serde_json::json!({}),
         });
 
         ToolOutcome::Result(MessageItem::ToolResult {

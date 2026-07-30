@@ -149,11 +149,11 @@ fn translate_to_observation(kind: &EventKind) -> Option<ObservationKind> {
         }),
 
         EventKind::ContextSnapshot {
-            before_bytes,
-            after_bytes,
+            before_tokens,
+            after_tokens,
             ..
         } => {
-            let dropped = before_bytes.saturating_sub(*after_bytes);
+            let dropped = before_tokens.saturating_sub(*after_tokens);
             Some(ObservationKind::Compaction { dropped_bytes: dropped })
         }
 
@@ -571,8 +571,8 @@ mod tests {
         obs.on_point(&PointEvent {
             ts: 1.0,
             kind: EventKind::ContextSnapshot {
-                before_bytes: 10000,
-                after_bytes: 5000,
+                before_tokens: 10000,
+                after_tokens: 5000,
                 dropped_events: 10,
             },
             meta: serde_json::json!({}),
