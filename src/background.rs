@@ -178,8 +178,12 @@ pub(crate) fn run_background_cfg(
     // ── 显式任务分支:跑一 turn,不进验收门、不自动推进。──
     if !task.trim().is_empty() {
         out.events.push("task: explicit task".into());
-        let mut obs = crate::bg_observer::BgObserver::start_run(&root);
+        let mut external_obs = crate::bg_observer::BgObserver::start_run(&root);
         let mut agent = AgentLoop::new_background(provider, model, max_tokens, temperature, root);
+        // Register BgObserver in AgentLoop's ObserverSet for auto-emission.
+        agent.observer_set.register(Box::new(
+            crate::bg_observer::BgObserver::new(&agent.root)
+        ));
         // ADR 0026:wire SIGINT → cancel。
         if let Err(e) = agent.cancel_token().cancel_on_sigint() {
             eprintln!("ccd: SIGINT cancel not wired: {e}");
@@ -191,7 +195,7 @@ pub(crate) fn run_background_cfg(
             drop(tx);
             agent
         });
-        drain_bg_events(rx, &mut out, &mut obs, None);
+        drain_bg_events(rx, &mut out, None);
         match handle.join() {
             Ok(agent) => {
                 if let Some(e) = agent.last_error() {
@@ -200,7 +204,7 @@ pub(crate) fn run_background_cfg(
             }
             Err(panic) => {
                 let msg = format!("bg turn thread panicked: {}", panic_message(panic));
-                obs.emit("error", &msg);
+                external_obs.emit_external("error", &msg);
                 out.mission_state = crate::bg_gate::MissionState::Error(msg);
             }
         }
@@ -209,7 +213,7 @@ pub(crate) fn run_background_cfg(
 
     // ── Workgraph 分支:客观门驱动的 milestone 循环(spec 2026-07-22)。──
     // Reset the NDJSON event stream once at run start; per-milestone observers append.
-    let mut obs = crate::bg_observer::BgObserver::start_run(&root);
+    let mut external_obs = crate::bg_observer::BgObserver::start_run(&root);
     // #3 data-loss guard: a present-but-unreadable workgraph.json must never be
     // silently treated as empty and overwritten — back it up and abort.
     let graph = match crate::workgraph::WorkGraph::read_checked(&root) {
@@ -219,25 +223,25 @@ pub(crate) fn run_background_cfg(
             let backup = root.join(format!("workgraph.json.corrupt.{}", std::process::id()));
             let _ = std::fs::rename(&bad, &backup);
             let msg = format!("workgraph.json unreadable ({e}); backed up to {}", backup.display());
-            obs.emit("error", &msg);
+            external_obs.emit_external("error", &msg);
             out.mission_state = crate::bg_gate::MissionState::Error(msg);
             return Ok(out);
         }
     };
     // #1 empty graph: try to auto-seed from AGENTS.md; fall back to EmptyGraph on failure.
     if graph.nodes.is_empty() {
-        obs.emit("seed", "empty workgraph — attempting to seed from AGENTS.md...");
+        external_obs.emit_external("seed", "empty workgraph — attempting to seed from AGENTS.md...");
         let seeded = seed_workgraph_from_mission(
             provider.clone(), model.clone(), max_tokens, temperature, root.clone(), tool_cap,
         );
         if seeded {
-            obs.emit("seed", "workgraph seeded successfully — entering milestone loop");
+            external_obs.emit_external("seed", "workgraph seeded successfully — entering milestone loop");
             // Reset out state (drain from seed turn is irrelevant) and fall through
             // to the milestone loop below.
             out = BgOutcome::default();
             // Continue past this block into the loop
         } else {
-            obs.emit("empty", "seed failed — empty workgraph");
+            external_obs.emit_external("empty", "seed failed — empty workgraph");
             out.mission_state = crate::bg_gate::MissionState::EmptyGraph;
             return Ok(out);
         }
@@ -295,7 +299,7 @@ pub(crate) fn run_background_cfg(
                                 "all {} milestones needs_fix ({} fix_attempts exhausted) — exiting",
                                 g.nodes.len(), max_fix_attempts,
                             ));
-                            obs.emit("stuck", &format!(
+                            external_obs.emit_external("stuck", &format!(
                                 "all {} milestones needs_fix, at least one exhausted — giving up",
                                 g.nodes.len(),
                             ));
@@ -368,7 +372,7 @@ pub(crate) fn run_background_cfg(
             crate::bg_gate::NextAction::Advance(_) => continue,
             // 熔断降级:记录日志后继续推进不依赖当前里程碑的就绪项。
             crate::bg_gate::NextAction::DegradeAndAdvance(id) => {
-                obs.emit("degrade", &format!("#{id} continuing after consecutive failures"));
+                external_obs.emit_external("degrade", &format!("#{id} continuing after consecutive failures"));
                 consecutive_fail = 0; // 降级后重置连续失败计数
                 continue;
             }
@@ -378,9 +382,8 @@ pub(crate) fn run_background_cfg(
             }
         }
     }
-    // observability: final mission state (fresh observer — this is the last write).
-    crate::bg_observer::BgObserver::new(&root)
-        .emit("mission_state", &format!("{:?}", out.mission_state));
+    // observability: final mission state (external_obs — this is the last write).
+    external_obs.emit_external("mission_state", &format!("{:?}", out.mission_state));
     Ok(out)
 }
 
@@ -395,12 +398,12 @@ fn panic_message(payload: Box<dyn std::any::Any + Send>) -> String {
         .unwrap_or_else(|| "unknown panic".to_string())
 }
 
-/// Drain events from a background turn's rx into the BgOutcome accumulator,
-/// teeing each to the observer for live stderr + NDJSON output.
+/// Drain events from a background turn's rx into the BgOutcome accumulator.
+/// BgObserver events are now handled by AgentLoop's ObserverSet, so this
+/// function only accumulates BgOutcome state (no manual obs.emit calls).
 fn drain_bg_events(
     rx: std::sync::mpsc::Receiver<AgentEvent>,
     out: &mut BgOutcome,
-    obs: &mut crate::bg_observer::BgObserver,
     mut trace: Option<&mut crate::trace::TraceEmitter>,
 ) {
     for ev in rx.into_iter() {
@@ -411,30 +414,19 @@ fn drain_bg_events(
         match ev {
             AgentEvent::StreamDelta(s) => out.final_text.push_str(&s),
             AgentEvent::ToolStarted { name, .. } => {
-                obs.emit("tool_started", &name);
                 out.tool_calls.push(name.clone());
                 out.events.push(format!("tool: {name}"));
             }
             AgentEvent::ToolFinished { name, is_error, output } => {
                 if is_error {
-                    obs.emit("tool_error", &format!("{name}: {output}"));
                     out.denied.push(format!("{name}: {output}"));
-                } else {
-                    obs.emit("tool_finished", &name);
                 }
             }
             AgentEvent::Notice(m) => {
-                obs.emit("notice", &m);
                 out.events.push(format!("notice: {m}"));
             }
             AgentEvent::Context { pct } => out.events.push(format!("context: {pct}%")),
             AgentEvent::SubAgentMilestone(m) => out.events.push(format!("sub-agent: {m}")),
-            AgentEvent::TokenUsage { prompt_tokens, completion_tokens } => {
-                obs.emit_with_data("llm_call", "tokens", Some(serde_json::json!({
-                    "prompt_tokens": prompt_tokens,
-                    "completion_tokens": completion_tokens,
-                })));
-            }
             _ => {}
         }
     }
@@ -580,6 +572,10 @@ fn run_milestone_and_gate(
     let review_provider = provider.clone();
     let review_model = model.clone();
     let mut agent = AgentLoop::new_background(provider, model, max_tokens, temperature, root.clone());
+    // Register BgObserver in AgentLoop's ObserverSet for auto-emission.
+    agent.observer_set.register(Box::new(
+        crate::bg_observer::BgObserver::new(&agent.root)
+    ));
     if let Err(e) = agent.cancel_token().cancel_on_sigint() {
         eprintln!("ccd: SIGINT cancel not wired: {e}");
     }
@@ -588,20 +584,20 @@ fn run_milestone_and_gate(
     let cancel = agent.cancel_token();
     let mut out = BgOutcome::default();
     out.events.push(format!("task: workgraph milestone #{} ({})", milestone_id, title));
-    let mut obs = crate::bg_observer::BgObserver::new(&root);
-    obs.emit("milestone_start", &format!("#{milestone_id} {title}"));
+    let mut external_obs = crate::bg_observer::BgObserver::new(&root);
+    external_obs.emit_external("milestone_start", &format!("#{milestone_id} {title}"));
     let (tx, rx) = channel::<AgentEvent>();
     let handle = std::thread::spawn(move || {
         agent.run_one_turn(task_text, &tx);
         drop(tx);
         agent // hand the agent back so we can read last_error()
     });
-    drain_bg_events(rx, &mut out, &mut obs, None);
+    drain_bg_events(rx, &mut out, None);
     let agent = match handle.join() {
         Ok(agent) => agent,
         Err(panic) => {
             let msg = format!("bg turn thread panicked: {}", panic_message(panic));
-            obs.emit("error", &msg);
+            external_obs.emit_external("error", &msg);
             return Err(anyhow::anyhow!(msg));
         }
     };
@@ -654,7 +650,7 @@ fn run_milestone_and_gate(
         crate::bg_gate::GateVerdict::Pass => "gate pass".to_string(),
         crate::bg_gate::GateVerdict::NeedsFix(r) | crate::bg_gate::GateVerdict::Inconclusive(r) => r.clone(),
     };
-    obs.emit("gate", &format!("#{milestone_id} {vs_str}: {gate_reason}"));
+    external_obs.emit_external("gate", &format!("#{milestone_id} {vs_str}: {gate_reason}"));
     {
         let reason_for_persist = gate_reason.clone();
         let _ = WorkGraph::with_lock(&root, |g| {

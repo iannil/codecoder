@@ -200,7 +200,7 @@ pub struct AgentLoop {
     /// Persisted project-scope grants (`codecoder.json`, ADR 0005), loaded at
     /// startup and consulted alongside the in-memory session allowlist.
     project_allowlist: ProjectAllowlist,
-    root: PathBuf,
+    pub(crate) root: PathBuf,
     session_path: PathBuf,
     /// AGENTS.md identity + the skills/capabilities catalog (ADR 0020), injected
     /// as a System message on every request. Rebuilt on `/reload`.
@@ -238,7 +238,7 @@ pub struct AgentLoop {
     /// daemon 共享目录（ADR 0020）。`None` 时 build_system_prompt 自扫（TUI/sub-agent）。
     shared_registry: Option<Arc<std::sync::RwLock<Registry>>>,
     /// Observer set for trace observability (spec 2026-07-29). No-op when empty.
-    observer_set: crate::trace::observer_set::ObserverSet,
+    pub(crate) observer_set: crate::trace::observer_set::ObserverSet,
     /// Replay buffer for LLM self-observation (CODECODER_SELF_OBSERVE).
     replay_buffer: Option<crate::trace::replay_buffer::ReplayBuffer>,
     /// Cached self-observation text to inject into next turn's system prompt.
