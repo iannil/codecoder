@@ -20,6 +20,7 @@ pub mod provider_health;
 pub mod registry;
 pub mod retry;
 pub mod review;
+pub mod sandbox;
 pub mod session;
 pub mod supervisor_state;
 pub mod tokenizer;
