@@ -2,8 +2,17 @@
 //! Verifies that when CODECODER_TRACE=1, a trace file is created with
 //! the expected NDJSON format during an actual agent turn.
 
+/// Serialize env var operations across tests (parallel test execution
+/// would otherwise let one test's env var removal interfere with another).
+static ENV_LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+
+fn env_lock() -> &'static std::sync::Mutex<()> {
+    ENV_LOCK.get_or_init(|| std::sync::Mutex::new(()))
+}
+
 #[test]
 fn trace_file_created_when_enabled() {
+    let _g = env_lock().lock().unwrap_or_else(|e| e.into_inner());
     unsafe { std::env::set_var("CODECODER_TRACE", "1"); }
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path().to_path_buf();
@@ -19,6 +28,9 @@ fn trace_file_created_when_enabled() {
 
     let (event_tx, _event_rx) = std::sync::mpsc::channel();
     agent.run_one_turn("hello".to_string(), &event_tx);
+
+    // Give the background TraceWriter thread time to flush
+    std::thread::sleep(std::time::Duration::from_millis(100));
 
     let trace_path = root.join(".ccd.trace.ndjson");
     assert!(trace_path.exists(), "trace file should exist: {:?}", trace_path);
@@ -40,6 +52,7 @@ fn trace_file_created_when_enabled() {
 
 #[test]
 fn trace_file_not_created_when_disabled() {
+    let _g = env_lock().lock().unwrap_or_else(|e| e.into_inner());
     unsafe { std::env::remove_var("CODECODER_TRACE"); }
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path().to_path_buf();
@@ -62,6 +75,7 @@ fn trace_file_not_created_when_disabled() {
 
 #[test]
 fn trace_file_contains_valid_json_lines() {
+    let _g = env_lock().lock().unwrap_or_else(|e| e.into_inner());
     unsafe { std::env::set_var("CODECODER_TRACE", "1"); }
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path().to_path_buf();
@@ -77,6 +91,9 @@ fn trace_file_contains_valid_json_lines() {
 
     let (event_tx, _event_rx) = std::sync::mpsc::channel();
     agent.run_one_turn("hello".to_string(), &event_tx);
+
+    // Give the background TraceWriter thread time to flush
+    std::thread::sleep(std::time::Duration::from_millis(100));
 
     let body = std::fs::read_to_string(root.join(".ccd.trace.ndjson")).unwrap();
     for (i, line) in body.lines().filter(|l| !l.trim().is_empty()).enumerate() {

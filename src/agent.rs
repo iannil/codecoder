@@ -236,8 +236,8 @@ pub struct AgentLoop {
     last_error: Option<String>,
     /// daemon 共享目录（ADR 0020）。`None` 时 build_system_prompt 自扫（TUI/sub-agent）。
     shared_registry: Option<Arc<std::sync::RwLock<Registry>>>,
-    /// Trace observability emitter (spec 2026-07-29). None = disabled.
-    trace_emitter: Option<crate::trace::TraceEmitter>,
+    /// Observer set for trace observability (spec 2026-07-29). No-op when empty.
+    observer_set: crate::trace::observer_set::ObserverSet,
     /// Replay buffer for LLM self-observation (CODECODER_SELF_OBSERVE).
     replay_buffer: Option<crate::trace::replay_buffer::ReplayBuffer>,
     /// Cached self-observation text to inject into next turn's system prompt.
@@ -371,7 +371,6 @@ impl AgentLoop {
         } else { String::new() };
         let project_allowlist = if trusted { ProjectAllowlist::load(&root) } else { ProjectAllowlist::default() };
 
-        // Initialize trace_emitter from the root path (must happen after root is moved into Self).
         let mut agent = Self {
             provider,
             session: Session::new(model.clone()),
@@ -397,7 +396,7 @@ impl AgentLoop {
             tier2: None,
             last_error: None,
             shared_registry,
-            trace_emitter: None, // filled below
+            observer_set: crate::trace::observer_set::ObserverSet::new(), // filled below
             replay_buffer: if crate::config::Config::from_env().self_observe {
                 Some(crate::trace::replay_buffer::ReplayBuffer::new())
             } else {
@@ -405,7 +404,20 @@ impl AgentLoop {
             },
             self_observation: None,
         };
-        agent.trace_emitter = crate::trace::init_trace(&agent.root);
+        // Build observer_set: register TraceWriterObserver when CODECODER_TRACE is enabled.
+        // Must happen after root is moved into Self (agent.root is available).
+        let trace_enabled = std::env::var("CODECODER_TRACE")
+            .map(|v| v == "1" || v == "true")
+            .unwrap_or(false);
+        if trace_enabled {
+            let tx = crate::trace::writer::TraceWriter::spawn(&agent.root);
+            let trace_full = std::env::var("CODECODER_TRACE_FULL")
+                .map(|v| v == "1" || v == "true")
+                .unwrap_or(false);
+            agent.observer_set.register(Box::new(
+                crate::trace::observers::TraceWriterObserver::new(tx, trace_full)
+            ));
+        }
         agent
     }
 
@@ -885,7 +897,7 @@ impl AgentLoop {
         let mut consecutive_explore_iters = 0usize;
         let mut nudged_this_turn = false;
         // Trace: turn span
-        let turn_span = self.trace_emitter.as_mut().map(|t| t.on_turn_start());
+        let turn_span = self.observer_set.on_turn_start();
         for _ in 0..self.tool_cap {
             if self.cancel.is_cancelled() {
                 hit_tool_cap = false;
@@ -941,18 +953,14 @@ impl AgentLoop {
             }
 
             // Trace: full LLM input (CODECODER_TRACE_FULL)
-            let llm_span = self.trace_emitter.as_mut().map(|t| {
-                let messages_json = serde_json::to_value(&req.messages).unwrap_or_default();
-                t.emit_llm_full_input(&self.model, vec![messages_json]);
-                t.on_llm_call_start(&self.model, used as u32, "")
-            });
+            let llm_span = self.observer_set.on_llm_call_start(&self.model, used as u32, "");
 
             let (reply, stop_reason, usage) = match self.complete_retrying(&req, event_tx) {
                 Ok(c) => (c.message, c.stop_reason, c.usage),
                 Err(e) => {
                     // End LLM span on error
-                    if let (Some(ref mut t), Some(ref span_id)) = (self.trace_emitter.as_mut(), llm_span) {
-                        t.span_end(span_id, serde_json::json!({"is_error": true, "error": e.to_string()}));
+                    if let Some(ref span_id) = llm_span {
+                        self.observer_set.on_llm_call_end(span_id, 0, "error", 0);
                     }
                     // A context overflow (ADR 0027 #2) won't recover on retry; give
                     // the user an actionable hint instead of a bare error.
@@ -983,21 +991,11 @@ impl AgentLoop {
             }
 
             // Trace: full LLM output (CODECODER_TRACE_FULL)
-            if let Some(ref mut t) = self.trace_emitter {
-                if let Some(ref span_id) = llm_span {
-                    let reply_preview: String = reply.items.iter()
-                        .filter_map(|item| match item {
-                            MessageItem::Text { text } => Some(text.clone()),
-                            _ => None,
-                        })
-                        .collect::<Vec<_>>()
-                        .join(" ");
-                    let ct = usage.as_ref().map(|u| u.completion_tokens).unwrap_or(0);
-                    let dr = 0u64; // duration not tracked here
-                    let stop_str = format!("{:?}", stop_reason);
-                    t.emit_llm_full_output(&self.model, &reply_preview);
-                    t.on_llm_call_end(span_id, ct, &stop_str, dr);
-                }
+            if let Some(ref span_id) = llm_span {
+                let ct = usage.as_ref().map(|u| u.completion_tokens).unwrap_or(0);
+                let dr = 0u64; // duration not tracked here
+                let stop_str = format!("{:?}", stop_reason);
+                self.observer_set.on_llm_call_end(span_id, ct, &stop_str, dr);
             }
 
             // Surface assistant text/reasoning, then record the assistant turn.
@@ -1155,8 +1153,13 @@ impl AgentLoop {
         }
 
         // Trace: end turn span
-        if let (Some(ref mut t), Some(span_id)) = (self.trace_emitter.as_mut(), turn_span) {
-            t.span_end(&span_id, serde_json::json!({}));
+        if let Some(span_id) = turn_span {
+            use crate::trace::types::SpanEnd;
+            self.observer_set.on_span_end(&SpanEnd {
+                span_id,
+                ts: crate::trace::types::now_ts(),
+                meta: serde_json::json!({}),
+            });
         }
 
         let _ = event_tx.send(AgentEvent::TurnComplete);
