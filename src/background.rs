@@ -247,6 +247,19 @@ pub(crate) fn run_background_cfg(
         }
     }
     out.mission_state = crate::bg_gate::MissionState::Running;
+    // #2 cross-run reset: any `in_progress` milestone left from a previous run
+    // must revert to `pending` so the loop can advance it. An `in_progress` node
+    // that was never completed is stale — no agent is actively working on it.
+    {
+        let _ = crate::workgraph::WorkGraph::with_lock(&root, |g| {
+            for n in &mut g.nodes {
+                if n.status == crate::workgraph::NodeStatus::InProgress {
+                    n.status = crate::workgraph::NodeStatus::Pending;
+                }
+            }
+            Ok(())
+        });
+    }
     let mut consecutive_fail = 0usize;
     let mut advanced = 0usize;
     loop {

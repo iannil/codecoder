@@ -68,15 +68,26 @@ impl RunCommand {
     /// Permission key(ADR 0018)。简单命令按命令类(`run_command:git`);
     /// **复合命令按整条命令串**(`run_command:cd X && rm`),使其不可经良性
     /// 前缀预授权(ADR 0036,P5 加固)。
-    /// headless + CODECODER_DEFAULT_TRUST=always 时放宽:复合命令也按首 token
-    /// keying,以便 allowlist 前缀匹配(P0-4 修复)。
+    /// headless 且运行时已 trusted 时放宽:复合命令也按首 token keying,
+    /// 以便 allowlist 前缀匹配。trusted 含三种情况:
+    ///   1. CODECODER_DEFAULT_TRUST=always
+    ///   2. headless + codecoder.json auto-trusted
+    ///   3. ~/.codecoder/trust.json 显式记录
+    /// 检查运行时 trust 文件(agent.rs 写入的 `.ccd.trusted` sentinel)而非
+    /// 仅环境变量,因为 headless 自动 trust 走 codecoder.json 检测而非 env。
     fn key_for(cmd: &str) -> String {
         let head = cmd.split_whitespace().next().unwrap_or("");
-        if Self::is_compound(cmd) && !matches!(crate::trust::default_trust(), crate::trust::TrustDecision::Trusted) {
+        if Self::is_compound(cmd) && !Self::is_headless_trusted() {
             format!("run_command:{cmd}")
         } else {
             format!("run_command:{head}")
         }
+    }
+
+    /// Check if running in headless trusted mode by looking at the atomic flag
+    /// that AgentLoop sets at startup when `trust == Trusted`.
+    fn is_headless_trusted() -> bool {
+        crate::trust::is_headless_trusted()
     }
 }
 
@@ -1023,7 +1034,9 @@ mod tests {
     #[test]
     fn run_command_compound_key_uses_full_cmd_when_untrusted() {
         // untrusted (default): compound commands use full command as key
-        unsafe { std::env::remove_var("CODECODER_DEFAULT_TRUST"); }
+        // AtomicBool is false by default → untrusted behavior.
+        crate::trust::set_headless_trusted();
+        crate::trust::clear_headless_trusted();
         match RunCommand.permission(&json!({ "cmd": "npm run build 2>&1" }), std::path::Path::new(".")) {
             Permission::Ask { key } => assert_eq!(key, "run_command:npm run build 2>&1"),
             _ => panic!("expected Ask"),
@@ -1032,8 +1045,9 @@ mod tests {
 
     #[test]
     fn run_command_compound_key_uses_head_token_when_trusted() {
-        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        unsafe { std::env::set_var("CODECODER_DEFAULT_TRUST", "always"); }
+        // The trusted flag is now an AtomicBool set by AgentLoop at runtime,
+        // not driven by CODECODER_DEFAULT_TRUST. Set the flag directly.
+        crate::trust::set_headless_trusted();
         match RunCommand.permission(&json!({ "cmd": "npm run build 2>&1" }), std::path::Path::new(".")) {
             Permission::Ask { key } => assert_eq!(key, "run_command:npm"),
             _ => panic!("expected Ask"),
@@ -1042,7 +1056,6 @@ mod tests {
             Permission::Ask { key } => assert_eq!(key, "run_command:find"),
             _ => panic!("expected Ask"),
         }
-        unsafe { std::env::remove_var("CODECODER_DEFAULT_TRUST"); }
     }
 
     #[test]
@@ -1105,10 +1118,9 @@ mod tests {
 
     #[test]
     fn run_command_compound_keys_by_full_string() {
-        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        // 复合命令(含 shell 运算符)且 CODECODER_DEFAULT_TRUST 未设→ 整条命令串 key。
+        // 复合命令(含 shell 运算符)且非 trusted → 整条命令串 key。
         // 仅在 trusted 时改用首 token keying(P0-4)。
-        unsafe { std::env::remove_var("CODECODER_DEFAULT_TRUST"); }
+        crate::trust::clear_headless_trusted();
         let cases: &[(&str, &str)] = &[
             ("cd X && cargo test", "run_command:cd X && cargo test"),
             ("ls | grep foo", "run_command:ls | grep foo"),
@@ -1123,7 +1135,6 @@ mod tests {
                 _ => panic!("expected Ask for {cmd:?}"),
             }
         }
-        drop(_g);
     }
 
     #[test]

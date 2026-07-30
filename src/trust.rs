@@ -182,6 +182,27 @@ fn default_trust_from(v: Option<&str>) -> TrustDecision {
     }
 }
 
+/// 原子标志位:headless 模式且运行时 trust == Trusted 时由 AgentLoop 构造时设置。
+/// RunCommand::key_for 读取此标志决定复合命令是否按首 token keying(放宽)。
+use std::sync::atomic::{AtomicBool, Ordering};
+static HEADLESS_TRUSTED: AtomicBool = AtomicBool::new(false);
+
+/// 标记当前 run 为 headless + trusted。由 AgentLoop 构造时调用。
+pub fn set_headless_trusted() {
+    HEADLESS_TRUSTED.store(true, Ordering::Relaxed);
+}
+
+/// 清除 trusted 标记（测试用）。
+pub fn clear_headless_trusted() {
+    HEADLESS_TRUSTED.store(false, Ordering::Relaxed);
+}
+
+/// 查询是否 headless + trusted。RunCommand::key_for 读取此值决定复合命令的
+/// permission key 策略:true → 按首 token keying(允许前缀匹配);false → 整条命令串。
+pub fn is_headless_trusted() -> bool {
+    HEADLESS_TRUSTED.load(Ordering::Relaxed)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -132,11 +132,30 @@ impl ProjectAllowlist {
     /// Read the project allowlist from `<root>/codecoder.json`; empty (never an
     /// error) when the file is absent or unreadable — a missing config simply
     /// means no persisted grants yet.
+    ///
+    /// 支持两种格式：
+    /// - 标准数组格式：`{"allowlist": ["write_file", "run_command:npm"]}`
+    /// - 兼容 map 格式：`{"allowlist": {"write_file": "AlwaysThisProject", "run_command:npm": "AlwaysThisProject"}}`
     pub fn load(root: &Path) -> Self {
-        std::fs::read_to_string(Self::path(root))
-            .ok()
-            .and_then(|s| serde_json::from_str(&s).ok())
-            .unwrap_or_default()
+        let content = match std::fs::read_to_string(Self::path(root)) {
+            Ok(c) => c,
+            Err(_) => return Self::default(),
+        };
+        // 标准格式: {"allowlist": ["write_file", "run_command:npm"]}
+        if let Ok(wl) = serde_json::from_str::<ProjectAllowlist>(&content) {
+            return wl;
+        }
+        // 兼容格式: {"allowlist": {"write_file": "AlwaysThisProject", "run_command:npm": "AlwaysThisProject"}}
+        // 顶层是 {"allowlist": {...}} 的 map，其中 allowlist 的值是 key→scope 的 map
+        if let Ok(top) = serde_json::from_str::<std::collections::BTreeMap<String, serde_json::Value>>(&content) {
+            if let Some(entries) = top.get("allowlist").and_then(|v| v.as_object()) {
+                let keys: BTreeSet<AllowlistEntry> = entries.keys()
+                    .map(|k| AllowlistEntry::Plain(k.clone()))
+                    .collect();
+                return ProjectAllowlist { allowlist: keys };
+            }
+        }
+        Self::default()
     }
 
     /// Check if a permission key is allowed. For Scoped entries, also checks
@@ -324,5 +343,52 @@ fn wildcard_entry_deserializes() {
         wl.allowlist.insert(AllowlistEntry::Plain("write_file".into()));
         assert!(wl.allows("write_file", &serde_json::json!({}), Path::new(".")));
         assert!(!wl.allows("edit_file", &serde_json::json!({}), Path::new(".")));
+    }
+
+    #[test]
+    fn map_format_loads_correctly() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        // map 格式: {"allowlist": {"write_file": "AlwaysThisProject", "run_command:npm": "AlwaysThisProject"}}
+        let map_json = r#"{"allowlist": {"write_file": "AlwaysThisProject", "run_command:npm": "AlwaysThisProject"}}"#;
+        std::fs::write(root.join("codecoder.json"), map_json).unwrap();
+
+        let wl = ProjectAllowlist::load(root);
+        assert!(wl.allows("write_file", &serde_json::json!({}), root));
+        assert!(wl.allows("run_command:npm", &serde_json::json!({}), root));
+        assert!(!wl.allows("edit_file", &serde_json::json!({}), root));
+        assert!(!wl.allows("run_command:git", &serde_json::json!({}), root));
+    }
+
+    #[test]
+    fn array_format_still_works() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        // 数组格式: {"allowlist": ["write_file", "run_command:npm"]}
+        let array_json = r#"{"allowlist": ["write_file", "run_command:npm"]}"#;
+        std::fs::write(root.join("codecoder.json"), array_json).unwrap();
+
+        let wl = ProjectAllowlist::load(root);
+        assert!(wl.allows("write_file", &serde_json::json!({}), root));
+        assert!(wl.allows("run_command:npm", &serde_json::json!({}), root));
+        assert!(!wl.allows("edit_file", &serde_json::json!({}), root));
+    }
+
+    #[test]
+    fn empty_json_falls_back_to_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        // 完全不相关格式 → 空 allowlist
+        std::fs::write(root.join("codecoder.json"), "{}").unwrap();
+        let wl = ProjectAllowlist::load(root);
+        assert!(!wl.allows("write_file", &serde_json::json!({}), root));
+    }
+
+    #[test]
+    fn missing_file_returns_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let wl = ProjectAllowlist::load(root);
+        assert!(!wl.allows("anything", &serde_json::json!({}), root));
     }
 }

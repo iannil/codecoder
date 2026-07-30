@@ -346,6 +346,11 @@ impl AgentLoop {
         // The disk "self" loads only when trusted; otherwise the agent runs on its
         // compiled-in base identity + native tools, with an empty allowlist.
         let trusted = trust == TrustState::Trusted;
+        // Set the atomic flag for headless+trusted mode so RunCommand::key_for
+        // can relax compound-command permission keying (ADR 0036 relaxation).
+        if headless && trusted {
+            crate::trust::set_headless_trusted();
+        }
         if crate::trust::should_warn_untrusted_allowlist(&root, trusted, headless) {
             use std::sync::Once;
             static WARN_ONCE: Once = Once::new();
