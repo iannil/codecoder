@@ -40,9 +40,13 @@ impl TraceWriter {
                 self.initial_metadata_written = true;
                 let header = serde_json::json!({
                     "type": "meta",
-                    "version": 1,
+                    "version": 2,
                     "ts": crate::trace::types::now_ts(),
                     "pid": std::process::id(),
+                    "session_id": "unknown",
+                    "agent_type": "main",
+                    "harness": "codecoder",
+                    "model": "unknown",
                 });
                 self.write_line(&header.to_string());
             }
@@ -116,7 +120,11 @@ mod tests {
         assert!(lines.len() >= 2, "meta + at least 1 event: {}", body);
         let meta: serde_json::Value = serde_json::from_str(lines[0]).unwrap();
         assert_eq!(meta["type"], "meta");
-        assert_eq!(meta["version"], 1);
+        assert_eq!(meta["version"], 2);
+        assert_eq!(meta["session_id"], "unknown");
+        assert_eq!(meta["agent_type"], "main");
+        assert_eq!(meta["harness"], "codecoder");
+        assert_eq!(meta["model"], "unknown");
         let ev: serde_json::Value = serde_json::from_str(lines[1]).unwrap();
         assert_eq!(ev["type"], "s");
         assert_eq!(ev["span_id"], "sp_001");

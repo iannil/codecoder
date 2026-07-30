@@ -41,7 +41,7 @@ fn trace_file_created_when_enabled() {
 
     let meta: serde_json::Value = serde_json::from_str(lines[0]).unwrap();
     assert_eq!(meta["type"], "meta");
-    assert_eq!(meta["version"], 1);
+    assert_eq!(meta["version"], 2);
 
     // Verify we have a valid event (first event is now a point event due to UserInput emission)
     let ev: serde_json::Value = serde_json::from_str(lines[1]).unwrap();
