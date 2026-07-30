@@ -314,6 +314,9 @@ fn parse_point_event(v: &serde_json::Value) -> PointEvent {
                     _ => TouchType::Hit,
                 },
                 lines: None,
+                file_size: None,
+                content_hash: None,
+                language: None,
             }
         }
         Some("permission_check") => {

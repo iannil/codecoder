@@ -80,7 +80,7 @@ pub enum SubAgentStatus {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum EventKind {
-    FileTouch { path: String, touch: TouchType, lines: Option<[u32; 2]> },
+    FileTouch { path: String, touch: TouchType, lines: Option<[u32; 2]>, file_size: Option<u64>, content_hash: Option<String>, language: Option<String> },
     PermissionCheck { key: String, decision: PermissionDecision },
     UserMessage { source: MessageSource, summary: String },
     Notice { text: String },

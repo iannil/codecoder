@@ -269,6 +269,9 @@ mod tests {
                 path: "src/main.rs".into(),
                 touch: TouchType::Read,
                 lines: None,
+                file_size: None,
+                content_hash: None,
+                language: None,
             },
             meta: serde_json::json!({}),
         });
@@ -291,6 +294,9 @@ mod tests {
                 path: "src/lib.rs".into(),
                 touch: TouchType::Edit,
                 lines: None,
+                file_size: None,
+                content_hash: None,
+                language: None,
             },
             meta: serde_json::json!({}),
         });
@@ -545,6 +551,9 @@ mod tests {
                 path: "x".into(),
                 touch: TouchType::Read,
                 lines: None,
+                file_size: None,
+                content_hash: None,
+                language: None,
             },
             meta: serde_json::json!({}),
         });
