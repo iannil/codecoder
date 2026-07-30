@@ -43,6 +43,9 @@ pub struct ObservationStats {
     pub file_edits: usize,
     pub total_tokens: u32,
     pub duration_ms: u64,
+    pub retries: usize,
+    pub sub_agents: usize,
+    pub permission_denials: usize,
 }
 
 pub struct ReplayBuffer {
@@ -119,6 +122,19 @@ impl ReplayBuffer {
                 }
                 ObservationKind::LlmEnd { duration_ms, .. } => {
                     stats.duration_ms = stats.duration_ms.max(*duration_ms);
+                }
+                ObservationKind::Error { message } => {
+                    if message.starts_with("retry") {
+                        stats.retries += 1;
+                    }
+                }
+                ObservationKind::SubAgent { .. } => {
+                    stats.sub_agents += 1;
+                }
+                ObservationKind::Permission { granted, .. } => {
+                    if !granted {
+                        stats.permission_denials += 1;
+                    }
                 }
                 _ => {}
             }
@@ -244,6 +260,40 @@ impl ReplayBuffer {
             }
         }
 
+        // Retries
+        let mut retries: Vec<String> = Vec::new();
+        for event in &self.buffer {
+            if let ObservationKind::Error { message } = &event.kind {
+                if message.starts_with("retry") {
+                    retries.push(format!("  {}", message));
+                }
+            }
+        }
+        if !retries.is_empty() {
+            out.push_str("\n### Retries\n");
+            for r in retries {
+                out.push_str(&r);
+                out.push_str("\n");
+            }
+        }
+
+        // Milestones
+        let mut milestones: Vec<String> = Vec::new();
+        for event in &self.buffer {
+            if let ObservationKind::Notice { text } = &event.kind {
+                if text.starts_with("milestone") {
+                    milestones.push(format!("  {}", text));
+                }
+            }
+        }
+        if !milestones.is_empty() {
+            out.push_str("\n### Milestones\n");
+            for m in milestones {
+                out.push_str(&m);
+                out.push_str("\n");
+            }
+        }
+
         // Permission checks
         let mut perms: Vec<String> = Vec::new();
         for event in &self.buffer {
@@ -278,6 +328,17 @@ impl ReplayBuffer {
                 model, prompt_tokens, completion_tokens, prompt_tokens + completion_tokens,
             ));
         }
+
+        // Summary Stats
+        out.push_str("\n### Summary Stats\n");
+        out.push_str(&format!("  LLM calls: {}\n", stats.llm_calls));
+        out.push_str(&format!("  Tool calls: {}\n", stats.tool_calls));
+        out.push_str(&format!("  Files read: {}\n", stats.file_reads));
+        out.push_str(&format!("  Files edited: {}\n", stats.file_edits));
+        out.push_str(&format!("  Errors: {}\n", stats.errors));
+        out.push_str(&format!("  Retries: {}\n", stats.retries));
+        out.push_str(&format!("  Sub-agents: {}\n", stats.sub_agents));
+        out.push_str(&format!("  Permission denials: {}\n", stats.permission_denials));
 
         out
     }
