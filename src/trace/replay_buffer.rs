@@ -3,6 +3,8 @@
 
 use std::collections::VecDeque;
 
+use serde::Serialize;
+
 /// An observation event stored in the replay buffer (lighter than TraceEvent).
 #[derive(Debug, Clone)]
 pub struct ObservationEvent {
@@ -24,6 +26,12 @@ pub enum ObservationKind {
     Compaction { dropped_bytes: u64 },
     UserMessage { summary: String },
     Notice { text: String },
+}
+
+#[derive(Debug, Default, Clone, Serialize)]
+pub struct ErrorSummary {
+    pub errors: Vec<String>,
+    pub dropped_bytes: u64,
 }
 
 #[derive(Debug, Default)]
@@ -116,6 +124,75 @@ impl ReplayBuffer {
             }
         }
         stats
+    }
+
+    /// Filter events by file path (only `FileTouch` kind events).
+    pub fn file_timeline(&self, path: &str) -> Vec<&ObservationEvent> {
+        self.buffer
+            .iter()
+            .filter(|e| matches!(&e.kind, ObservationKind::FileTouch { path: p, .. } if p == path))
+            .collect()
+    }
+
+    /// Filter events by timestamp range (inclusive).
+    pub fn events_between(&self, start_ts: f64, end_ts: f64) -> Vec<&ObservationEvent> {
+        self.buffer
+            .iter()
+            .filter(|e| e.ts >= start_ts && e.ts <= end_ts)
+            .collect()
+    }
+
+    /// Collect error messages and compaction bytes into a structured summary.
+    pub fn error_summary(&self) -> ErrorSummary {
+        let mut summary = ErrorSummary::default();
+        for event in &self.buffer {
+            if let ObservationKind::Error { message } = &event.kind {
+                summary.errors.push(message.clone());
+            }
+            if let ObservationKind::Compaction { dropped_bytes } = &event.kind {
+                summary.dropped_bytes += dropped_bytes;
+            }
+        }
+        summary
+    }
+
+    /// Machine-readable summary of the buffer as a JSON value.
+    pub fn to_structured_json(&self) -> serde_json::Value {
+        let mut files_read = Vec::new();
+        let mut files_edited = Vec::new();
+        let mut errors = Vec::new();
+        let mut llm_calls = 0u32;
+        let mut tools = 0u32;
+
+        for event in &self.buffer {
+            match &event.kind {
+                ObservationKind::FileTouch { path, touch } => {
+                    if touch == "read" || touch == "hit" {
+                        files_read.push(path.clone());
+                    }
+                    if touch == "edit" || touch == "create" {
+                        files_edited.push(path.clone());
+                    }
+                }
+                ObservationKind::LlmCall { .. } => llm_calls += 1,
+                ObservationKind::ToolCall { .. } => tools += 1,
+                ObservationKind::Error { message } => errors.push(message.clone()),
+                _ => {}
+            }
+        }
+
+        files_read.sort();
+        files_read.dedup();
+        files_edited.sort();
+        files_edited.dedup();
+
+        serde_json::json!({
+            "llm_calls": llm_calls,
+            "tools": tools,
+            "errors": errors.len(),
+            "files_read": files_read,
+            "files_edited": files_edited,
+        })
     }
 
     pub fn to_self_observation(&self) -> String {
@@ -258,5 +335,94 @@ mod tests {
         rb.push(ObservationEvent { ts: 2.0, kind: ObservationKind::FileTouch { path: "src/lib.rs".into(), touch: "edit".into() } });
         let hits = rb.filter_by_file("src/main.rs");
         assert_eq!(hits.len(), 1);
+    }
+
+    #[test]
+    fn file_timeline_returns_matching_file_touches() {
+        let mut rb = ReplayBuffer::new();
+        rb.push(ObservationEvent { ts: 1.0, kind: ObservationKind::FileTouch { path: "src/main.rs".into(), touch: "read".into() } });
+        rb.push(ObservationEvent { ts: 2.0, kind: ObservationKind::FileTouch { path: "src/lib.rs".into(), touch: "edit".into() } });
+        rb.push(ObservationEvent { ts: 3.0, kind: ObservationKind::FileTouch { path: "src/main.rs".into(), touch: "edit".into() } });
+        let tl = rb.file_timeline("src/main.rs");
+        assert_eq!(tl.len(), 2);
+        assert_eq!(tl[0].ts, 1.0);
+        assert_eq!(tl[1].ts, 3.0);
+    }
+
+    #[test]
+    fn events_between_returns_filtered_range() {
+        let mut rb = ReplayBuffer::new();
+        rb.push(ObservationEvent { ts: 1.0, kind: ObservationKind::Notice { text: "a".into() } });
+        rb.push(ObservationEvent { ts: 2.0, kind: ObservationKind::Notice { text: "b".into() } });
+        rb.push(ObservationEvent { ts: 3.0, kind: ObservationKind::Notice { text: "c".into() } });
+        rb.push(ObservationEvent { ts: 4.0, kind: ObservationKind::Notice { text: "d".into() } });
+        let between = rb.events_between(1.5, 3.5);
+        assert_eq!(between.len(), 2);
+        assert_eq!(between[0].ts, 2.0);
+        assert_eq!(between[1].ts, 3.0);
+    }
+
+    #[test]
+    fn events_between_inclusive_boundaries() {
+        let mut rb = ReplayBuffer::new();
+        rb.push(ObservationEvent { ts: 1.0, kind: ObservationKind::Notice { text: "a".into() } });
+        rb.push(ObservationEvent { ts: 2.0, kind: ObservationKind::Notice { text: "b".into() } });
+        let between = rb.events_between(1.0, 2.0);
+        assert_eq!(between.len(), 2);
+    }
+
+    #[test]
+    fn error_summary_collects_errors_and_compaction() {
+        let mut rb = ReplayBuffer::new();
+        rb.push(ObservationEvent { ts: 1.0, kind: ObservationKind::Error { message: "file not found".into() } });
+        rb.push(ObservationEvent { ts: 2.0, kind: ObservationKind::Error { message: "permission denied".into() } });
+        rb.push(ObservationEvent { ts: 3.0, kind: ObservationKind::Compaction { dropped_bytes: 1024 } });
+        rb.push(ObservationEvent { ts: 4.0, kind: ObservationKind::Compaction { dropped_bytes: 512 } });
+        let summary = rb.error_summary();
+        assert_eq!(summary.errors.len(), 2);
+        assert!(summary.errors[0].contains("file not found"));
+        assert!(summary.errors[1].contains("permission denied"));
+        assert_eq!(summary.dropped_bytes, 1536);
+    }
+
+    #[test]
+    fn error_summary_empty_when_no_errors() {
+        let rb = ReplayBuffer::new();
+        let summary = rb.error_summary();
+        assert!(summary.errors.is_empty());
+        assert_eq!(summary.dropped_bytes, 0);
+    }
+
+    #[test]
+    fn to_structured_json_counts_llm_calls_and_tools() {
+        let mut rb = ReplayBuffer::new();
+        rb.push(ObservationEvent { ts: 1.0, kind: ObservationKind::LlmCall { model: "gpt-4".into(), prompt_tokens: 100 } });
+        rb.push(ObservationEvent { ts: 2.0, kind: ObservationKind::LlmCall { model: "gpt-4".into(), prompt_tokens: 200 } });
+        rb.push(ObservationEvent { ts: 3.0, kind: ObservationKind::ToolCall { name: "read".into(), input_preview: "x".into() } });
+        let json = rb.to_structured_json();
+        assert_eq!(json["llm_calls"], 2);
+        assert_eq!(json["tools"], 1);
+        assert_eq!(json["errors"], 0);
+    }
+
+    #[test]
+    fn to_structured_json_tracks_file_touches() {
+        let mut rb = ReplayBuffer::new();
+        rb.push(ObservationEvent { ts: 1.0, kind: ObservationKind::FileTouch { path: "a.rs".into(), touch: "read".into() } });
+        rb.push(ObservationEvent { ts: 2.0, kind: ObservationKind::FileTouch { path: "b.rs".into(), touch: "edit".into() } });
+        rb.push(ObservationEvent { ts: 3.0, kind: ObservationKind::FileTouch { path: "a.rs".into(), touch: "hit".into() } });
+        let json = rb.to_structured_json();
+        assert_eq!(json["files_read"].as_array().unwrap().len(), 1);
+        assert_eq!(json["files_read"][0], "a.rs");
+        assert_eq!(json["files_edited"].as_array().unwrap().len(), 1);
+        assert_eq!(json["files_edited"][0], "b.rs");
+    }
+
+    #[test]
+    fn to_structured_json_counts_errors() {
+        let mut rb = ReplayBuffer::new();
+        rb.push(ObservationEvent { ts: 1.0, kind: ObservationKind::Error { message: "fail".into() } });
+        let json = rb.to_structured_json();
+        assert_eq!(json["errors"], 1);
     }
 }
