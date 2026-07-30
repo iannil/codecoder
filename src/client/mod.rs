@@ -239,6 +239,15 @@ pub fn print_event(ev: &ServerEvent) -> bool {
             }
             false
         }
+        ServerEvent::TracePoint { span_id, kind, path, summary, .. } => {
+            let path_display = path.as_deref().unwrap_or("(none)");
+            println!("· trace point [{}] span={} path={} summary={}", kind, span_id, path_display, summary);
+            false
+        }
+        ServerEvent::TraceSpan { span_id, kind, .. } => {
+            println!("· trace span [{}] span={}", kind, span_id);
+            false
+        }
     }
 }
 

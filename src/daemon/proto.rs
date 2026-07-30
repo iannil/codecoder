@@ -166,7 +166,7 @@ pub struct HealthStatus {
 
 /// daemon → 客户端的事件。一个 `SendMessage` 会产生一串事件，以 `TurnComplete` 或
 /// `Error` 收尾。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ServerEvent {
     StreamDelta { text: String },
@@ -194,6 +194,22 @@ pub enum ServerEvent {
     AutotaskStatus(AutotaskStatus),
     /// 对 HealthCheck 请求的响应（daemon 健康状态快照）。
     HealthStatus(HealthStatus),
+    /// Trace observability: a point event (instantaneous).
+    TracePoint {
+        span_id: String,
+        kind: String,
+        path: Option<String>,
+        summary: String,
+        ts: f64,
+    },
+    /// Trace observability: a span event (has duration).
+    TraceSpan {
+        span_id: String,
+        parent_id: Option<String>,
+        kind: String,
+        meta: serde_json::Value,
+        ts: f64,
+    },
 }
 
 /// 服务列表的序列化 payload（包装 Vec 避免 serde tagged newtype 序列化问题）。

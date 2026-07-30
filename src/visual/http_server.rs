@@ -128,6 +128,9 @@ impl HttpServer {
                 ("GET", "/api/v1/trace/stream") => {
                     self.serve_trace_stream(request);
                 }
+                ("GET", "/api/v1/trace/touches") => {
+                    self.serve_trace_touches(request);
+                }
                 ("GET", "/api/v1/sessions") => {
                     self.serve_sessions(request, &self.root_path);
                 }
@@ -403,6 +406,15 @@ impl HttpServer {
         }
     }
 
+    fn serve_trace_touches(&self, request: tiny_http::Request) {
+        // Return file touch heatmap. For now, return an empty placeholder
+        // since the actual SseObserver heatmap state lives in AgentLoop's ObserverSet.
+        let body = "{}";
+        let resp = Response::from_string(body)
+            .with_header(Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap());
+        let _ = request.respond(resp);
+    }
+
     fn serve_trace_agents(&self, request: tiny_http::Request) {
         use crate::trace::agent_graph::AgentGraph;
         use crate::trace::reader::TraceReader;
@@ -549,5 +561,7 @@ fn sse_event_type(ev: &ServerEvent) -> &'static str {
         ServerEvent::WorkgraphStatus(_) => "workgraph_status",
         ServerEvent::AutotaskStatus(_) => "autotask_status",
         ServerEvent::HealthStatus(_) => "health_status",
+        ServerEvent::TracePoint { .. } => "trace_point",
+        ServerEvent::TraceSpan { .. } => "trace_span",
     }
 }
