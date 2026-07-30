@@ -11,3 +11,6 @@ pub use replay_buffer::ReplayBufferObserver;
 
 pub mod sse_observer;
 pub use sse_observer::SseObserver;
+
+pub mod bg_observer;
+pub use bg_observer::BgObserver;

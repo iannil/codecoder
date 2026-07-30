@@ -4,6 +4,9 @@
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
+use crate::trace::observer_set::Observer;
+use crate::trace::types::*;
+
 #[cfg(test)]
 use serde_json::json;
 
@@ -75,6 +78,54 @@ impl BgObserver {
             let _ = writeln!(f, "{line}");
             let _ = f.flush();
         }
+    }
+}
+
+// === Observer trait impl ===
+
+impl Observer for BgObserver {
+    fn on_point(&mut self, event: &PointEvent) {
+        match &event.kind {
+            EventKind::ToolCallBegin { name, .. } => {
+                self.emit("tool_started", name);
+            }
+            EventKind::ToolCallEnd { name, is_error, .. } => {
+                if *is_error {
+                    self.emit("tool_error", name);
+                } else {
+                    self.emit("tool_finished", name);
+                }
+            }
+            EventKind::MilestoneStatus { id, title, old_status, new_status } => {
+                self.emit("milestone", &format!("#{id} ({title}): {old_status} → {new_status}"));
+            }
+            EventKind::PermissionFull { key, decision, tool, .. } => {
+                if matches!(decision, PermissionDecision::Denied) {
+                    self.emit("denied", &format!("{tool}:{key}"));
+                }
+            }
+            EventKind::RetryEvent { kind, attempt, .. } => {
+                self.emit("retry", &format!("{kind} attempt #{attempt}"));
+            }
+            EventKind::Notice { text } => {
+                self.emit("notice", text);
+            }
+            _ => {}
+        }
+    }
+}
+
+// === External emit methods (for events emitted outside AgentLoop) ===
+
+impl BgObserver {
+    /// For events emitted outside AgentLoop (run start/end, budget, etc.)
+    pub fn emit_external(&mut self, kind: &str, msg: &str) {
+        self.emit(kind, msg);
+    }
+
+    /// For events emitted outside AgentLoop, with structured data.
+    pub fn emit_external_with_data(&mut self, kind: &str, msg: &str, data: Option<serde_json::Value>) {
+        self.emit_with_data(kind, msg, data);
     }
 }
 
