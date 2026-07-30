@@ -6,6 +6,7 @@ use crate::provider::{Completion, CompletionRequest, Provider, StopReason};
 use crate::registry::Registry;
 use crate::session::{self, Session};
 use crate::trace::replay_buffer::{ObservationEvent, ObservationKind};
+use crate::trace::types::{EventKind, PointEvent};
 use crate::trust::{self, TrustDecision};
 use crate::tool::{ToolCtx, Toolbox};
 use std::collections::BTreeSet;
@@ -771,6 +772,19 @@ impl AgentLoop {
             let summary_text = format!("{}{}", prose, compaction::render_file_blocks(&read, &modified));
             let mut messages = compaction::apply_tier2(&tier1, anchor_id, covered_last_id, &summary_text);
 
+            // Trace: ContextSnapshot after tier-2 compaction
+            let before_size = crate::tokenizer::count_tokens(&self.model, &tier1) as u64;
+            let after_size = crate::tokenizer::count_tokens(&self.model, &messages) as u64;
+            self.observer_set.on_point(&crate::trace::types::PointEvent {
+                ts: crate::trace::types::now_ts(),
+                kind: crate::trace::types::EventKind::ContextSnapshot {
+                    before_bytes: before_size,
+                    after_bytes: after_size,
+                    dropped_events: 1,
+                },
+                meta: serde_json::json!({}),
+            });
+
             messages
         };
 
@@ -794,7 +808,7 @@ impl AgentLoop {
     /// policy (budget, backoff, reporting) lives here. Account limits and context
     /// overflows are not retried. Aborts early if the turn was cancelled.
     fn complete_retrying(
-        &self,
+        &mut self,
         req: &CompletionRequest,
         event_tx: &Sender<AgentEvent>,
     ) -> anyhow::Result<Completion> {
@@ -810,6 +824,17 @@ impl AgentLoop {
                         && !self.cancel.is_cancelled()
                     {
                         attempt += 1;
+                        // Trace: RetryEvent
+                        self.observer_set.on_point(&PointEvent {
+                            ts: crate::trace::types::now_ts(),
+                            kind: EventKind::RetryEvent {
+                                kind: "llm".into(),
+                                attempt,
+                                max_retries: MAX_RETRIES,
+                                error: msg.clone(),
+                            },
+                            meta: serde_json::json!({}),
+                        });
                         let _ = event_tx.send(AgentEvent::Notice(format!(
                             "transient error, retrying ({attempt}/{MAX_RETRIES}): {msg}"
                         )));
@@ -880,7 +905,7 @@ impl AgentLoop {
             return;
         }
         self.resolve_trust_if_pending(event_tx);
-        self.append(Role::User, vec![MessageItem::Text { text }]);
+        self.append(Role::User, vec![MessageItem::Text { text: text.clone() }]);
 
         // ReplayBuffer: turn start
         if let Some(ref mut rb) = self.replay_buffer {
@@ -889,6 +914,17 @@ impl AgentLoop {
                 kind: ObservationKind::TurnStart,
             });
         }
+
+        // Trace: UserInput point event
+        self.observer_set.on_point(&PointEvent {
+            ts: crate::trace::types::now_ts(),
+            kind: EventKind::UserInput {
+                source: crate::trace::types::MessageSource::Manual,
+                length: text.len(),
+                preview: text.chars().take(200).collect(),
+            },
+            meta: serde_json::json!({}),
+        });
 
         let mut hit_tool_cap = true; // cleared on every non-exhaustion exit
         // 自适应截断根治(迭代 2):有效 max_tokens 每 turn 从配置值起,命中 Length 翻倍上调。
@@ -1317,6 +1353,17 @@ impl AgentLoop {
                         is_error: true,
                         output: output.clone(),
                     });
+                    // Trace: PermissionFull (headless auto-deny)
+                    self.observer_set.on_point(&crate::trace::types::PointEvent {
+                        ts: crate::trace::types::now_ts(),
+                        kind: crate::trace::types::EventKind::PermissionFull {
+                            key: key.clone(),
+                            decision: crate::trace::types::PermissionDecision::Denied,
+                            tool: name.to_string(),
+                            headless: self.headless,
+                        },
+                        meta: serde_json::json!({}),
+                    });
                     return ToolOutcome::Result(MessageItem::ToolResult {
                         call_id: call_id.to_string(),
                         output,
@@ -1349,6 +1396,17 @@ impl AgentLoop {
                         }
                     },
                     Ok(PermissionReply::Deny) => {
+                        // Trace: PermissionFull (user deny)
+                        self.observer_set.on_point(&crate::trace::types::PointEvent {
+                            ts: crate::trace::types::now_ts(),
+                            kind: crate::trace::types::EventKind::PermissionFull {
+                                key: key.clone(),
+                                decision: crate::trace::types::PermissionDecision::Denied,
+                                tool: name.to_string(),
+                                headless: self.headless,
+                            },
+                            meta: serde_json::json!({}),
+                        });
                         return ToolOutcome::Result(MessageItem::ToolResult {
                             call_id: call_id.to_string(),
                             output: "permission denied by user".into(),
@@ -1357,9 +1415,32 @@ impl AgentLoop {
                     }
                     Ok(PermissionReply::Cancelled) | Err(_) => {
                         self.cancel.cancel();
+                        // Trace: PermissionFull (cancelled)
+                        self.observer_set.on_point(&crate::trace::types::PointEvent {
+                            ts: crate::trace::types::now_ts(),
+                            kind: crate::trace::types::EventKind::PermissionFull {
+                                key: key.clone(),
+                                decision: crate::trace::types::PermissionDecision::Cancelled,
+                                tool: name.to_string(),
+                                headless: self.headless,
+                            },
+                            meta: serde_json::json!({}),
+                        });
                         return ToolOutcome::Cancelled;
                     }
                 }
+            } else {
+                // Trace: PermissionFull (auto-granted by allowlist)
+                self.observer_set.on_point(&crate::trace::types::PointEvent {
+                    ts: crate::trace::types::now_ts(),
+                    kind: crate::trace::types::EventKind::PermissionFull {
+                        key: key.clone(),
+                        decision: crate::trace::types::PermissionDecision::AutoGranted,
+                        tool: name.to_string(),
+                        headless: self.headless,
+                    },
+                    meta: serde_json::json!({}),
+                });
             }
         }
 
@@ -1445,10 +1526,32 @@ impl AgentLoop {
         let (model, mt, temp, root) =
             (self.model.clone(), self.max_tokens, self.temperature, self.root.clone());
 
+        // Trace: SubAgentLifecycle Spawned
+        self.observer_set.on_point(&crate::trace::types::PointEvent {
+            ts: crate::trace::types::now_ts(),
+            kind: crate::trace::types::EventKind::SubAgentLifecycle {
+                agent_id: format!("sub_{}", std::process::id()),
+                status: crate::trace::types::SubAgentStatus::Spawned,
+                parent_span_id: String::new(),
+            },
+            meta: serde_json::json!({}),
+        });
+
         let handle = thread::spawn(move || {
             let mut child = AgentLoop::new_sub(provider, model, mt, temp, root);
             child.process_turn(task, &child_tx);
             child.last_assistant_text()
+        });
+
+        // Trace: SubAgentLifecycle Running
+        self.observer_set.on_point(&crate::trace::types::PointEvent {
+            ts: crate::trace::types::now_ts(),
+            kind: crate::trace::types::EventKind::SubAgentLifecycle {
+                agent_id: format!("sub_{}", std::process::id()),
+                status: crate::trace::types::SubAgentStatus::Running,
+                parent_span_id: String::new(),
+            },
+            meta: serde_json::json!({}),
         });
 
         for ev in child_rx {
@@ -1457,6 +1560,23 @@ impl AgentLoop {
             }
         }
         let output = handle.join().unwrap_or_else(|_| "sub-agent panicked".into());
+
+        // Trace: SubAgentLifecycle Done or Failed
+        let sub_status = if output == "sub-agent panicked" {
+            crate::trace::types::SubAgentStatus::Failed
+        } else {
+            crate::trace::types::SubAgentStatus::Done
+        };
+        self.observer_set.on_point(&crate::trace::types::PointEvent {
+            ts: crate::trace::types::now_ts(),
+            kind: crate::trace::types::EventKind::SubAgentLifecycle {
+                agent_id: format!("sub_{}", std::process::id()),
+                status: sub_status,
+                parent_span_id: String::new(),
+            },
+            meta: serde_json::json!({}),
+        });
+
         let _ = event_tx.send(AgentEvent::SubAgentMilestone("done".into()));
         output
     }
@@ -1605,12 +1725,28 @@ impl AgentLoop {
                     crate::review::Verdict::NeedsFix => (NodeStatus::NeedsFix, "needs_fix"),
                     crate::review::Verdict::Rebuild => (NodeStatus::NeedsFix, "rebuild"),
                 };
+                // Trace: capture old status before set_status
+                let old_status = WorkGraph::read(&self.root)
+                    .get(milestone_id)
+                    .map(|n| format!("{:?}", n.status))
+                    .unwrap_or_default();
                 let _ = WorkGraph::with_lock(&self.root, |g| {
                     g.set_status(milestone_id, status);
                     if let Some(n) = g.nodes.iter_mut().find(|n| n.id == milestone_id) {
                         n.verdict = Some(verdict_str.to_string());
                     }
                     Ok(())
+                });
+                // Trace: MilestoneStatus
+                self.observer_set.on_point(&crate::trace::types::PointEvent {
+                    ts: crate::trace::types::now_ts(),
+                    kind: crate::trace::types::EventKind::MilestoneStatus {
+                        id: milestone_id,
+                        title: title.clone(),
+                        old_status,
+                        new_status: verdict_str.to_string(),
+                    },
+                    meta: serde_json::json!({}),
                 });
                 let _ = event_tx.send(AgentEvent::Notice(format!(
                     "milestone #{} ({}) auto-updated: {}",

@@ -43,9 +43,14 @@ fn trace_file_created_when_enabled() {
     assert_eq!(meta["type"], "meta");
     assert_eq!(meta["version"], 1);
 
-    // Verify we have a valid span_start event
+    // Verify we have a valid event (first event is now a point event due to UserInput emission)
     let ev: serde_json::Value = serde_json::from_str(lines[1]).unwrap();
-    assert_eq!(ev["type"], "s", "first event should be span_start, got: {:?}", ev);
+    let type_str = ev["type"].as_str().unwrap_or("");
+    assert!(
+        type_str == "s" || type_str == "p",
+        "first event should be a valid event type, got: {:?}",
+        ev
+    );
 
     unsafe { std::env::remove_var("CODECODER_TRACE"); }
 }
