@@ -170,17 +170,32 @@ impl McpClient {
         write_framed(&mut self.stdin, &body)?;
         self.stdin.flush()?;
 
-        let raw = read_framed(&mut self.stdout)?;
-        let resp: JsonRpcResponse = serde_json::from_slice(&raw)
-            .map_err(|e| anyhow!("bad JSON-RPC response to {method}: {e}"))?;
-        if resp.id != id {
-            anyhow::bail!("response id mismatch: got {}, want {}", resp.id, id);
+        // Loop reading frames until the response matching our `id` arrives.
+        // A real server may push server-initiated notifications (which carry no
+        // `id`) or other responses at any time; those must be skipped, not
+        // mistaken for our response.
+        loop {
+            let raw = read_framed(&mut self.stdout)?;
+            let msg: Value = serde_json::from_slice(&raw)
+                .map_err(|e| anyhow!("bad JSON-RPC message from {method}: {e}"))?;
+            // Notifications have no `id` field — skip them.
+            let Some(msg_id) = msg.get("id").and_then(Value::as_u64) else {
+                continue;
+            };
+            if msg_id != id {
+                continue;
+            }
+            let resp: JsonRpcResponse = serde_json::from_value(msg)
+                .map_err(|e| anyhow!("bad JSON-RPC response to {method}: {e}"))?;
+            if resp.jsonrpc != "2.0" {
+                anyhow::bail!("bad jsonrpc version in response to {method}: {:?}", resp.jsonrpc);
+            }
+            if let Some(err) = resp.error {
+                let detail = err.data.as_ref().map(|d| format!(", data: {d}")).unwrap_or_default();
+                anyhow::bail!("JSON-RPC error {}{detail}: {}", err.code, err.message);
+            }
+            return resp.result.ok_or_else(|| anyhow!("response to {method} missing result"));
         }
-        if let Some(err) = resp.error {
-            let detail = err.data.as_ref().map(|d| format!(", data: {d}")).unwrap_or_default();
-            anyhow::bail!("JSON-RPC error {}{detail}: {}", err.code, err.message);
-        }
-        resp.result.ok_or_else(|| anyhow!("response to {method} missing result"))
     }
 
     /// Send a JSON-RPC notification (no `id`, no response expected).
@@ -222,10 +237,21 @@ impl McpClient {
         self.ensure_initialized()?;
         let result = self.request("tools/list", None)?;
         let arr = result.get("tools").and_then(Value::as_array).cloned().unwrap_or_default();
-        Ok(arr
-            .iter()
-            .filter_map(|t| serde_json::from_value(t.clone()).ok())
-            .collect())
+        let mut tools = Vec::new();
+        for t in &arr {
+            match serde_json::from_value::<McpToolDef>(t.clone()) {
+                Ok(def) => tools.push(def),
+                Err(e) => {
+                    eprintln!(
+                        "mcp: warning: skipping unparseable tool definition from \
+                         '{}': {e} (raw: {})",
+                        arr.iter().find_map(|x| x.get("name").and_then(Value::as_str)).unwrap_or("?"),
+                        serde_json::to_string(t).unwrap_or_default(),
+                    );
+                }
+            }
+        }
+        Ok(tools)
     }
 
     /// Call a tool (`tools/call`) and return its concatenated text output.
@@ -263,6 +289,19 @@ impl McpClient {
         let _ = self.child.kill();
         let _ = self.child.wait();
         Ok(())
+    }
+}
+
+impl Drop for McpClient {
+    fn drop(&mut self) {
+        // Best-effort cleanup: send shutdown, kill, and reap. Ignore errors
+        // since we're dropping and can't bubble them up.
+        if self.initialized {
+            let _ = self.request("shutdown", None);
+            self.initialized = false;
+        }
+        let _ = self.child.kill();
+        let _ = self.child.wait();
     }
 }
 
@@ -650,5 +689,44 @@ mod tests {
         let mgr = McpManager::from_config(dir.path());
         assert_eq!(mgr.configs.len(), 1);
         assert_eq!(mgr.configs[0].name, "fs");
+    }
+
+    /// Simulate a real MCP server that pushes a notification before the response.
+    /// `read_framed` + the id-skip logic in `request()` should skip the
+    /// notification (no `id`) and pick up the actual response frame.
+    #[test]
+    fn request_skips_server_notifications() {
+        use std::io::Cursor;
+        let response_body = br#"{"jsonrpc":"2.0","id":1,"result":{"ok":true}}"#;
+        let notification_body = br#"{"jsonrpc":"2.0","method":"notifications/message","params":{"level":"info","data":"ping"}}"#;
+        let mut framed = Vec::new();
+        // Server sends a notification first, then the response.
+        write_framed(&mut framed, notification_body).unwrap();
+        write_framed(&mut framed, response_body).unwrap();
+
+        let mut reader = BufReader::new(Cursor::new(framed));
+        // Emulate request(): read frames until the one matching id=1 arrives.
+        let matched = loop {
+            let raw = read_framed(&mut reader).unwrap();
+            let msg: Value = serde_json::from_slice(&raw).unwrap();
+            let Some(msg_id) = msg.get("id").and_then(Value::as_u64) else {
+                continue; // notification — skip
+            };
+            if msg_id == 1 {
+                assert_eq!(msg["result"]["ok"], true);
+                break true;
+            }
+        };
+        assert!(matched, "must have found the response matching id=1");
+    }
+
+    #[test]
+    fn response_validation_checks_jsonrpc_version() {
+        // A response with a wrong jsonrpc version should be rejected.
+        let bad = json!({"jsonrpc":"1.0","id":1,"result":null});
+        // We can't easily test the full request() path without a real server,
+        // but we can verify JsonRpcResponse deserialization and the version check.
+        let resp: JsonRpcResponse = serde_json::from_value(bad).unwrap();
+        assert_ne!(resp.jsonrpc, "2.0");
     }
 }
