@@ -44,6 +44,8 @@ fs2 = "0.4"
 notify = { version = "6", features = [] }
 # Lightweight HTTP server for cc-web (Task 1)
 tiny_http = "0.12"
+# LSP (Language Server Protocol) types for LSP tool (Task 3)
+lsp-types = "0.97"
 
 [dev-dependencies]
 insta = { version = "1", features = ["colors"] }

@@ -4,6 +4,7 @@ pub mod builtin;
 pub mod dev;
 pub mod generate_milestones;
 pub mod mcp;
+pub mod lsp;
 pub mod net;
 pub mod reason;
 pub mod search;
@@ -122,6 +123,7 @@ impl Toolbox {
                 Box::new(mcp::McpToolCall),
                 Box::new(mcp::McpListResources),
                 Box::new(mcp::McpReadResource),
+                Box::new(lsp::LspTool),
             ],
         }
     }
