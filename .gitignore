@@ -13,3 +13,6 @@
 
 # Trace observability NDJSON
 .ccd.trace*.ndjson
+
+# worktrees
+.worktrees/
