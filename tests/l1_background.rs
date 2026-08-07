@@ -89,14 +89,13 @@ fn background_denies_unauthorized_run_command() {
     // (c) Implicit: `.expect("bg run")` above proves the run returned Ok (no hang).
 }
 
-// Hardening (whole-branch review): a sub-agent spawned FROM a headless parent is
-// still read-only — the depth-1 child's toolbox has no write_file at all, so the
-// attempt errors as an unknown tool and never touches disk. Mirrors
-// `subagent_cannot_write_files` (l1_subagent.rs) but drives it through the
-// headless runner. The sub-agent SHARES the parent's ScriptedProvider queue
-// (verified against src/agent.rs::spawn_sub_agent), so scripts interleave:
+// Hardening (whole-branch review): a fork sub-agent spawned FROM a headless parent
+// inherits the full toolbox (ADR 0042), so write_file IS available. However, in
+// headless mode without a pre-authorizing allowlist, the permission gate denies
+// the Ask-keyed tool, so the file never lands on disk. The sub-agent SHARES the
+// parent's ScriptedProvider queue, so scripts interleave:
 //   turns[0] parent: delegate via `agent`
-//   turns[1] child : attempt write_file (refused — absent from read_only_child)
+//   turns[1] child : attempt write_file (denied by permission gate, not toolbox)
 //   turns[2] child : text report (returned to the parent as the tool result)
 //   turns[3] parent: closing text
 #[test]
@@ -113,16 +112,12 @@ fn background_subagent_from_headless_cannot_write() {
         p as Arc<dyn codecoder::Provider>,
         "test-model".into(), 4096, 0.0, ws.root(), "delegate a write".into(),
     ).expect("bg run");
-    // The sub-agent spawned successfully. The `agent` tool is intercepted in
-    // dispatch_tool and emits SubAgentMilestone events (never the ToolStarted
-    // pair a plain tool emits), so it is observable in `out.events`, not
-    // `out.tool_calls`. Requiring "started" proves the child actually ran — so
-    // the disk assertion below is not vacuous (a never-spawned child would also
-    // leave the file absent).
-    assert!(out.events.iter().any(|e| e.contains("sub-agent") && e.contains("started")),
-        "parent should have spawned a sub-agent (SubAgentMilestone started): {:?}", out.events);
-    // Core property: a read-only sub-agent spawned from a headless parent cannot
-    // write. write_file is not in Toolbox::read_only_child(), so no file lands.
+    // Fork mode emits "forked" (not "started") as the initial milestone.
+    assert!(out.events.iter().any(|e| e.contains("sub-agent") && e.contains("forked")),
+        "parent should have spawned a fork sub-agent (SubAgentMilestone forked): {:?}", out.events);
+    // Core property: a fork sub-agent from a headless parent without a pre-authorizing
+    // allowlist cannot write. write_file is Ask-keyed, so the permission gate denies
+    // it in headless mode — no file lands on disk.
     assert!(!ws.exists("sub_hacked.txt"),
-        "read-only sub-agent from a headless parent must not be able to write files");
+        "fork sub-agent from a headless parent must not be able to write files without allowlist");
 }

@@ -903,6 +903,14 @@ impl Tool for GenerateCapability {
 /// `agent` is registered for its schema/name, but its execution is intercepted by
 /// the AgentLoop (which owns the Provider + event channel needed to spawn a
 /// sub-agent). `run` is therefore never called (ADR 0019).
+///
+/// Two modes (ADR 0042):
+/// - Fork mode (omit `subagent_type`): sub-agent inherits parent's system prompt
+///   and recent conversation context, plus full toolset.
+/// - Fresh mode (set `subagent_type`): zero context, full toolset, task prompt
+///   is the only input.
+/// - `background: true` runs the sub-agent asynchronously; a TaskNotification
+///   is delivered on completion.
 pub struct Agent;
 
 impl Tool for Agent {
@@ -910,17 +918,30 @@ impl Tool for Agent {
         "agent"
     }
     fn description(&self) -> &str {
-        "Delegate a read-only research sub-task to a sub-agent; returns its findings."
+        "Delegate a task to a sub-agent. Omit subagent_type to fork (inherits full context). Specify subagent_type to start fresh (provide full background in the task)."
     }
     fn schema(&self) -> Value {
         json!({
             "type": "object",
-            "properties": { "task": { "type": "string", "description": "The delegated task." } },
+            "properties": {
+                "task": {
+                    "type": "string",
+                    "description": "The delegated task directive."
+                },
+                "subagent_type": {
+                    "type": "string",
+                    "description": "Optional agent type. Omit = fork (inherits full conversation context + system prompt). Specify = fresh (zero context; provide complete background in task)."
+                },
+                "background": {
+                    "type": "boolean",
+                    "description": "Run in background. Default: false. Background tasks notify via TaskNotification on completion."
+                }
+            },
             "required": ["task"]
         })
     }
     fn permission(&self, _args: &Value, _root: &Path) -> Permission {
-        Permission::None // the sub-agent itself can only use Permission::None tools
+        Permission::None // the agent tool itself is free; the sub-agent faces its own permission gates
     }
     fn run(&self, _args: Value, _ctx: &mut ToolCtx) -> anyhow::Result<ToolOutput> {
         Ok(ToolOutput::err("agent tool must be handled by the AgentLoop"))

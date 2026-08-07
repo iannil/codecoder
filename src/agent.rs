@@ -108,6 +108,10 @@ pub enum AgentEvent {
     /// LLM token usage for a single completion call (P1-4).
     TokenUsage { prompt_tokens: u32, completion_tokens: u32 },
     TurnComplete,
+    /// A background sub-agent task has been spawned (ADR 0042).
+    TaskSpawned { task_id: String, description: String },
+    /// A background sub-agent task has completed (ADR 0042).
+    TaskNotification { task_id: String, status: String, result: String },
 }
 
 /// Shared cooperative-cancellation flag (ADR 0016): checked between stream deltas
@@ -231,6 +235,10 @@ pub struct AgentLoop {
     trust: TrustState,
     /// User messages submitted mid-turn (ADR 0029), drained inside `process_turn`.
     steer: SteerQueue,
+    /// Background task notifications delivered mid-turn (ADR 0042). Pushed by
+    /// background sub-agents on completion, drained inside `process_turn` and
+    /// injected as System messages before the next LLM call.
+    task_notifications: SteerQueue,
     /// Derived tier-2 summary overlay (ADR 0023); never persisted.
     tier2: Option<Tier2Summary>,
     /// 最近一次 turn 的 provider 错误(若有)。BG runner 据此置 mission_state=Error(ADR 0033)。
@@ -291,6 +299,7 @@ impl AgentLoop {
 
     /// A depth-1 sub-agent (ADR 0019): read-only toolbox (only `Permission::None`
     /// tools, no `agent`), no session persistence, shares the parent's Provider.
+    /// Used by the `review` tool for independent code review.
     fn new_sub(
         provider: Arc<dyn Provider>,
         model: String,
@@ -299,6 +308,74 @@ impl AgentLoop {
         root: PathBuf,
     ) -> Self {
         Self::build(provider, model, max_tokens, temperature, root, Toolbox::read_only_child(), false, false, None)
+    }
+
+    /// Fork sub-agent (ADR 0042): inherits the parent's system prompt, recent
+    /// conversation messages, and full toolbox. Used when `agent` is called
+    /// without `subagent_type` (the model intends to delegate a task that needs
+    /// the full project context).
+    fn fork_sub(
+        provider: Arc<dyn Provider>,
+        model: String,
+        max_tokens: u32,
+        temperature: f32,
+        root: PathBuf,
+        parent_messages: Vec<Message>,
+        system_prompt: String,
+        shared_registry: Option<Arc<std::sync::RwLock<Registry>>>,
+        trust: TrustState,
+        headless: bool,
+    ) -> Self {
+        let mut agent = Self::build(
+            provider, model, max_tokens, temperature, root,
+            Toolbox::builtin(),  // full toolbox for fork sub-agents
+            /* persist */ false,
+            headless,
+            shared_registry,
+        );
+        agent.system_prompt = system_prompt;
+        agent.trust = trust;
+        // Inject parent's recent conversation messages. Renumber ids so they
+        // don't collide with the child's own append counter (which starts at 0);
+        // otherwise the session tree's parent/leaf navigation breaks.
+        for msg in parent_messages {
+            agent.session.append(msg);
+        }
+        agent.next_id = agent
+            .session
+            .active_thread()
+            .iter()
+            .map(|m| m.id)
+            .max()
+            .map(|id| id + 1)
+            .unwrap_or(0);
+        agent
+    }
+
+    /// Fresh sub-agent (ADR 0042): zero context, full toolbox, no inherited
+    /// session messages. Used when `agent` is called with a `subagent_type`.
+    /// The task prompt must provide complete background.
+    fn fresh_sub(
+        provider: Arc<dyn Provider>,
+        model: String,
+        max_tokens: u32,
+        temperature: f32,
+        root: PathBuf,
+        system_prompt: String,
+        shared_registry: Option<Arc<std::sync::RwLock<Registry>>>,
+        trust: TrustState,
+        headless: bool,
+    ) -> Self {
+        let mut agent = Self::build(
+            provider, model, max_tokens, temperature, root,
+            Toolbox::builtin(),  // full toolbox for fresh sub-agents
+            /* persist */ false,
+            headless,
+            shared_registry,
+        );
+        agent.system_prompt = system_prompt;
+        agent.trust = trust;
+        agent
     }
 
     fn build(
@@ -399,6 +476,7 @@ impl AgentLoop {
             headless,
             trust,
             steer: SteerQueue::default(),
+            task_notifications: SteerQueue::default(),
             tier2: None,
             last_error: None,
             shared_registry,
@@ -867,6 +945,21 @@ impl AgentLoop {
         true
     }
 
+    /// Drain background task notifications (ADR 0042), injecting each as a
+    /// `Role::System` message so the next LLM call sees the completed task's result.
+    /// Background sub-agents push to the shared `task_notifications` queue on
+    /// completion; this is drained before the next provider call.
+    fn drain_task_notifications(&mut self) -> bool {
+        let queued = self.task_notifications.drain();
+        if queued.is_empty() {
+            return false;
+        }
+        for text in queued {
+            self.append(Role::System, vec![MessageItem::Text { text }]);
+        }
+        true
+    }
+
     /// If trust is still `Pending` (interactive, undecided, config on disk), ask
     /// the user once before the first turn runs (ADR 0028). The answer resolves the
     /// state and — when trusted — loads the project's disk "self" now. A dropped
@@ -948,6 +1041,9 @@ impl AgentLoop {
             // Inject any mid-turn user input (ADR 0029) as User messages before the
             // next provider call — this is steering (redirect the running turn).
             self.drain_steer(event_tx);
+            // Inject any completed background-task notifications (ADR 0042) as
+            // System messages before the next provider call.
+            self.drain_task_notifications();
 
             // Only the derived working set is sent to the provider (ADR 0023),
             // prefixed by the System prompt (AGENTS.md + catalog, ADR 0020).
@@ -1154,6 +1250,11 @@ impl AgentLoop {
                 // The turn would end here. If the user steered in the meantime
                 // (ADR 0029), restart the loop with that input instead of stopping.
                 if self.drain_steer(event_tx) {
+                    continue;
+                }
+                // If a background task completed while we were processing, inject
+                // its notification and restart.
+                if self.drain_task_notifications() {
                     continue;
                 }
                 hit_tool_cap = false;
@@ -1551,9 +1652,15 @@ enum ToolOutcome {
 }
 
 impl AgentLoop {
-    /// Spawn a depth-1 read-only sub-agent (ADR 0019) to handle a delegated task.
-    /// It runs on its own thread that this call joins; coarse milestones are bridged
-    /// up as `SubAgentMilestone` events, and its final text becomes the tool result.
+    /// Spawn a sub-agent to handle a delegated task. Routes to fork/fresh based
+    /// on `subagent_type` and `background` args (ADR 0042).
+    ///
+    /// - `subagent_type` omitted → fork mode: inherits parent's system prompt and
+    ///   recent conversation context, plus full toolbox.
+    /// - `subagent_type` specified → fresh mode: zero context, full toolbox, task
+    ///   prompt is the only input.
+    /// - `background: true` → runs asynchronously; returns a task ID and delivers
+    ///   a `TaskNotification` on completion.
     fn spawn_sub_agent(
         &mut self,
         call_id: &str,
@@ -1568,12 +1675,218 @@ impl AgentLoop {
                 is_error: true,
             });
         }
-        let output = self.spawn_sub_agent_text(task, event_tx);
+        let subagent_type = args.get("subagent_type").and_then(|v| v.as_str());
+        let background = args.get("background").and_then(|v| v.as_bool()).unwrap_or(false);
+
+        let output = if subagent_type.is_some() {
+            // Fresh mode: specified subagent_type → zero context
+            self.spawn_sub_agent_fresh(task, background, event_tx)
+        } else {
+            // Fork mode: omitted subagent_type → inherit parent context
+            self.spawn_sub_agent_fork(task, background, event_tx)
+        };
+
         ToolOutcome::Result(MessageItem::ToolResult {
             call_id: call_id.to_string(),
             output,
             is_error: false,
         })
+    }
+
+    /// Fork mode: inherit parent's system prompt + recent conversation + full toolbox.
+    /// The sub-agent knows the project context and can write files / run commands.
+    const FORK_CONTEXT_SIZE: usize = 20;
+
+    fn spawn_sub_agent_fork(&mut self, task: String, background: bool,
+        event_tx: &Sender<AgentEvent>) -> String
+    {
+        let _ = event_tx.send(AgentEvent::SubAgentMilestone("forked".into()));
+        let (child_tx, child_rx) = channel::<AgentEvent>();
+        let provider = Arc::clone(&self.provider);
+        let (model, mt, temp, root) =
+            (self.model.clone(), self.max_tokens, self.temperature, self.root.clone());
+
+        // 1. Copy recent N messages from parent session (skip System messages)
+        let thread = self.session.active_thread();
+        let start = thread.len().saturating_sub(Self::FORK_CONTEXT_SIZE);
+        let parent_messages: Vec<Message> = thread[start..]
+            .iter()
+            .filter(|m| m.role != Role::System)
+            .cloned()
+            .collect();
+
+        // 2. Clone parent's system prompt and registry
+        let system_prompt = self.system_prompt.clone();
+        let registry = self.shared_registry.clone();
+        let trust = self.trust;
+        let headless = self.headless;
+
+        // Trace: SubAgentLifecycle Spawned
+        self.observer_set.on_point(&crate::trace::types::PointEvent {
+            ts: crate::trace::types::now_ts(),
+            kind: crate::trace::types::EventKind::SubAgentLifecycle {
+                agent_id: format!("fork_{}", std::process::id()),
+                status: crate::trace::types::SubAgentStatus::Spawned,
+                parent_span_id: String::new(),
+            },
+            meta: serde_json::json!({}),
+        });
+
+        if background {
+            let task_id = format!("fork_{}", std::process::id());
+            let task_id_spawn = task_id.clone();
+            let _ = event_tx.send(AgentEvent::TaskSpawned {
+                task_id: task_id.clone(),
+                description: task.chars().take(80).collect(),
+            });
+            // Clone the task_notifications queue so the background thread can
+            // push the result back to the parent's next turn.
+            let nt_queue = self.task_notifications.clone();
+            thread::spawn(move || {
+                let mut child = AgentLoop::fork_sub(
+                    provider, model, mt, temp, root,
+                    parent_messages, system_prompt, registry, trust, headless,
+                );
+                child.process_turn(task, &child_tx);
+                let output = child.last_assistant_text();
+                let notification = format!(
+                    "## Background task completed\n**task**: {task_id_spawn}\n**result**: {output}"
+                );
+                nt_queue.push(notification);
+            });
+            // Return immediately, don't wait
+            return format!("task {task_id} started in background");
+        }
+
+        // Synchronous: run on a new thread, wait for completion
+        let handle = thread::spawn(move || {
+            let mut child = AgentLoop::fork_sub(
+                provider, model, mt, temp, root,
+                parent_messages, system_prompt, registry, trust, headless,
+            );
+            child.process_turn(task, &child_tx);
+            child.last_assistant_text()
+        });
+
+        // Trace: SubAgentLifecycle Running
+        self.observer_set.on_point(&crate::trace::types::PointEvent {
+            ts: crate::trace::types::now_ts(),
+            kind: crate::trace::types::EventKind::SubAgentLifecycle {
+                agent_id: format!("fork_{}", std::process::id()),
+                status: crate::trace::types::SubAgentStatus::Running,
+                parent_span_id: String::new(),
+            },
+            meta: serde_json::json!({}),
+        });
+
+        for ev in child_rx {
+            if let AgentEvent::ToolStarted { name, .. } = ev {
+                let _ = event_tx.send(AgentEvent::SubAgentMilestone(name));
+            }
+        }
+        let output = handle.join().unwrap_or_else(|_| "fork sub-agent panicked".into());
+
+        self.observer_set.on_point(&crate::trace::types::PointEvent {
+            ts: crate::trace::types::now_ts(),
+            kind: crate::trace::types::EventKind::SubAgentLifecycle {
+                agent_id: format!("fork_{}", std::process::id()),
+                status: crate::trace::types::SubAgentStatus::Done,
+                parent_span_id: String::new(),
+            },
+            meta: serde_json::json!({}),
+        });
+
+        let _ = event_tx.send(AgentEvent::SubAgentMilestone("done".into()));
+        output
+    }
+
+    /// Fresh mode: zero context, full toolbox, inherits parent system prompt.
+    /// The task prompt must provide complete background.
+    fn spawn_sub_agent_fresh(&mut self, task: String, background: bool,
+        event_tx: &Sender<AgentEvent>) -> String
+    {
+        let _ = event_tx.send(AgentEvent::SubAgentMilestone("fresh".into()));
+        let (child_tx, child_rx) = channel::<AgentEvent>();
+        let provider = Arc::clone(&self.provider);
+        let (model, mt, temp, root) =
+            (self.model.clone(), self.max_tokens, self.temperature, self.root.clone());
+        let system_prompt = self.system_prompt.clone();
+        let registry = self.shared_registry.clone();
+        let trust = self.trust;
+        let headless = self.headless;
+
+        // Trace: SubAgentLifecycle Spawned
+        self.observer_set.on_point(&crate::trace::types::PointEvent {
+            ts: crate::trace::types::now_ts(),
+            kind: crate::trace::types::EventKind::SubAgentLifecycle {
+                agent_id: format!("fresh_{}", std::process::id()),
+                status: crate::trace::types::SubAgentStatus::Spawned,
+                parent_span_id: String::new(),
+            },
+            meta: serde_json::json!({}),
+        });
+
+        if background {
+            let task_id = format!("fresh_{}", std::process::id());
+            let task_id_clone = task_id.clone();
+            let _ = event_tx.send(AgentEvent::TaskSpawned {
+                task_id: task_id.clone(),
+                description: task.chars().take(80).collect(),
+            });
+            let nt_queue = self.task_notifications.clone();
+            thread::spawn(move || {
+                let mut child = AgentLoop::fresh_sub(
+                    provider, model, mt, temp, root,
+                    system_prompt, registry, trust, headless,
+                );
+                child.process_turn(task, &child_tx);
+                let output = child.last_assistant_text();
+                let notification = format!(
+                    "## Background task completed\n**task**: {task_id_clone}\n**result**: {output}"
+                );
+                nt_queue.push(notification);
+            });
+            return format!("task {task_id} started in background");
+        }
+
+        let handle = thread::spawn(move || {
+            let mut child = AgentLoop::fresh_sub(
+                provider, model, mt, temp, root,
+                system_prompt, registry, trust, headless,
+            );
+            child.process_turn(task, &child_tx);
+            child.last_assistant_text()
+        });
+
+        self.observer_set.on_point(&crate::trace::types::PointEvent {
+            ts: crate::trace::types::now_ts(),
+            kind: crate::trace::types::EventKind::SubAgentLifecycle {
+                agent_id: format!("fresh_{}", std::process::id()),
+                status: crate::trace::types::SubAgentStatus::Running,
+                parent_span_id: String::new(),
+            },
+            meta: serde_json::json!({}),
+        });
+
+        for ev in child_rx {
+            if let AgentEvent::ToolStarted { name, .. } = ev {
+                let _ = event_tx.send(AgentEvent::SubAgentMilestone(name));
+            }
+        }
+        let output = handle.join().unwrap_or_else(|_| "fresh sub-agent panicked".into());
+
+        self.observer_set.on_point(&crate::trace::types::PointEvent {
+            ts: crate::trace::types::now_ts(),
+            kind: crate::trace::types::EventKind::SubAgentLifecycle {
+                agent_id: format!("fresh_{}", std::process::id()),
+                status: crate::trace::types::SubAgentStatus::Done,
+                parent_span_id: String::new(),
+            },
+            meta: serde_json::json!({}),
+        });
+
+        let _ = event_tx.send(AgentEvent::SubAgentMilestone("done".into()));
+        output
     }
 
     /// Run an independent read-only review sub-agent against `target` and parse
@@ -1861,10 +2174,17 @@ impl AgentLoop {
 
 /// 小步写纪律(迭代 2):始终注入,减少单次巨量 write_file 被 max_tokens 截断。
 const SMALL_STEP_WRITE_GUIDANCE: &str =
-    "When writing a large file, prefer building it up in smaller chunks \
-     (multiple append-style edit_file / write_file calls) rather than one \
-     giant write_file — a single oversized tool call can be cut off at \
-     max_tokens and fail.";
+    "When writing a large file, never try to create it in one giant write_file \
+     call — a single oversized tool call can be cut off at max_tokens and fail. \
+     Instead build it up incrementally:\n\
+     - Create the file with write_file (first chunk), then append subsequent \
+       chunks with write_file + append=true.\n\
+     - For a file that already exists, use edit_file to replace a specific \
+       section (old → new) rather than rewriting the whole thing.\n\
+     - Keep each tool call's content small enough to fit comfortably within a \
+       single response (a few hundred lines at most).\n\
+     - If a write is truncated mid-way, the file may be partially created — \
+       resume with append=true rather than overwriting from scratch.";
 
 /// Build the System prompt from AGENTS.md (identity) + the already-rendered
 /// catalog string (ADR 0020). "Filesystem as self": both come from disk, not
@@ -2000,7 +2320,7 @@ mod tests {
         drop(etx);
         let events: Vec<_> = erx.into_iter().collect();
 
-        assert!(events.iter().any(|e| matches!(e, AgentEvent::SubAgentMilestone(m) if m == "started")));
+        assert!(events.iter().any(|e| matches!(e, AgentEvent::SubAgentMilestone(m) if m == "forked")));
         assert!(events.iter().any(|e| matches!(e, AgentEvent::SubAgentMilestone(m) if m == "done")));
 
         // The sub-agent's findings were fed back as a tool result...
