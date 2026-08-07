@@ -1,4 +1,4 @@
-// cc — 薄 CLI 客户端，连 ccd daemon（$CODECODER_ROOT/.ccd.sock）。
+// ccli — 薄 CLI 客户端，连 ccd daemon（$CODECODER_ROOT/.ccd.sock）。
 // 无 ratatui，纯 stdin/stdout。
 use codecoder::client::{default_sock_path, print_event, prompt_user, Connection};
 use codecoder::daemon::proto::{ClientRequest, ServerEvent};
@@ -14,7 +14,7 @@ fn main() -> anyhow::Result<()> {
     match args.as_slice() {
         [] => repl(&sock),
         [one] if one == "help" || one == "--help" => {
-            println!("cc -- CodeCoder client");
+            println!("ccli -- CodeCoder client");
             println!();
             println!("USAGE:");
             println!("  cc <message>           Send a message (one-shot mode)");
@@ -86,7 +86,7 @@ fn main() -> anyhow::Result<()> {
                         n = it.next().and_then(|v| v.parse().ok()).unwrap_or(10);
                     }
                     other => {
-                        eprintln!("cc ledger: unknown flag '{other}'");
+                        eprintln!("ccli ledger: unknown flag '{other}'");
                         std::process::exit(2);
                     }
                 }
@@ -124,7 +124,7 @@ fn main() -> anyhow::Result<()> {
 /// 发单个请求，打印所有事件直到终态，退出（Task 9a: 支持 Prompt）。
 fn send_one(sock: &std::path::Path, req: ClientRequest) -> anyhow::Result<()> {
     let mut conn = Connection::connect(sock)
-        .map_err(|e| anyhow::anyhow!("cannot connect to daemon at {}: {e}\n(is `ccd` running? CODECODER_DAEMON=1 cargo run)", sock.display()))?;
+        .map_err(|e| anyhow::anyhow!("cannot connect to daemon at {}: {e}\n(is `ccd` running? cargo run --bin ccda)", sock.display()))?;
     conn.send(&req)?;
     loop {
         match conn.next_event()? {

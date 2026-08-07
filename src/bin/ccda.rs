@@ -17,7 +17,7 @@ fn main() -> anyhow::Result<()> {
                 println!("  {} --version         Show version", args[0]);
                 println!();
                 println!("Modes (set via environment variable, mutually exclusive):");
-                println!("  CODECODER_DAEMON=1           Run as daemon (default)");
+                println!("  cargo run --bin ccda          Run as daemon (default)");
                 println!("  CODECODER_BG_TASK=<task>     Run one headless task, then exit");
                 println!("  CODECODER_BG_WORKGRAPH=1     Run workgraph milestones headless, then exit");
                 println!();

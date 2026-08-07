@@ -29,7 +29,7 @@ fn main() {
                 i += 2;
             }
             other => {
-                eprintln!("cc-web: unknown flag {other}");
+                eprintln!("ccweb: unknown flag {other}");
                 std::process::exit(1);
             }
         }
@@ -49,12 +49,12 @@ fn main() {
         .unwrap_or_else(|_| std::env::current_dir().expect("no cwd"));
 
     // Connect to daemon
-    eprintln!("cc-web: connecting to daemon at {}", sock_path.display());
+    eprintln!("ccweb: connecting to daemon at {}", sock_path.display());
     let mut client = match SocketClient::connect(&sock_path) {
         Ok(c) => c,
         Err(e) => {
-            eprintln!("cc-web: failed to connect to daemon: {e}");
-            eprintln!("cc-web: make sure the daemon is running (CODECODER_DAEMON=1 cargo run)");
+            eprintln!("ccweb: failed to connect to daemon: {e}");
+            eprintln!("ccweb: make sure the daemon is running (cargo run --bin ccda)");
             std::process::exit(1);
         }
     };
@@ -75,7 +75,7 @@ fn main() {
     let mut file_watcher = match FileWatcher::new(&root, router.clone()) {
         Ok(w) => w,
         Err(e) => {
-            eprintln!("cc-web: file watcher init failed (non-fatal): {e}");
+            eprintln!("ccweb: file watcher init failed (non-fatal): {e}");
             FileWatcher::dummy()
         }
     };
@@ -106,7 +106,7 @@ fn main() {
         Some(root.clone()),
     )
     .unwrap_or_else(|e| {
-            eprintln!("cc-web: failed to start HTTP server: {e}");
+            eprintln!("ccweb: failed to start HTTP server: {e}");
             std::process::exit(1);
         });
 
@@ -114,17 +114,17 @@ fn main() {
     // serve() returns cleanly (mirrors the daemon, ADR 0026/0032). No SIGKILL needed.
     let shutdown = Arc::new(AtomicBool::new(false));
     if let Err(e) = signal_hook::flag::register(signal_hook::consts::SIGINT, Arc::clone(&shutdown)) {
-        eprintln!("cc-web: SIGINT handler not registered: {e}");
+        eprintln!("ccweb: SIGINT handler not registered: {e}");
     }
     if let Err(e) = signal_hook::flag::register(signal_hook::consts::SIGTERM, Arc::clone(&shutdown)) {
-        eprintln!("cc-web: SIGTERM handler not registered: {e}");
+        eprintln!("ccweb: SIGTERM handler not registered: {e}");
     }
 
-    println!("cc-web: listening on http://localhost:{port}");
-    println!("cc-web: press Ctrl+C to stop");
+    println!("ccweb: listening on http://localhost:{port}");
+    println!("ccweb: press Ctrl+C to stop");
 
     // Serve HTTP (blocks until shutdown flag is set).
     Arc::new(http).serve(Arc::clone(&shutdown));
 
-    println!("cc-web: shut down gracefully");
+    println!("ccweb: shut down gracefully");
 }

@@ -100,7 +100,7 @@ impl SocketClient {
                             }
                             Err(e) => {
                                 eprintln!(
-                                    "cc-web: failed to parse ServerEvent: {e} (line: {trimmed:?})"
+                                    "ccweb: failed to parse ServerEvent: {e} (line: {trimmed:?})"
                                 );
                             }
                         }
@@ -112,7 +112,7 @@ impl SocketClient {
                         continue;
                     }
                     Err(e) => {
-                        eprintln!("cc-web: read error: {e}");
+                        eprintln!("ccweb: read error: {e}");
                         if let Some(ref cb) = *cb.lock().unwrap() {
                             cb(&ServerEvent::Notice {
                                 text: format!("read error: {e}"),
