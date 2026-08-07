@@ -729,4 +729,183 @@ mod tests {
         let resp: JsonRpcResponse = serde_json::from_value(bad).unwrap();
         assert_ne!(resp.jsonrpc, "2.0");
     }
+
+    // ── Integration-style tests (mock MCP server subprocess over stdio) ──
+
+    /// Shared Python preamble for a mock MCP server. Reads framed JSON-RPC
+    /// requests from `sys.stdin.buffer` (binary, so it never mixes buffering
+    /// with the text wrapper) and writes framed responses to stdout.
+    const PY_FRAME_PREAMBLE: &str = r#"
+import sys, json
+
+def write_msg(msg):
+    body = json.dumps(msg).encode()
+    sys.stdout.buffer.write(f"Content-Length: {len(body)}\r\n\r\n".encode())
+    sys.stdout.buffer.write(body)
+    sys.stdout.buffer.flush()
+
+def read_msg():
+    cl = 0
+    while True:
+        line = sys.stdin.buffer.readline()
+        if not line:
+            sys.exit(0)
+        if line.startswith(b"Content-Length:"):
+            cl = int(line.split(b":")[1].strip())
+        if line in (b"\r\n", b"\n"):
+            break
+    body = sys.stdin.buffer.read(cl)
+    return json.loads(body)
+"#;
+
+    /// Spin up a mock MCP server from `script` (with the frame preamble) and
+    /// return an `McpClient` wired to it.
+    fn spawn_mock_mcp_server(script: &str) -> McpClient {
+        let mut server = std::process::Command::new("python3")
+            .arg("-c")
+            .arg(script)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::inherit())
+            .spawn()
+            .expect("failed to spawn mock MCP server");
+
+        let stdin = std::io::BufWriter::new(server.stdin.take().unwrap());
+        let stdout = std::io::BufReader::new(server.stdout.take().unwrap());
+
+        McpClient { child: server, stdin, stdout, next_id: 1, initialized: false }
+    }
+
+    /// Full MCP lifecycle: initialize → tools/list → tools/call.
+    #[test]
+    fn mock_server_tools_list_and_call() {
+        let script = format!(
+            r#"{PY_FRAME_PREAMBLE}
+# initialize
+req = read_msg()
+assert req["method"] == "initialize"
+write_msg({{"jsonrpc":"2.0","id":req["id"],"result":{{"protocolVersion":"2024-11-05","capabilities":{{}},"serverInfo":{{"name":"mock","version":"1.0"}}}}}})
+# initialized notification
+_ = read_msg()
+# tools/list
+req = read_msg()
+assert req["method"] == "tools/list"
+write_msg({{"jsonrpc":"2.0","id":req["id"],"result":{{"tools":[{{"name":"echo","description":"Echo back input","input_schema":{{"type":"object","properties":{{"text":{{"type":"string"}}}},"required":["text"]}}}}]}}}})
+# tools/call
+req = read_msg()
+assert req["method"] == "tools/call"
+args = req["params"]["arguments"]
+write_msg({{"jsonrpc":"2.0","id":req["id"],"result":{{"content":[{{"type":"text","text":"echo: " + json.dumps(args)}}],"isError":False}}}})
+"#
+        );
+        let mut client = spawn_mock_mcp_server(&script);
+
+        client.initialize().expect("initialize should succeed");
+        let tools = client.list_tools().expect("list_tools should succeed");
+        assert_eq!(tools.len(), 1);
+        assert_eq!(tools[0].name, "echo");
+        assert_eq!(tools[0].description, "Echo back input");
+
+        let result = client.call_tool("echo", json!({"text": "hello world"})).expect("call_tool should succeed");
+        assert!(result.contains("hello world"));
+
+        client.shutdown().expect("shutdown should succeed");
+    }
+
+    /// Mock server returns an error (isError: true) from tools/call.
+    #[test]
+    fn mock_server_tool_call_error() {
+        let script = format!(
+            r#"{PY_FRAME_PREAMBLE}
+req = read_msg()
+assert req["method"] == "initialize"
+write_msg({{"jsonrpc":"2.0","id":req["id"],"result":{{"protocolVersion":"2024-11-05","capabilities":{{}},"serverInfo":{{"name":"mock","version":"1.0"}}}}}})
+_ = read_msg()
+req = read_msg()
+assert req["method"] == "tools/list"
+write_msg({{"jsonrpc":"2.0","id":req["id"],"result":{{"tools":[{{"name":"fail","description":"Always fails","input_schema":{{"type":"object","properties":{{}}}}}}]}}}})
+req = read_msg()
+assert req["method"] == "tools/call"
+write_msg({{"jsonrpc":"2.0","id":req["id"],"result":{{"content":[{{"type":"text","text":"something went wrong"}}],"isError":True}}}})
+"#
+        );
+        let mut client = spawn_mock_mcp_server(&script);
+
+        client.initialize().expect("initialize should succeed");
+        let tools = client.list_tools().expect("list_tools should succeed");
+        assert_eq!(tools[0].name, "fail");
+
+        let err = client.call_tool("fail", json!({})).unwrap_err();
+        assert!(err.to_string().contains("reported an error"), "got: {err}");
+    }
+
+    /// Mock server returns a resource list from resources/list.
+    #[test]
+    fn mock_server_list_resources() {
+        let script = format!(
+            r#"{PY_FRAME_PREAMBLE}
+req = read_msg()
+assert req["method"] == "initialize"
+write_msg({{"jsonrpc":"2.0","id":req["id"],"result":{{"protocolVersion":"2024-11-05","capabilities":{{}},"serverInfo":{{"name":"mock","version":"1.0"}}}}}})
+_ = read_msg()
+req = read_msg()
+assert req["method"] == "resources/list"
+write_msg({{"jsonrpc":"2.0","id":req["id"],"result":{{"resources":[{{"uri":"file:///tmp/test.txt","name":"test","description":"A test file","mimeType":"text/plain"}}]}}}})
+"#
+        );
+        let mut client = spawn_mock_mcp_server(&script);
+
+        client.initialize().expect("initialize should succeed");
+        let res = client.list_resources().expect("list_resources should succeed");
+        let resources = res.get("resources").and_then(|v| v.as_array()).expect("should have resources array");
+        assert_eq!(resources.len(), 1);
+        assert_eq!(resources[0]["uri"], "file:///tmp/test.txt");
+        assert_eq!(resources[0]["name"], "test");
+    }
+
+    /// Mock server returns resource content from resources/read.
+    #[test]
+    fn mock_server_read_resource() {
+        let script = format!(
+            r#"{PY_FRAME_PREAMBLE}
+req = read_msg()
+assert req["method"] == "initialize"
+write_msg({{"jsonrpc":"2.0","id":req["id"],"result":{{"protocolVersion":"2024-11-05","capabilities":{{}},"serverInfo":{{"name":"mock","version":"1.0"}}}}}})
+_ = read_msg()
+req = read_msg()
+assert req["method"] == "resources/read"
+write_msg({{"jsonrpc":"2.0","id":req["id"],"result":{{"contents":[{{"uri":"file:///tmp/test.txt","text":"hello world","mimeType":"text/plain"}}]}}}})
+"#
+        );
+        let mut client = spawn_mock_mcp_server(&script);
+
+        client.initialize().expect("initialize should succeed");
+        let text = client.read_resource("file:///tmp/test.txt").expect("read_resource should succeed");
+        assert_eq!(text, "hello world");
+    }
+
+    /// Mock server sends a notification before the response, verifying the
+    /// id-skip logic in `request()`.
+    #[test]
+    fn mock_server_request_skips_notifications() {
+        let script = format!(
+            r#"{PY_FRAME_PREAMBLE}
+req = read_msg()
+assert req["method"] == "initialize"
+write_msg({{"jsonrpc":"2.0","id":req["id"],"result":{{"protocolVersion":"2024-11-05","capabilities":{{}},"serverInfo":{{"name":"mock","version":"1.0"}}}}}})
+_ = read_msg()
+# notification (no id) before the response
+write_msg({{"jsonrpc":"2.0","method":"notifications/message","params":{{"level":"info","data":"hello"}}}})
+req = read_msg()
+assert req["method"] == "tools/list"
+write_msg({{"jsonrpc":"2.0","id":req["id"],"result":{{"tools":[{{"name":"test-tool","description":"A test tool"}}]}}}})
+"#
+        );
+        let mut client = spawn_mock_mcp_server(&script);
+
+        client.initialize().expect("initialize should succeed");
+        let tools = client.list_tools().expect("list_tools should succeed");
+        assert_eq!(tools.len(), 1);
+        assert_eq!(tools[0].name, "test-tool");
+    }
 }

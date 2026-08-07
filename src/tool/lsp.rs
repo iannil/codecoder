@@ -1043,4 +1043,229 @@ mod tests {
         let resp: lsp_types::WorkspaceSymbolResponse = serde_json::from_value(json).unwrap();
         assert!(matches!(resp, lsp_types::WorkspaceSymbolResponse::Flat(_)));
     }
+
+    // ── Integration-style tests (mock LSP server over stdio) ─────────────
+
+    /// Minimal helper: spawn a `python3` mock LSP server process that speaks
+    /// the LSP initialize/initialized lifecycle and serves a canned response
+    /// for a single query method. Returns the spawned `LspClient`.
+    fn spawn_mock_lsp_server(script: &str) -> LspClient {
+        let mut server = std::process::Command::new("python3")
+            .arg("-c")
+            .arg(script)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("failed to spawn mock LSP server");
+
+        let stdin = std::io::BufWriter::new(server.stdin.take().unwrap());
+        let stdout = std::io::BufReader::new(server.stdout.take().unwrap());
+
+        LspClient {
+            child: server,
+            stdin,
+            stdout,
+            next_id: 1,
+            server_capabilities: None,
+            root_uri: Uri::from_str("file:///tmp").expect("valid uri"),
+        }
+    }
+
+    /// The stdout of a shared python preamble used by the mock servers below.
+    const PY_FRAME_PREAMBLE: &str = r#"
+import sys, json
+
+def write_msg(msg):
+    body = json.dumps(msg).encode()
+    sys.stdout.buffer.write(f"Content-Length: {len(body)}\r\n\r\n".encode())
+    sys.stdout.buffer.write(body)
+    sys.stdout.buffer.flush()
+
+def read_msg():
+    cl = 0
+    while True:
+        line = sys.stdin.buffer.readline()
+        if not line:
+            sys.exit(0)
+        if line.startswith(b"Content-Length:"):
+            cl = int(line.split(b":")[1].strip())
+        if line in (b"\r\n", b"\n"):
+            break
+    body = sys.stdin.buffer.read(cl)
+    return json.loads(body)
+"#;
+
+    /// Mock server: serve initialize, then a single `textDocument/definition`
+    /// returning one location.
+    #[test]
+    fn mock_server_go_to_definition() {
+        let script = format!(
+            r#"{PY_FRAME_PREAMBLE}
+# initialize
+req = read_msg()
+assert req["method"] == "initialize"
+write_msg({{"jsonrpc":"2.0","id":req["id"],"result":{{"capabilities":{{"definitionProvider":True}}}}}})
+# initialized notification
+_ = read_msg()
+# textDocument/definition
+req = read_msg()
+assert req["method"] == "textDocument/definition"
+write_msg({{"jsonrpc":"2.0","id":req["id"],"result":{{"uri":"file:///tmp/other.rs","range":{{"start":{{"line":3,"character":0}},"end":{{"line":3,"character":10}}}}}}}})
+"#
+        );
+        let mut client = spawn_mock_lsp_server(&script);
+        let caps = client.initialize().expect("initialize should succeed");
+        assert!(caps.definition_provider.is_some());
+
+        let uri = Uri::from_str("file:///tmp/test.rs").unwrap();
+        let locs = client
+            .go_to_definition(&uri, 1, 5)
+            .expect("go_to_definition should succeed");
+        assert_eq!(locs.len(), 1);
+        assert_eq!(locs[0].uri.as_str(), "file:///tmp/other.rs");
+        assert_eq!(locs[0].range.start.line, 3);
+    }
+
+    /// Mock server: serve initialize, then `textDocument/hover` returning a
+    /// hover with a markdown string.
+    #[test]
+    fn mock_server_hover() {
+        let script = format!(
+            r#"{PY_FRAME_PREAMBLE}
+req = read_msg()
+assert req["method"] == "initialize"
+write_msg({{"jsonrpc":"2.0","id":req["id"],"result":{{"capabilities":{{"hoverProvider":True}}}}}})
+_ = read_msg()
+req = read_msg()
+assert req["method"] == "textDocument/hover"
+write_msg({{"jsonrpc":"2.0","id":req["id"],"result":{{"contents":{{"kind":"markdown","value":"**Foo** - Definition of foo"}},"range":{{"start":{{"line":1,"character":0}},"end":{{"line":1,"character":3}}}}}}}})
+"#
+        );
+        let mut client = spawn_mock_lsp_server(&script);
+        client.initialize().expect("initialize should succeed");
+
+        let uri = Uri::from_str("file:///tmp/test.rs").unwrap();
+        let hover = client.hover(&uri, 1, 1).expect("hover should succeed");
+        let hover = hover.expect("hover should return Some");
+        let contents_json = serde_json::to_value(&hover.contents).unwrap();
+        assert!(contents_json.to_string().contains("Definition of foo"));
+    }
+
+    /// Mock server: serve initialize, then `textDocument/references` returning
+    /// an array of locations.
+    #[test]
+    fn mock_server_find_references() {
+        let script = format!(
+            r#"{PY_FRAME_PREAMBLE}
+req = read_msg()
+assert req["method"] == "initialize"
+write_msg({{"jsonrpc":"2.0","id":req["id"],"result":{{"capabilities":{{"referencesProvider":True}}}}}})
+_ = read_msg()
+req = read_msg()
+assert req["method"] == "textDocument/references"
+write_msg({{"jsonrpc":"2.0","id":req["id"],"result":[{{"uri":"file:///tmp/test.rs","range":{{"start":{{"line":0,"character":0}},"end":{{"line":0,"character":3}}}}}},{{"uri":"file:///tmp/other.rs","range":{{"start":{{"line":5,"character":1}},"end":{{"line":5,"character":4}}}}}}]}})
+"#
+        );
+        let mut client = spawn_mock_lsp_server(&script);
+        client.initialize().expect("initialize should succeed");
+
+        let uri = Uri::from_str("file:///tmp/test.rs").unwrap();
+        let locs = client.find_references(&uri, 0, 0).expect("find_references should succeed");
+        assert_eq!(locs.len(), 2);
+        assert_eq!(locs[1].uri.as_str(), "file:///tmp/other.rs");
+        assert_eq!(locs[1].range.start.line, 5);
+    }
+
+    /// Mock server: serve initialize, then `workspace/symbol` returning a
+    /// flat list of SymbolInformation.
+    #[test]
+    fn mock_server_workspace_symbol() {
+        let script = format!(
+            r#"{PY_FRAME_PREAMBLE}
+req = read_msg()
+assert req["method"] == "initialize"
+write_msg({{"jsonrpc":"2.0","id":req["id"],"result":{{"capabilities":{{"workspaceSymbolProvider":True}}}}}})
+_ = read_msg()
+req = read_msg()
+assert req["method"] == "workspace/symbol"
+write_msg({{"jsonrpc":"2.0","id":req["id"],"result":[{{"name":"foo","kind":6,"location":{{"uri":"file:///tmp/test.rs","range":{{"start":{{"line":0,"character":0}},"end":{{"line":1,"character":0}}}}}}}}]}})
+"#
+        );
+        let mut client = spawn_mock_lsp_server(&script);
+        client.initialize().expect("initialize should succeed");
+
+        let syms = client.workspace_symbol("foo").expect("workspace_symbol should succeed");
+        assert_eq!(syms.len(), 1);
+        assert_eq!(syms[0].name, "foo");
+    }
+
+    /// Mock server: serve initialize, then `textDocument/documentSymbol`
+    /// returning a nested DocumentSymbol tree.
+    #[test]
+    fn mock_server_document_symbol() {
+        let script = format!(
+            r#"{PY_FRAME_PREAMBLE}
+req = read_msg()
+assert req["method"] == "initialize"
+write_msg({{"jsonrpc":"2.0","id":req["id"],"result":{{"capabilities":{{"documentSymbolProvider":True}}}}}})
+_ = read_msg()
+req = read_msg()
+assert req["method"] == "textDocument/documentSymbol"
+write_msg({{"jsonrpc":"2.0","id":req["id"],"result":[{{"name":"Foo","kind":6,"range":{{"start":{{"line":0,"character":0}},"end":{{"line":5,"character":0}}}},"selectionRange":{{"start":{{"line":0,"character":0}},"end":{{"line":0,"character":3}}}},"children":[{{"name":"bar","kind":13,"range":{{"start":{{"line":2,"character":0}},"end":{{"line":4,"character":0}}}},"selectionRange":{{"start":{{"line":2,"character":0}},"end":{{"line":2,"character":3}}}}}}]}}]}})
+"#
+        );
+        let mut client = spawn_mock_lsp_server(&script);
+        client.initialize().expect("initialize should succeed");
+
+        let uri = Uri::from_str("file:///tmp/test.rs").unwrap();
+        let syms = client.document_symbol(&uri).expect("document_symbol should succeed");
+        assert_eq!(syms.len(), 1);
+        assert_eq!(syms[0].name, "Foo");
+        assert_eq!(syms[0].children.as_ref().map(Vec::len).unwrap_or(0), 1);
+    }
+
+    /// Mock server: serve initialize, then `textDocument/implementation`
+    /// returning a single location.
+    #[test]
+    fn mock_server_go_to_implementation() {
+        let script = format!(
+            r#"{PY_FRAME_PREAMBLE}
+req = read_msg()
+assert req["method"] == "initialize"
+write_msg({{"jsonrpc":"2.0","id":req["id"],"result":{{"capabilities":{{"implementationProvider":True}}}}}})
+_ = read_msg()
+req = read_msg()
+assert req["method"] == "textDocument/implementation"
+write_msg({{"jsonrpc":"2.0","id":req["id"],"result":{{"uri":"file:///tmp/impl.rs","range":{{"start":{{"line":9,"character":0}},"end":{{"line":9,"character":15}}}}}}}})
+"#
+        );
+        let mut client = spawn_mock_lsp_server(&script);
+        client.initialize().expect("initialize should succeed");
+
+        let uri = Uri::from_str("file:///tmp/test.rs").unwrap();
+        let locs = client.go_to_implementation(&uri, 2, 5).expect("go_to_implementation should succeed");
+        assert_eq!(locs.len(), 1);
+        assert_eq!(locs[0].uri.as_str(), "file:///tmp/impl.rs");
+        assert_eq!(locs[0].range.start.line, 9);
+    }
+
+    /// Verify the LSP initialize request carries the correct processId and
+    /// rootUri fields by inspecting what the mock server receives.
+    #[test]
+    fn mock_server_initialize_request_shape() {
+        let script = format!(
+            r#"{PY_FRAME_PREAMBLE}
+req = read_msg()
+assert req["method"] == "initialize"
+assert "processId" in req["params"], req["params"]
+assert "rootUri" in req["params"], req["params"]
+assert req["params"]["rootUri"] == "file:///tmp"
+write_msg({{"jsonrpc":"2.0","id":req["id"],"result":{{"capabilities":{{}}}}}})
+_ = read_msg()
+"#
+        );
+        let mut client = spawn_mock_lsp_server(&script);
+        let _caps = client.initialize().expect("initialize should succeed");
+    }
 }
