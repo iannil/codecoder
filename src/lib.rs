@@ -12,6 +12,7 @@ pub mod bg_observer;
 pub mod capability;
 pub mod compaction;
 pub mod config;
+pub mod help;
 pub mod memory;
 pub mod message;
 pub mod permission;
