@@ -13,26 +13,39 @@ use lsp_types::Uri;
 use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, BufWriter, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 use std::str::FromStr;
 
 // ── URI helper ────────────────────────────────────────────────────────────
 
-/// Convert a file path to a `file://` URI string.
-fn path_to_uri(path: &Path) -> anyhow::Result<String> {
-    if !path.is_absolute() {
-        anyhow::bail!("path must be absolute: {}", path.display());
-    }
-    // On Unix, absolute paths start with `/`, so `file:///path` is correct.
-    Ok(format!("file://{}", path.display()))
+/// Convert an (absolute) file path to a `file://` URI, percent-encoding special
+/// characters (spaces, `#`, `?`, non-ASCII) via `url::Url::from_file_path`.
+fn file_path_to_uri(path: &Path) -> anyhow::Result<Uri> {
+    let url = url::Url::from_file_path(path)
+        .map_err(|_| anyhow!("failed to convert path to URI: {}", path.display()))?;
+    Uri::from_str(url.as_str()).map_err(|e| anyhow!("invalid URI '{}': {e}", url.as_str()))
 }
 
-/// Convert a file path string to a `lsp_types::Uri`.
-fn file_path_to_uri(file_path: &str) -> anyhow::Result<Uri> {
-    let path = std::path::Path::new(file_path);
-    let uri_str = path_to_uri(path)?;
-    Uri::from_str(&uri_str).map_err(|e| anyhow!("invalid URI '{uri_str}': {e}"))
+/// LSP `languageId` value for `textDocument/didOpen`, from a file extension.
+fn language_id(file_path: &str) -> &'static str {
+    if file_path.ends_with(".rs") {
+        "rust"
+    } else if file_path.ends_with(".py") {
+        "python"
+    } else if file_path.ends_with(".js") || file_path.ends_with(".jsx") {
+        "javascript"
+    } else if file_path.ends_with(".ts") || file_path.ends_with(".tsx") {
+        "typescript"
+    } else if file_path.ends_with(".go") {
+        "go"
+    } else if file_path.ends_with(".cpp") || file_path.ends_with(".hpp") {
+        "cpp"
+    } else if file_path.ends_with(".c") || file_path.ends_with(".h") {
+        "c"
+    } else {
+        ""
+    }
 }
 
 // ── Framing helpers (identical to mcp.rs: `Content-Length` header) ─────────
@@ -115,9 +128,7 @@ pub struct LspClient {
 impl LspClient {
     /// Start the language server subprocess and set up the stdio pipes.
     pub fn spawn(command: &str, args: &[String], root: &Path) -> anyhow::Result<Self> {
-        let root_uri_str = path_to_uri(root)?;
-        let root_uri = Uri::from_str(&root_uri_str)
-            .map_err(|e| anyhow!("invalid root URI '{root_uri_str}': {e}"))?;
+        let root_uri = file_path_to_uri(root)?;
         let mut cmd = Command::new(command);
         cmd.args(args)
             .stdin(Stdio::piped())
@@ -218,11 +229,11 @@ impl LspClient {
     }
 
     /// Open a document (textDocument/didOpen).
-    pub fn did_open(&mut self, uri: &Uri, text: &str, version: i32) -> anyhow::Result<()> {
+    pub fn did_open(&mut self, uri: &Uri, text: &str, version: i32, language_id: &str) -> anyhow::Result<()> {
         let params = json!({
             "textDocument": {
                 "uri": uri.as_str(),
-                "languageId": "",
+                "languageId": language_id,
                 "version": version,
                 "text": text,
             }
@@ -387,31 +398,32 @@ impl Drop for LspClient {
 
 // ── LspManager: global server lifecycle ───────────────────────────────────
 
-/// Global LSP client manager. Holds spawned clients keyed by server command name.
+/// Global LSP client manager. Holds spawned clients, each keyed by `(root, command)`
+/// so a single server command used under different project roots gets its own client
+/// (LSP servers are rooted at their workspace and must not be shared across roots).
 pub struct LspManager {
-    clients: HashMap<String, LspClient>,
-    root: Option<std::path::PathBuf>,
+    clients: HashMap<(PathBuf, String), LspClient>,
 }
 
 impl LspManager {
     fn new() -> Self {
-        Self { clients: HashMap::new(), root: None }
+        Self { clients: HashMap::new() }
     }
 
-    /// Get or create a client for the given server command.
+    /// Get or create a client for the given server command under `root`.
     pub fn get_client(
         &mut self,
         command: &str,
         args: &[String],
         root: &Path,
     ) -> anyhow::Result<&mut LspClient> {
-        if !self.clients.contains_key(command) {
-            self.root = Some(root.to_path_buf());
+        let key = (root.to_path_buf(), command.to_string());
+        if !self.clients.contains_key(&key) {
             let mut client = LspClient::spawn(command, args, root)?;
             client.initialize()?;
-            self.clients.insert(command.to_string(), client);
+            self.clients.insert(key.clone(), client);
         }
-        Ok(self.clients.get_mut(command).expect("just inserted"))
+        Ok(self.clients.get_mut(&key).expect("just inserted"))
     }
 }
 
@@ -523,9 +535,10 @@ impl Tool for LspTool {
             }
         }
 
-        // workspace_symbol does not need a file_path.
-        let file_path = if operation == "workspace_symbol" {
-            String::new()
+        // workspace_symbol does not need a file_path. For document operations,
+        // resolve the relative path against the project root and read the file.
+        let (file_path, absolute_path, file_content) = if operation == "workspace_symbol" {
+            (String::new(), None, None)
         } else {
             let fp = args.get("file_path").and_then(Value::as_str).unwrap_or_default();
             if fp.is_empty() {
@@ -533,7 +546,12 @@ impl Tool for LspTool {
                     "lsp requires `file_path` for this operation",
                 ));
             }
-            fp.to_string()
+            let resolved = ctx.root.join(fp);
+            let content = match std::fs::read_to_string(&resolved) {
+                Ok(c) => c,
+                Err(e) => return Ok(ToolOutput::err(format!("cannot read file '{fp}': {e}"))),
+            };
+            (fp.to_string(), Some(resolved), Some(content))
         };
 
         // Detect the language server from the file extension.
@@ -555,52 +573,56 @@ impl Tool for LspTool {
             }
         };
 
+        // For document-based operations, build the URI and send didOpen first.
+        // workspace_symbol is workspace-wide and doesn't need a document.
+        let uri = if operation == "workspace_symbol" {
+            None
+        } else {
+            let abs = absolute_path.as_ref().expect("absolute_path set for non-workspace_symbol");
+            let u = file_path_to_uri(abs)?;
+            let content = file_content.as_ref().expect("file_content set for non-workspace_symbol");
+            let lang = language_id(&file_path);
+            client.did_open(&u, content, 1, lang)?;
+            Some(u)
+        };
+
         let result = match operation.as_str() {
             "go_to_definition" => {
                 let line = args.get("line").and_then(Value::as_u64).unwrap_or(0) as u32;
                 let character = args.get("character").and_then(Value::as_u64).unwrap_or(0) as u32;
-                let uri = file_path_to_uri(&file_path)
-                    .map_err(|_| anyhow!("invalid file path: {file_path}"))?;
-                let locs = client.go_to_definition(&uri, line, character)?;
+                let u = uri.as_ref().expect("uri set for go_to_definition");
+                let locs = client.go_to_definition(u, line, character)?;
                 serde_json::to_string_pretty(&locs)?
             }
             "find_references" => {
                 let line = args.get("line").and_then(Value::as_u64).unwrap_or(0) as u32;
                 let character = args.get("character").and_then(Value::as_u64).unwrap_or(0) as u32;
-                let uri = file_path_to_uri(&file_path)
-                    .map_err(|_| anyhow!("invalid file path: {file_path}"))?;
-                let locs = client.find_references(&uri, line, character)?;
+                let u = uri.as_ref().expect("uri set for find_references");
+                let locs = client.find_references(u, line, character)?;
                 serde_json::to_string_pretty(&locs)?
             }
             "hover" => {
                 let line = args.get("line").and_then(Value::as_u64).unwrap_or(0) as u32;
                 let character = args.get("character").and_then(Value::as_u64).unwrap_or(0) as u32;
-                let uri = file_path_to_uri(&file_path)
-                    .map_err(|_| anyhow!("invalid file path: {file_path}"))?;
-                let h = client.hover(&uri, line, character)?;
+                let u = uri.as_ref().expect("uri set for hover");
+                let h = client.hover(u, line, character)?;
                 serde_json::to_string_pretty(&h)?
             }
             "document_symbol" => {
-                let uri = file_path_to_uri(&file_path)
-                    .map_err(|_| anyhow!("invalid file path: {file_path}"))?;
-                let syms = client.document_symbol(&uri)?;
+                let u = uri.as_ref().expect("uri set for document_symbol");
+                let syms = client.document_symbol(u)?;
                 serde_json::to_string_pretty(&syms)?
             }
             "workspace_symbol" => {
                 let query = args.get("query").and_then(Value::as_str).unwrap_or_default();
-                // query already validated early, but guard defensively.
-                if query.is_empty() {
-                    return Ok(ToolOutput::err("workspace_symbol requires `query`"));
-                }
                 let syms = client.workspace_symbol(query)?;
                 serde_json::to_string_pretty(&syms)?
             }
             "go_to_implementation" => {
                 let line = args.get("line").and_then(Value::as_u64).unwrap_or(0) as u32;
                 let character = args.get("character").and_then(Value::as_u64).unwrap_or(0) as u32;
-                let uri = file_path_to_uri(&file_path)
-                    .map_err(|_| anyhow!("invalid file path: {file_path}"))?;
-                let locs = client.go_to_implementation(&uri, line, character)?;
+                let u = uri.as_ref().expect("uri set for go_to_implementation");
+                let locs = client.go_to_implementation(u, line, character)?;
                 serde_json::to_string_pretty(&locs)?
             }
             // All unknown operations are caught by the early validation above,
@@ -794,6 +816,53 @@ mod tests {
             .unwrap();
         assert!(result.is_error);
         assert!(result.content.contains("unknown lsp operation"), "got: {}", result.content);
+    }
+
+    #[test]
+    fn lsp_tool_missing_file_errors() {
+        // A valid extension but a nonexistent file should fail with a read error,
+        // proving the path is resolved against the root before any server spawn.
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let result = LspTool
+            .run(
+                json!({"operation": "hover", "file_path": "does/not/exist.rs", "line": 0, "character": 0}),
+                &mut ToolCtx::new(root),
+            )
+            .unwrap();
+        assert!(result.is_error);
+        assert!(result.content.contains("cannot read file"), "got: {}", result.content);
+    }
+
+    // ── URI / language-id tests ──────────────────────────────────────────
+
+    #[test]
+    fn file_path_to_uri_encodes_spaces_and_special_chars() {
+        let p = Path::new("/tmp/my dir/file#1.rs");
+        let uri = file_path_to_uri(p).unwrap();
+        let s = uri.as_str();
+        assert!(s.starts_with("file:///tmp/my%20dir/file%231.rs"), "got: {s}");
+    }
+
+    #[test]
+    fn file_path_to_uri_plain_path() {
+        let p = Path::new("/home/user/src/main.rs");
+        let uri = file_path_to_uri(p).unwrap();
+        assert_eq!(uri.as_str(), "file:///home/user/src/main.rs");
+    }
+
+    #[test]
+    fn language_id_mapping() {
+        assert_eq!(language_id("src/main.rs"), "rust");
+        assert_eq!(language_id("app.py"), "python");
+        assert_eq!(language_id("index.js"), "javascript");
+        assert_eq!(language_id("index.jsx"), "javascript");
+        assert_eq!(language_id("app.ts"), "typescript");
+        assert_eq!(language_id("comp.tsx"), "typescript");
+        assert_eq!(language_id("main.go"), "go");
+        assert_eq!(language_id("main.c"), "c");
+        assert_eq!(language_id("main.cpp"), "cpp");
+        assert_eq!(language_id("readme.md"), "");
     }
 
     // ── Request/response simulation tests ────────────────────────────────
