@@ -11,45 +11,125 @@ fn main() -> anyhow::Result<()> {
     let sock = default_sock_path(&cfg);
     let args: Vec<String> = std::env::args().skip(1).collect();
 
+    let help_spec = codecoder::help::HelpSpec {
+        binary: "ccli",
+        title: "CodeCoder client",
+        description: "Thin CLI client that talks to the ccd daemon",
+        usage: &[
+            "cc <message>           Send a message (one-shot mode)",
+            "cc                     Start interactive REPL",
+            "cc help                Show this help",
+            "cc <subcommand>        Run a subcommand (see below)",
+        ],
+        config_note: concat!(
+            "First-run users — set up a `.ccd.env` in the project root for persistent\n",
+            "config (CODECODER_API_KEY, CODECODER_MODEL, etc.).\n",
+            "REPL commands (inside interactive mode):\n",
+            "  /exit                  Exit REPL\n",
+            "  /tree                  Show session tree\n",
+            "  /fork <id>             Navigate session tree\n",
+            "  /clone                 Clone current session\n",
+        ),
+        skills: &[
+            codecoder::help::SkillEntry {
+                name: "send",
+                description: "Send a message (one-shot mode)",
+                usage: &["cc <message>", "cc \"hello world\""],
+                schema: None,
+                template: None,
+            },
+            codecoder::help::SkillEntry {
+                name: "repl",
+                description: "Start interactive REPL",
+                usage: &["cc"],
+                schema: None,
+                template: None,
+            },
+            codecoder::help::SkillEntry {
+                name: "ledger",
+                description: "Show BG task ledger",
+                usage: &["cc ledger", "cc ledger --failed", "cc ledger --last <n>", "cc ledger --detail"],
+                schema: None,
+                template: None,
+            },
+            codecoder::help::SkillEntry {
+                name: "session",
+                description: "List sessions, resume, tree, fork, clone",
+                usage: &["cc sessions", "cc resume <id>", "cc tree", "cc fork <id>", "cc clone"],
+                schema: None,
+                template: None,
+            },
+            codecoder::help::SkillEntry {
+                name: "workgraph",
+                description: "Show workgraph milestone status and control auto-advance",
+                usage: &["cc workgraph", "cc workgraph-pause", "cc workgraph-resume", "cc milestone-reset <id>"],
+                schema: None,
+                template: None,
+            },
+            codecoder::help::SkillEntry {
+                name: "services",
+                description: "List running persistent services",
+                usage: &["cc services"],
+                schema: None,
+                template: None,
+            },
+            codecoder::help::SkillEntry {
+                name: "autotask",
+                description: "Start/stop autotask polling",
+                usage: &["cc autotask on", "cc autotask off", "cc autotask status"],
+                schema: None,
+                template: None,
+            },
+            codecoder::help::SkillEntry {
+                name: "health",
+                description: "Show daemon health status",
+                usage: &["cc health"],
+                schema: None,
+                template: None,
+            },
+        ],
+    };
+
+    // Help request handling (before subcommand dispatch; bare `cc help` also works).
+    let help_request = codecoder::help::parse_help_request(&args)
+        .or_else(|| if args.first().map(String::as_str) == Some("help") {
+            Some(codecoder::help::HelpRequest::Help { json: false })
+        } else {
+            None
+        });
+    if let Some(req) = help_request {
+        let skills_dir = {
+            let root = codecoder::Config::from_env().root;
+            root.join("skills")
+        };
+        match req {
+            codecoder::help::HelpRequest::Help { json: true } => {
+                println!("{}", serde_json::to_string_pretty(&codecoder::help::help_json(&help_spec)).unwrap());
+                return Ok(());
+            }
+            codecoder::help::HelpRequest::Help { json: false } => {
+                println!("{}", codecoder::help::render_help(&help_spec));
+                return Ok(());
+            }
+            codecoder::help::HelpRequest::Skill { name, json: true } => {
+                match codecoder::help::skill_json(&help_spec, &name, &skills_dir) {
+                    Some(v) => println!("{}", serde_json::to_string_pretty(&v).unwrap()),
+                    None => eprintln!("ccli: unknown skill '{name}'"),
+                }
+                return Ok(());
+            }
+            codecoder::help::HelpRequest::Skill { name, json: false } => {
+                match codecoder::help::render_skill(&help_spec, &name, &skills_dir) {
+                    Some(s) => println!("{s}"),
+                    None => eprintln!("ccli: unknown skill '{name}'"),
+                }
+                return Ok(());
+            }
+        }
+    }
+
     match args.as_slice() {
         [] => repl(&sock),
-        [one] if one == "help" || one == "--help" => {
-            println!("ccli -- CodeCoder client");
-            println!();
-            println!("USAGE:");
-            println!("  cc <message>           Send a message (one-shot mode)");
-            println!("  cc                     Start interactive REPL");
-            println!("  cc help                Show this help");
-            println!("  cc shutdown            Stop the daemon gracefully");
-            println!("  cc status              Show daemon status");
-            println!("  cc sessions            List all sessions");
-            println!("  cc resume <id>         Resume a session");
-            println!("  cc tree                Show session tree");
-            println!("  cc fork <id>           Navigate session tree (fork)");
-            println!("  cc clone               Clone current session");
-            println!("  cc ledger              Show BG task ledger");
-            println!("  cc ledger --failed     Show only failed BG tasks");
-            println!("  cc ledger --last <n>   Show last N BG tasks");
-            println!("  cc ledger --detail     Show detailed last BG task");
-            println!("  cc services            List running persistent services");
-            println!("  cc workgraph           Show workgraph milestone status");
-            println!("  cc workgraph-pause     Pause workgraph auto-advance");
-            println!("  cc workgraph-resume    Resume workgraph auto-advance");
-            println!("  cc milestone-reset <id>  Reset a needs_fix milestone to pending");
-            println!("  cc autotask on         Start autotask polling");
-            println!("  cc autotask off        Stop autotask polling");
-            println!("  cc autotask status     Show autotask polling status");
-            println!("  cc health               Show daemon health status");
-            println!();
-            println!("NOTE: First-run users — set up a `.ccd.env` in the project root for");
-            println!("persistent config (CODECODER_API_KEY, CODECODER_MODEL, etc.).");
-            println!("REPL commands (inside interactive mode):");
-            println!("  /exit                  Exit REPL");
-            println!("  /tree                  Show session tree");
-            println!("  /fork <id>             Navigate session tree");
-            println!("  /clone                 Clone current session");
-            Ok(())
-        }
         [one] if one == "sessions" => send_one(&sock, ClientRequest::ListSessions),
         [one] if one == "status" => send_one(&sock, ClientRequest::Status),
         [one] if one == "shutdown" => send_one(&sock, ClientRequest::Shutdown),
