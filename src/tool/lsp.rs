@@ -341,7 +341,24 @@ impl LspClient {
             .map_err(|e| anyhow!("failed to parse documentSymbol response: {e}"))?;
         match response {
             lsp_types::DocumentSymbolResponse::Nested(symbols) => Ok(symbols),
-            lsp_types::DocumentSymbolResponse::Flat(_) => Ok(Vec::new()),
+            lsp_types::DocumentSymbolResponse::Flat(flat) => {
+                // Convert Flat (Vec<SymbolInformation>) to Nested (Vec<DocumentSymbol>)
+                // by mapping each SymbolInformation's location.range as both range and
+                // selection_range.
+                Ok(flat
+                    .into_iter()
+                    .map(|si| lsp_types::DocumentSymbol {
+                        name: si.name,
+                        detail: None,
+                        kind: si.kind,
+                        tags: si.tags,
+                        deprecated: si.deprecated,
+                        range: si.location.range,
+                        selection_range: si.location.range,
+                        children: None,
+                    })
+                    .collect())
+            }
         }
     }
 
@@ -359,7 +376,40 @@ impl LspClient {
             .map_err(|e| anyhow!("failed to parse workspaceSymbol response: {e}"))?;
         match response {
             lsp_types::WorkspaceSymbolResponse::Flat(symbols) => Ok(symbols),
-            lsp_types::WorkspaceSymbolResponse::Nested(_) => Ok(Vec::new()),
+            lsp_types::WorkspaceSymbolResponse::Nested(nested) => {
+                // Flatten Nested (Vec<WorkspaceSymbol>) to Flat (Vec<SymbolInformation>).
+                // WorkspaceSymbol.location is OneOf<Location, WorkspaceLocation>.
+                // When it's only a uri (WorkspaceLocation), use a zero-length range.
+                Ok(nested
+                    .into_iter()
+                    .map(|ws| {
+                        let (uri, range) = match ws.location {
+                            lsp_types::OneOf::Left(loc) => (loc.uri, loc.range),
+                            lsp_types::OneOf::Right(wl) => {
+                                let zero = lsp_types::Range {
+                                    start: lsp_types::Position {
+                                        line: 0,
+                                        character: 0,
+                                    },
+                                    end: lsp_types::Position {
+                                        line: 0,
+                                        character: 0,
+                                    },
+                                };
+                                (wl.uri, zero)
+                            }
+                        };
+                        lsp_types::SymbolInformation {
+                            name: ws.name,
+                            kind: ws.kind,
+                            tags: ws.tags,
+                            deprecated: None,
+                            location: lsp_types::Location { uri, range },
+                            container_name: ws.container_name,
+                        }
+                    })
+                    .collect())
+            }
         }
     }
 
