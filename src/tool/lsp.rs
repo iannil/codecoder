@@ -113,6 +113,23 @@ pub fn detect_lsp_server(file_path: &str) -> Option<(&'static str, Vec<&'static 
     }
 }
 
+/// Detect the language server from the project root based on manifest files.
+/// Used for workspace-wide operations like `workspace_symbol` where there is
+/// no single file path to infer the server from.
+pub fn detect_lsp_server_for_workspace(root: &Path) -> Option<(&'static str, Vec<&'static str>)> {
+    if root.join("Cargo.toml").exists() {
+        Some(("rust-analyzer", vec![]))
+    } else if root.join("package.json").exists() {
+        Some(("typescript-language-server", vec!["--stdio"]))
+    } else if root.join("go.mod").exists() {
+        Some(("gopls", vec![]))
+    } else if root.join("pyproject.toml").exists() || root.join("requirements.txt").exists() {
+        Some(("pylsp", vec![]))
+    } else {
+        None
+    }
+}
+
 // ── LspClient: one server subprocess + JSON-RPC channel ───────────────────
 
 /// Manages a single language server subprocess and its JSON-RPC communication.
@@ -554,13 +571,28 @@ impl Tool for LspTool {
             (fp.to_string(), Some(resolved), Some(content))
         };
 
-        // Detect the language server from the file extension.
-        let (command, args_list) = match detect_lsp_server(&file_path) {
-            Some((cmd, a)) => (cmd, a.iter().map(|&s| s.to_string()).collect::<Vec<_>>()),
-            None => {
-                return Ok(ToolOutput::err(format!(
-                    "no LSP server configured for: {file_path}"
-                )));
+        // Detect the language server. For workspace_symbol, infer from the
+        // project root's manifest files. For document operations, use the
+        // file extension.
+        let (command, args_list) = if operation == "workspace_symbol" {
+            match detect_lsp_server_for_workspace(ctx.root) {
+                Some((cmd, a)) => (cmd, a.iter().map(|&s| s.to_string()).collect::<Vec<_>>()),
+                None => {
+                    return Ok(ToolOutput::err(
+                        "cannot determine LSP server for workspace_symbol — \
+                         no project manifest found (Cargo.toml, package.json, \
+                         go.mod, pyproject.toml, requirements.txt)"
+                    ));
+                }
+            }
+        } else {
+            match detect_lsp_server(&file_path) {
+                Some((cmd, a)) => (cmd, a.iter().map(|&s| s.to_string()).collect::<Vec<_>>()),
+                None => {
+                    return Ok(ToolOutput::err(format!(
+                        "no LSP server configured for: {file_path}"
+                    )));
+                }
             }
         };
 
@@ -712,6 +744,52 @@ mod tests {
         assert!(detect_lsp_server("").is_none());
     }
 
+    #[test]
+    fn detect_workspace_rust_from_cargo_toml() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("Cargo.toml"), "[package]\nname = \"x\"\n").unwrap();
+        assert_eq!(
+            detect_lsp_server_for_workspace(dir.path()).map(|(cmd, _)| cmd),
+            Some("rust-analyzer")
+        );
+    }
+
+    #[test]
+    fn detect_workspace_ts_from_package_json() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("package.json"), "{}").unwrap();
+        assert_eq!(
+            detect_lsp_server_for_workspace(dir.path()).map(|(cmd, _)| cmd),
+            Some("typescript-language-server")
+        );
+    }
+
+    #[test]
+    fn detect_workspace_go_from_go_mod() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("go.mod"), "module x\n").unwrap();
+        assert_eq!(
+            detect_lsp_server_for_workspace(dir.path()).map(|(cmd, _)| cmd),
+            Some("gopls")
+        );
+    }
+
+    #[test]
+    fn detect_workspace_python_from_pyproject() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("pyproject.toml"), "[project]\n").unwrap();
+        assert_eq!(
+            detect_lsp_server_for_workspace(dir.path()).map(|(cmd, _)| cmd),
+            Some("pylsp")
+        );
+    }
+
+    #[test]
+    fn detect_workspace_none_without_manifest() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(detect_lsp_server_for_workspace(dir.path()).is_none());
+    }
+
     // ── Framing tests ────────────────────────────────────────────────────
 
     #[test]
@@ -804,6 +882,25 @@ mod tests {
         assert!(result.is_error);
         // With the early query check, it fails before server detection.
         assert!(result.content.contains("requires `query`"), "got: {}", result.content);
+    }
+
+    #[test]
+    fn workspace_symbol_without_manifest_errors() {
+        // workspace_symbol with a query but no project manifest in the root
+        // should fail with the manifest error (not "no LSP server configured").
+        let dir = tempfile::tempdir().unwrap();
+        let result = LspTool
+            .run(
+                json!({"operation": "workspace_symbol", "query": "foo"}),
+                &mut ToolCtx::new(dir.path()),
+            )
+            .unwrap();
+        assert!(result.is_error);
+        assert!(
+            result.content.contains("no project manifest"),
+            "got: {}",
+            result.content
+        );
     }
 
     #[test]
