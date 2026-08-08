@@ -112,6 +112,12 @@ impl Tool for EnterWorktree {
                         .as_secs()
                 )
             });
+        // Validate name: only alphanumeric, hyphen, underscore — reject path traversal
+        if !name.chars().all(|c| c.is_alphanumeric() || c == '-' || c == '_') {
+            return Ok(ToolOutput::err(format!(
+                "invalid worktree name: {name:?} — only alphanumeric, hyphens, and underscores allowed"
+            )));
+        }
         let base_branch = args
             .get("base_branch")
             .and_then(Value::as_str)
@@ -271,6 +277,25 @@ mod tests {
     #[test]
     fn enter_worktree_requires_name() {
         // No validation needed — name is optional, auto-generated
+    }
+
+    #[test]
+    fn enter_worktree_rejects_path_traversal() {
+        let out = EnterWorktree
+            .run(json!({"name": "../../etc/passwd"}), &mut ToolCtx::new(Path::new(".")))
+            .unwrap();
+        assert!(out.is_error);
+        assert!(out.content.contains("invalid worktree name"), "got: {}", out.content);
+    }
+
+    #[test]
+    fn worktree_name_accepts_valid_chars() {
+        let out = EnterWorktree
+            .run(json!({"name": "my-feat_branch"}), &mut ToolCtx::new(Path::new(".")))
+            .unwrap();
+        // This will fail with git not available in test context, but should not be a
+        // name validation error — it should get past the name check.
+        assert!(!out.content.contains("invalid worktree name"), "got: {}", out.content);
     }
 
     #[test]

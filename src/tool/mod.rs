@@ -120,6 +120,7 @@ impl Toolbox {
             Box::new(builtin::Agent),
             Box::new(reason::Reason),
             Box::new(builtin::Review),
+            Box::new(tool_search::ToolSearch),
         ];
         let extra_tools: Vec<Box<dyn Tool>> = vec![
             Box::new(builtin::RunCapability),
@@ -144,7 +145,6 @@ impl Toolbox {
             Box::new(send_message::SendMessage),
             Box::new(worktree::EnterWorktree),
             Box::new(worktree::ExitWorktree),
-            Box::new(tool_search::ToolSearch),
         ];
         Self { core_tools, extra_tools }
     }
