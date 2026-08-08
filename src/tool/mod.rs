@@ -9,6 +9,7 @@ pub mod lsp;
 pub mod net;
 pub mod reason;
 pub mod search;
+pub mod send_message;
 pub mod task_manage;
 pub mod wasm;
 
@@ -134,6 +135,7 @@ impl Toolbox {
                 Box::new(cron::CronCreate),
                 Box::new(cron::CronDelete),
                 Box::new(cron::CronList),
+                Box::new(send_message::SendMessage),
             ],
         }
     }
