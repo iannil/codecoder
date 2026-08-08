@@ -164,15 +164,16 @@ impl Tool for Milestone {
     }
     fn description(&self) -> &str {
         "Manage the durable Work Graph of milestones (dependency-ordered work that \
-         survives context resets): action = list | add | start | done | next | remove. \
+         survives context resets): action = list | add | start | done | next | remove | plan. \
          `add` takes title (+ optional deps); `done` marks a milestone complete. \
-         `next` returns the next ready milestone to work on."
+         `next` returns the next ready milestone to work on. \
+         `plan` shows the plan for a milestone (if one exists)."
     }
     fn schema(&self) -> Value {
         json!({
             "type": "object",
             "properties": {
-                "action": { "type": "string", "enum": ["list", "add", "start", "done", "next", "remove"] },
+                "action": { "type": "string", "enum": ["list", "add", "start", "done", "next", "remove", "plan"] },
                 "id": { "type": "integer" },
                 "title": { "type": "string" },
                 "deps": { "type": "array", "items": { "type": "integer" }, "description": "Milestone ids that must be done first." }
@@ -191,9 +192,39 @@ impl Tool for Milestone {
             .unwrap_or("list")
             .to_string();
         let id = args.get("id").and_then(Value::as_u64);
-        // 读+改+存统一在咨询锁内(ADR 0035),防与并发写者 lost-update。
-        // 读动作(list/next)走同一锁取一致快照;with_lock 末尾 save 对未改图幂等。
-        WorkGraph::with_lock(ctx.root, |g| Ok(Self::apply(g, &action, id, &args)))
+
+        // plan action reads milestone plan files from disk, not the workgraph mutex.
+        if action == "plan" {
+            let Some(i) = id else {
+                return Ok(ToolOutput::err("plan needs `id`"));
+            };
+            let g = WorkGraph::read(ctx.root);
+            let Some(n) = g.get(i) else {
+                return Ok(ToolOutput::err(format!("unknown milestone #{i}")));
+            };
+            if crate::milestone_plan::plan_exists(ctx.root, i) {
+                match crate::milestone_plan::read_plan(ctx.root, i) {
+                    Ok(plan) => Ok(ToolOutput::ok(format!(
+                        "Milestone #{} Plan:\nskill: {}\nacceptance criteria:\n{}\n\
+                         test requirements: {}\nrisks: {}",
+                        plan.milestone_id, plan.skill_used,
+                        plan.acceptance_criteria.iter().map(|c| format!("  - {c}")).collect::<Vec<_>>().join("\n"),
+                        plan.test_requirements,
+                        if plan.risks.is_empty() { "none".into() } else { plan.risks.join("; ") },
+                    ))),
+                    Err(e) => Ok(ToolOutput::err(format!("plan corrupt: {e}"))),
+                }
+            } else {
+                Ok(ToolOutput::ok(format!(
+                    "Milestone #{} \"{}\" has no plan yet. Use `use_skill` to load an engineer skill and generate one.",
+                    i, n.title,
+                )))
+            }
+        } else {
+            // 读+改+存统一在咨询锁内(ADR 0035),防与并发写者 lost-update。
+            // 读动作(list/next)走同一锁取一致快照;with_lock 末尾 save 对未改图幂等。
+            WorkGraph::with_lock(ctx.root, |g| Ok(Self::apply(g, &action, id, &args)))
+        }
     }
 }
 
@@ -390,6 +421,41 @@ mod tests {
         // Rejects unsafe keys.
         let bad = Memory.run(json!({ "action": "set", "key": "../escape", "value": "x" }), &mut ctx).unwrap();
         assert!(bad.is_error);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn milestone_plan_shows_existing_or_hint() {
+        let dir = ctx_dir();
+        let mut ctx = ToolCtx::new(&dir);
+        Milestone.run(json!({ "action": "add", "title": "core" }), &mut ctx).unwrap();
+        // No plan yet → helpful hint.
+        let out = Milestone.run(json!({ "action": "plan", "id": 1 }), &mut ctx).unwrap();
+        assert!(!out.is_error);
+        assert!(out.content.contains("has no plan yet"), "got: {}", out.content);
+        // Write a plan, then it should be shown.
+        crate::milestone_plan::write_plan(
+            &dir,
+            &crate::milestone_plan::MilestonePlan {
+                milestone_id: 1,
+                title: "core".into(),
+                skill_used: "engineer-coach".into(),
+                created_at: "now".into(),
+                acceptance_criteria: vec!["works".into()],
+                scope: crate::milestone_plan::MilestoneScope {
+                    files_to_create: vec!["src/x.rs".into()],
+                    files_to_modify: vec![],
+                    estimated_lines: 10,
+                },
+                risks: vec!["risk1".into()],
+                test_requirements: "unit tests".into(),
+            },
+        )
+        .unwrap();
+        let out2 = Milestone.run(json!({ "action": "plan", "id": 1 }), &mut ctx).unwrap();
+        assert!(!out2.is_error);
+        assert!(out2.content.contains("engineer-coach"), "got: {}", out2.content);
+        assert!(out2.content.contains("risk1"), "got: {}", out2.content);
         std::fs::remove_dir_all(&dir).ok();
     }
 
