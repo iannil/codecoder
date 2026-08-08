@@ -82,3 +82,83 @@ pub fn delete_plan(root: &Path, milestone_id: u64) {
     let path = plan_path(root, milestone_id);
     let _ = std::fs::remove_file(&path);
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::Path;
+
+    #[test]
+    fn plan_path_format() {
+        let root = Path::new("/tmp/project");
+        let p = plan_path(root, 42);
+        assert!(p.to_str().unwrap().contains(".codecoder/milestone-plans/42-plan.json"));
+    }
+
+    #[test]
+    fn write_and_read_plan_roundtrip() {
+        let dir = std::env::temp_dir().join(format!("cc_plan_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let plan = MilestonePlan {
+            milestone_id: 1,
+            title: "Build data model".into(),
+            skill_used: "engineer-architect".into(),
+            created_at: "2026-08-08T10:00:00Z".into(),
+            acceptance_criteria: vec!["Fields have types".into()],
+            scope: MilestoneScope {
+                files_to_create: vec!["src/model.rs".into()],
+                files_to_modify: vec![],
+                estimated_lines: 100,
+            },
+            risks: vec!["Migration risk".into()],
+            test_requirements: "Unit tests for each model".into(),
+        };
+        write_plan(&dir, &plan).unwrap();
+        assert!(plan_exists(&dir, 1));
+        let back = read_plan(&dir, 1).unwrap();
+        assert_eq!(back.milestone_id, 1);
+        assert_eq!(back.title, "Build data model");
+        assert_eq!(back.skill_used, "engineer-architect");
+        // Cleanup
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn plan_exists_returns_false_for_missing() {
+        let dir = std::env::temp_dir().join(format!("cc_plan_miss_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        assert!(!plan_exists(&dir, 99));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn all_plans_returns_empty_for_empty_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(all_plans(dir.path()).is_empty());
+    }
+
+    #[test]
+    fn delete_plan_removes_file() {
+        let dir = std::env::temp_dir().join(format!("cc_plan_del_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let plan = MilestonePlan {
+            milestone_id: 1,
+            title: "Test".into(),
+            skill_used: "engineer-coach".into(),
+            created_at: "2026-08-08T00:00:00Z".into(),
+            acceptance_criteria: vec![],
+            scope: MilestoneScope {
+                files_to_create: vec![],
+                files_to_modify: vec![],
+                estimated_lines: 0,
+            },
+            risks: vec![],
+            test_requirements: String::new(),
+        };
+        write_plan(&dir, &plan).unwrap();
+        assert!(plan_exists(&dir, 1));
+        delete_plan(&dir, 1);
+        assert!(!plan_exists(&dir, 1));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+}
