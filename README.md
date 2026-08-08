@@ -45,7 +45,7 @@ cargo run --bin ccda       # 启动 daemon
 cargo run --bin ccli       # 连接 (ccli 客户端)
 ```
 
-## 内置工具（40 个）
+## 内置工具（43 个）
 
 > **Tool / Skill / Capability 三分**:**Tool** 是编译进二进制的原生原语(下表);**Skill** 是 agent 自撰的 `.md` 程序性知识(改变怎么想);**Capability** 是 agent 自撰的可执行产物(长出新手脚)。**Skill** 另有一个草稿前身 **Prompt**(`prompts/`,经 `promote_prompt` 转正,见 `docs/adr/0025`)。详见 `CONTEXT.md` 与 `docs/adr/0020`–`0022`、`0025`。
 
@@ -91,6 +91,9 @@ cargo run --bin ccli       # 连接 (ccli 客户端)
 | `cron_delete` | 删除 cron 任务 |
 | `cron_list` | 列出 cron 任务 |
 | `send_message` | 向子代理/父代理发送消息 |
+| `enter_worktree` | 创建 git worktree 隔离工作区 |
+| `exit_worktree` | 退出 worktree（合并/保留/丢弃） |
+| `tool_search` | 搜索并按需加载扩展工具 |
 
 ## 文件系统即自我
 

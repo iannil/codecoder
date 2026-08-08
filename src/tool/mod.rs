@@ -12,9 +12,12 @@ pub mod search;
 pub mod send_message;
 pub mod task_manage;
 pub mod wasm;
+pub mod tool_search;
+pub mod worktree;
 
 use crate::permission::Permission;
 use serde_json::{Value, json};
+use std::collections::HashSet;
 use std::path::Path;
 
 pub struct ToolCtx<'a> {
@@ -86,99 +89,137 @@ pub trait Tool: Send + Sync {
     fn run(&self, args: Value, ctx: &mut ToolCtx) -> anyhow::Result<ToolOutput>;
 }
 
-/// The fixed set of built-in Tools (ADR 0018). Dispatch by name; also produces the
+/// The fixed set of built-in Tools (ADR 0018). Split into core_tools (always-present)
+/// and extra_tools (searchable). Dispatch by name; also produces the
 /// OpenAI-facing `tools` schema list for the request (ADR 0017).
 pub struct Toolbox {
-    tools: Vec<Box<dyn Tool>>,
+    core_tools: Vec<Box<dyn Tool>>,
+    extra_tools: Vec<Box<dyn Tool>>,
 }
 
 impl Toolbox {
     pub fn builtin() -> Self {
-        Self {
-            tools: vec![
-                Box::new(builtin::ReadFile),
-                Box::new(builtin::ListDirectory),
-                Box::new(builtin::WriteFile),
-                Box::new(builtin::EditFile),
-                Box::new(builtin::RunCommand),
-                Box::new(builtin::UseSkill),
-                Box::new(builtin::RunCapability),
-                Box::new(builtin::GenerateSkill),
-                Box::new(builtin::GeneratePrompt),
-                Box::new(builtin::PromotePrompt),
-                Box::new(builtin::GenerateCapability),
-                Box::new(builtin::Agent),
-                Box::new(builtin::AskUser),
-                Box::new(builtin::Review),
-                Box::new(builtin::Confirm),
-                Box::new(net::SearchWeb),
-                Box::new(net::SearchGithub),
-                Box::new(net::ReverseApi),
-                Box::new(dev::Commit),
-                Box::new(dev::Diff),
-                Box::new(dev::Plan),
-                Box::new(dev::Milestone),
-                Box::new(dev::Memory),
-                Box::new(generate_milestones::GenerateMilestones),
-                Box::new(reason::Reason),
-                Box::new(search::Glob),
-                Box::new(search::Grep),
-                Box::new(mcp::McpToolCall),
-                Box::new(mcp::McpListResources),
-                Box::new(mcp::McpReadResource),
-                Box::new(lsp::LspTool),
-                Box::new(task_manage::TaskCreate),
-                Box::new(task_manage::TaskGet),
-                Box::new(task_manage::TaskList),
-                Box::new(task_manage::TaskUpdate),
-                Box::new(task_manage::TaskStop),
-                Box::new(cron::CronCreate),
-                Box::new(cron::CronDelete),
-                Box::new(cron::CronList),
-                Box::new(send_message::SendMessage),
-            ],
-        }
+        let core_tools: Vec<Box<dyn Tool>> = vec![
+            Box::new(builtin::ReadFile),
+            Box::new(builtin::ListDirectory),
+            Box::new(builtin::WriteFile),
+            Box::new(builtin::EditFile),
+            Box::new(builtin::RunCommand),
+            Box::new(builtin::UseSkill),
+            Box::new(search::Glob),
+            Box::new(search::Grep),
+            Box::new(net::SearchWeb),
+            Box::new(net::SearchGithub),
+            Box::new(dev::Commit),
+            Box::new(dev::Diff),
+            Box::new(dev::Plan),
+            Box::new(dev::Milestone),
+            Box::new(dev::Memory),
+            Box::new(builtin::AskUser),
+            Box::new(builtin::Confirm),
+            Box::new(builtin::Agent),
+            Box::new(reason::Reason),
+            Box::new(builtin::Review),
+            Box::new(tool_search::ToolSearch),
+        ];
+        let extra_tools: Vec<Box<dyn Tool>> = vec![
+            Box::new(builtin::RunCapability),
+            Box::new(builtin::GenerateSkill),
+            Box::new(builtin::GeneratePrompt),
+            Box::new(builtin::PromotePrompt),
+            Box::new(builtin::GenerateCapability),
+            Box::new(net::ReverseApi),
+            Box::new(generate_milestones::GenerateMilestones),
+            Box::new(mcp::McpToolCall),
+            Box::new(mcp::McpListResources),
+            Box::new(mcp::McpReadResource),
+            Box::new(lsp::LspTool),
+            Box::new(task_manage::TaskCreate),
+            Box::new(task_manage::TaskGet),
+            Box::new(task_manage::TaskList),
+            Box::new(task_manage::TaskUpdate),
+            Box::new(task_manage::TaskStop),
+            Box::new(cron::CronCreate),
+            Box::new(cron::CronDelete),
+            Box::new(cron::CronList),
+            Box::new(send_message::SendMessage),
+            Box::new(worktree::EnterWorktree),
+            Box::new(worktree::ExitWorktree),
+        ];
+        Self { core_tools, extra_tools }
     }
 
     /// The tool set a depth-1 sub-agent may use (ADR 0019): a curated subset of the
     /// `Permission::None` (never-prompts) tools — read/list, skills, read-only
     /// networking, and `diff` — and NOT `agent` (depth is locked to 1).
     pub fn read_only_child() -> Self {
-        Self {
-            tools: vec![
-                Box::new(builtin::ReadFile),
-                Box::new(builtin::ListDirectory),
-                Box::new(builtin::UseSkill),
-                Box::new(search::Glob),
-                Box::new(search::Grep),
-                Box::new(net::SearchWeb),
-                Box::new(net::SearchGithub),
-                Box::new(net::ReverseApi),
-                Box::new(dev::Diff),
-                Box::new(generate_milestones::GenerateMilestones),
-            ],
-        }
+        let tools: Vec<Box<dyn Tool>> = vec![
+            Box::new(builtin::ReadFile),
+            Box::new(builtin::ListDirectory),
+            Box::new(builtin::UseSkill),
+            Box::new(search::Glob),
+            Box::new(search::Grep),
+            Box::new(net::SearchWeb),
+            Box::new(net::SearchGithub),
+            Box::new(net::ReverseApi),
+            Box::new(dev::Diff),
+            Box::new(generate_milestones::GenerateMilestones),
+        ];
+        Self { core_tools: tools, extra_tools: Vec::new() }
     }
 
     pub fn get(&self, name: &str) -> Option<&dyn Tool> {
-        self.tools.iter().find(|t| t.name() == name).map(|t| t.as_ref())
+        self.core_tools
+            .iter()
+            .chain(self.extra_tools.iter())
+            .find(|t| t.name() == name)
+            .map(|t| t.as_ref())
     }
 
-    /// The `tools` array for a chat-completions request.
-    pub fn wire_schemas(&self) -> Vec<Value> {
-        self.tools
+    /// Helper to render a single tool into its OpenAI-facing schema entry.
+    fn tool_schema(t: &dyn Tool) -> Value {
+        json!({
+            "type": "function",
+            "function": {
+                "name": t.name(),
+                "description": t.description(),
+                "parameters": t.schema(),
+            }
+        })
+    }
+
+    /// The schemas for the always-present core tools.
+    pub fn wire_schemas_core(&self) -> Vec<Value> {
+        self.core_tools.iter().map(|t| Self::tool_schema(t.as_ref())).collect()
+    }
+
+    /// The schemas for the named extra tools (typically `loaded_extra_tools`).
+    pub fn wire_schemas_subset(&self, names: &HashSet<String>) -> Vec<Value> {
+        self.extra_tools
             .iter()
-            .map(|t| {
-                json!({
-                    "type": "function",
-                    "function": {
-                        "name": t.name(),
-                        "description": t.description(),
-                        "parameters": t.schema(),
-                    }
-                })
-            })
+            .filter(|t| names.contains(t.name()))
+            .map(|t| Self::tool_schema(t.as_ref()))
             .collect()
+    }
+
+    /// Search the extra tools by name or description (case-insensitive substring).
+    pub fn search(&self, query: &str) -> Vec<&dyn Tool> {
+        let q = query.to_lowercase();
+        self.extra_tools
+            .iter()
+            .filter(|t| {
+                t.name().to_lowercase().contains(&q) || t.description().to_lowercase().contains(&q)
+            })
+            .map(|t| t.as_ref())
+            .collect()
+    }
+
+    /// The `tools` array for a chat-completions request. Full list (core + extra),
+    /// for backward compatibility.
+    pub fn wire_schemas(&self) -> Vec<Value> {
+        let mut schemas = self.wire_schemas_core();
+        schemas.extend(self.extra_tools.iter().map(|t| Self::tool_schema(t.as_ref())));
+        schemas
     }
 }
 
