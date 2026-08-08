@@ -45,7 +45,7 @@ cargo run --bin ccda       # 启动 daemon
 cargo run --bin ccli       # 连接 (ccli 客户端)
 ```
 
-## 内置工具（27 个）
+## 内置工具（31 个）
 
 > **Tool / Skill / Capability 三分**:**Tool** 是编译进二进制的原生原语(下表);**Skill** 是 agent 自撰的 `.md` 程序性知识(改变怎么想);**Capability** 是 agent 自撰的可执行产物(长出新手脚)。**Skill** 另有一个草稿前身 **Prompt**(`prompts/`,经 `promote_prompt` 转正,见 `docs/adr/0025`)。详见 `CONTEXT.md` 与 `docs/adr/0020`–`0022`、`0025`。
 
@@ -78,6 +78,10 @@ cargo run --bin ccli       # 连接 (ccli 客户端)
 | `confirm` | yes/no 确认对话 |
 | `agent` | 子代理调用 |
 | `reason` | 推理树管理（root-cause 分析：add/status/margin/list/trace，持久化到 `causal_tree.json`，**跨 session 检索 meta 节点**） |
+| `mcp_call_tool` | 调用 `codecoder.json` 中 `mcp_servers` 配置的 MCP 服务器上的工具（JSON-RPC 2.0 over stdio，ADR 0040） |
+| `mcp_list_resources` | 列出 MCP 服务器暴露的资源（ADR 0040） |
+| `mcp_read_resource` | 按 URI 读取 MCP 服务器上的资源内容（ADR 0040） |
+| `lsp` | 代码智能查询（go_to_definition / find_references / hover / document_symbol / workspace_symbol / go_to_implementation，服务器按扩展名自动探测，ADR 0040） |
 
 ## 文件系统即自我
 
