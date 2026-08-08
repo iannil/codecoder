@@ -132,7 +132,7 @@ impl Tool for EnterWorktree {
         // git worktree add
         let path_str = worktree_path.to_string_lossy().to_string();
         match git(ctx.root, &["worktree", "add", &path_str, "-b", &branch, &base_branch]) {
-            Ok(output) => {
+            Ok(_) => {
                 let mut store = WORKTREE_STORE.lock().unwrap();
                 let id = store.next_id();
                 store.add(WorktreeEntry {
