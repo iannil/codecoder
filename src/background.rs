@@ -6,6 +6,7 @@
 // completion and the kernel marks them Done.
 use crate::agent::{AgentEvent, AgentLoop};
 use crate::bg_ledger::MissionState;
+use crate::milestone_plan::MilestonePlan;
 use crate::provider::Provider;
 use std::path::Path;
 use std::path::PathBuf;
@@ -302,30 +303,60 @@ fn drain_bg_events(
     }
 }
 
-/// 推进 workgraph 的下一个就绪(pending)里程碑：跑一个 turn，完成后标记 Done。
-/// 无就绪里程碑时返回 `Ok(None)`。daemon 与 background runner 共用此函数。
-pub fn advance_one_milestone(
+/// 对里程碑 #N 执行 Plan Turn：加载 engineer skill，生成计划，写入 .codecoder/milestone-plans/。
+/// 返回创建的计划对象。如果计划已存在，直接返回（支持中断恢复）。
+fn run_plan_turn(
     provider: Arc<dyn Provider>,
     model: String,
     max_tokens: u32,
     temperature: f32,
     root: PathBuf,
-) -> anyhow::Result<Option<BgOutcome>> {
-    use crate::workgraph::{NodeStatus, WorkGraph};
-    let (milestone_id, task_text, title) = {
-        let g = WorkGraph::read_checked(&root)?;
-        let Some(n) = g.next_ready() else { return Ok(None); };
-        let checkpoint = read_bg_checkpoint(&root);
-        let t = format!(
-            "workgraph milestone #{}: {}\n\n\
-             Complete this milestone. When done, it will be marked complete automatically;\
-             no verdict line is required.{}",
-            n.id, n.title, checkpoint,
-        );
-        (n.id, t, n.title.clone())
-    };
+    milestone_id: u64,
+    title: &str,
+) -> anyhow::Result<MilestonePlan> {
+    use crate::milestone_plan::*;
+
+    // 如果计划已存在，直接读取返回（支持中断恢复）。
+    if plan_exists(&root, milestone_id) {
+        return read_plan(&root, milestone_id);
+    }
+
+    let checkpoint = read_bg_checkpoint(&root);
+    let prompt = format!(
+        "workgraph milestone #{}: {}\n\n\
+         任务分解：\n\
+         1. 先用 `use_skill` 工具加载与当前里程碑内容最匹配的 engineer skill\n\
+            - 选择依据：里程碑标题/描述中的关键词\n\
+            - 架构/数据模型 → engineer-architect\n\
+            - 前端/UI → engineer-frontend-architect\n\
+            - 遗留代码改造 → engineer-legacy-recon\n\
+            - 测试/验收 → engineer-qa / engineer-inspector\n\
+            - 通用编码 → engineer-coach\n\
+            - 需求模糊 → engineer-requirements\n\
+         2. 按照所选 skill 的方法论，生成详细的开发计划\n\
+         3. 将计划写入 .codecoder/milestone-plans/{}-plan.json（JSON 格式，字段见下）\n\
+         4. 完成后输出 'PLAN_COMPLETE'，不执行编码\n\n\
+         计划 JSON 格式：\n\
+         {{\n\
+           \"milestone_id\": {},\n\
+           \"title\": \"{}\",\n\
+           \"skill_used\": \"<skill-name>\",\n\
+           \"acceptance_criteria\": [\"<标准1>\", \"<标准2>\", ...],\n\
+           \"scope\": {{\n\
+             \"files_to_create\": [\"<path>\", ...],\n\
+             \"files_to_modify\": [\"<path>\", ...],\n\
+             \"estimated_lines\": 150\n\
+           }},\n\
+           \"risks\": [\"<风险1>\", ...],\n\
+           \"test_requirements\": \"<测试要求描述>\"\n\
+         }}\n\
+         {}",
+        milestone_id, title,
+        milestone_id, milestone_id, title,
+        checkpoint,
+    );
+
     let mut agent = AgentLoop::new_background(provider, model, max_tokens, temperature, root.clone());
-    // Register BgObserver in AgentLoop's ObserverSet for auto-emission.
     agent.observer_set.register(Box::new(
         crate::bg_observer::BgObserver::new(&agent.root)
     ));
@@ -334,10 +365,125 @@ pub fn advance_one_milestone(
     }
     let cfg = crate::config::Config::load();
     agent.set_tool_cap(cfg.bg_milestone_tool_cap);
+
+    let (tx, rx) = channel::<AgentEvent>();
+    let handle = std::thread::spawn(move || {
+        agent.run_one_turn(prompt, &tx);
+        drop(tx);
+        agent
+    });
+    // Drain events into a throwaway BgOutcome (we only care about the plan file).
+    let mut tmp_out = BgOutcome::default();
+    drain_bg_events(rx, &mut tmp_out, None);
+    let _agent = match handle.join() {
+        Ok(agent) => agent,
+        Err(panic) => {
+            return Err(anyhow::anyhow!("plan turn panicked: {}", panic_message(panic)));
+        }
+    };
+
+    // Verify plan was written.
+    if !plan_exists(&root, milestone_id) {
+        anyhow::bail!("plan turn did not write plan for milestone #{}", milestone_id);
+    }
+    read_plan(&root, milestone_id)
+}
+
+/// 推进 workgraph 的下一个就绪(pending)里程碑：若无 plan 先执行 Plan Turn 生成计划，
+/// 再执行 Exec Turn（编码 → 自验收 → 标记 Done）。两阶段在同一函数内同步完成，
+/// 调用方无需感知 Plan/Exec 的区分。无就绪里程碑时返回 `Ok(None)`。
+/// daemon 与 background runner 共用此函数。
+pub fn advance_one_milestone(
+    provider: Arc<dyn Provider>,
+    model: String,
+    max_tokens: u32,
+    temperature: f32,
+    root: PathBuf,
+) -> anyhow::Result<Option<BgOutcome>> {
+    use crate::workgraph::{NodeStatus, WorkGraph};
+
+    let (milestone_id, title) = {
+        let g = WorkGraph::read_checked(&root)?;
+        let Some(n) = g.next_ready() else { return Ok(None); };
+        (n.id, n.title.clone())
+    };
+
+    // ── Phase 1: Plan Turn（若尚无 plan）──
+    if !crate::milestone_plan::plan_exists(&root, milestone_id) {
+        let mut external_obs = crate::bg_observer::BgObserver::new(&root);
+        external_obs.emit_external("plan_start", &format!("#{milestone_id} {title}"));
+        match run_plan_turn(
+            provider.clone(), model.clone(), max_tokens, temperature,
+            root.clone(), milestone_id, &title,
+        ) {
+            Ok(plan) => {
+                external_obs.emit_external("plan_done", &format!(
+                    "#{milestone_id} using {}", plan.skill_used
+                ));
+            }
+            Err(e) => {
+                external_obs.emit_external("plan_error", &format!("#{milestone_id} {e}"));
+                // Plan 失败→标记为 Blocked，记录原因。
+                let _ = WorkGraph::with_lock(&root, |g| {
+                    g.set_status(milestone_id, NodeStatus::Blocked);
+                    Ok(())
+                });
+                return Err(e);
+            }
+        }
+    }
+
+    // ── Phase 2: Exec Turn ──
+    let plan = crate::milestone_plan::read_plan(&root, milestone_id)
+        .unwrap_or_else(|_| panic!("plan should exist for milestone #{milestone_id}"));
+
+    let checkpoint = read_bg_checkpoint(&root);
+    let criteria_str = plan.acceptance_criteria.iter()
+        .enumerate()
+        .map(|(i, c)| format!("{}. {}", i + 1, c))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let scope_created = plan.scope.files_to_create.join("\n  ");
+    let scope_modified = plan.scope.files_to_modify.join("\n  ");
+    let risks_str = plan.risks.join("\n- ");
+
+    let task_text = format!(
+        "workgraph milestone #{}: {}\n\n\
+         === 开发计划 ===\n\
+         使用的 skill: {}\n\n\
+         验收标准：\n{}\n\n\
+         文件范围：\n\
+         - 创建：\n  {}\n\
+         - 修改：\n  {}\n\n\
+         风险点：\n- {}\n\n\
+         测试要求：{}\n\n\
+         请按此计划逐项执行。完成每一项后用 `diff` 或检查确认，\
+         逐条对照验收标准自验收。全部通过后，里程碑将被自动标记为完成。\
+         无需输出验收声明。{}",
+        milestone_id, plan.title,
+        plan.skill_used,
+        criteria_str,
+        scope_created, scope_modified,
+        risks_str,
+        plan.test_requirements,
+        checkpoint,
+    );
+
+    let mut agent = AgentLoop::new_background(provider, model, max_tokens, temperature, root.clone());
+    agent.observer_set.register(Box::new(
+        crate::bg_observer::BgObserver::new(&agent.root)
+    ));
+    if let Err(e) = agent.cancel_token().cancel_on_sigint() {
+        eprintln!("ccd: SIGINT cancel not wired: {e}");
+    }
+    let cfg = crate::config::Config::load();
+    agent.set_tool_cap(cfg.bg_milestone_tool_cap);
+
     let mut out = BgOutcome::default();
-    out.events.push(format!("task: workgraph milestone #{} ({})", milestone_id, title));
+    out.events.push(format!("exec: milestone #{} ({})", milestone_id, title));
     let mut external_obs = crate::bg_observer::BgObserver::new(&root);
     external_obs.emit_external("milestone_start", &format!("#{milestone_id} {title}"));
+
     let (tx, rx) = channel::<AgentEvent>();
     let handle = std::thread::spawn(move || {
         agent.run_one_turn(task_text, &tx);
@@ -348,7 +494,7 @@ pub fn advance_one_milestone(
     let agent = match handle.join() {
         Ok(agent) => agent,
         Err(panic) => {
-            let msg = format!("bg turn thread panicked: {}", panic_message(panic));
+            let msg = format!("exec turn panicked: {}", panic_message(panic));
             external_obs.emit_external("error", &msg);
             return Err(anyhow::anyhow!(msg));
         }
@@ -357,12 +503,12 @@ pub fn advance_one_milestone(
         return Err(anyhow::anyhow!(e.to_string()));
     }
 
+    // 标记完成 + 写 checkpoint。
     let tool_cap_hit = out.events.iter().any(|e| e.contains("tool-iteration cap"));
     let m = {
         let g = WorkGraph::read(&root);
         g.get(milestone_id).expect("just read").clone()
     };
-    // 标记完成 + 写 checkpoint。
     let _ = WorkGraph::with_lock(&root, |g| {
         g.set_status(milestone_id, NodeStatus::Done);
         Ok(())
@@ -433,12 +579,15 @@ mod tests {
     #[test]
     fn advance_one_milestone_runs_a_turn() {
         let dir = root_with_one_milestone();
-        let out = advance_one_milestone(
+        // StubClient doesn't call use_skill or write plan files, so the Plan Turn
+        // will fail. This is expected — the function now requires a real LLM for
+        // the Plan phase.
+        let result = advance_one_milestone(
             Arc::new(StubClient), "gpt-4o".into(), 4096, 0.7, dir.clone(),
-        ).unwrap();
-        assert!(out.is_some(), "should run a turn for the ready milestone");
-        let outcome = out.unwrap();
-        assert!(!outcome.final_text.is_empty(), "stub should produce some final text");
+        );
+        assert!(result.is_err(), "stub should fail plan turn (no plan written)");
+        let err = result.unwrap_err();
+        assert!(err.to_string().contains("plan turn did not write plan"), "got: {err}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -565,11 +714,59 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         ws(&dir);
+        // Pre-write a plan so the Exec Turn runs (StubClient can't write one).
+        let plan = MilestonePlan {
+            milestone_id: 1,
+            title: "t1".into(),
+            skill_used: "engineer-coach".into(),
+            created_at: "2026-08-08T00:00:00Z".into(),
+            acceptance_criteria: vec!["complete the task".into()],
+            scope: crate::milestone_plan::MilestoneScope {
+                files_to_create: vec![],
+                files_to_modify: vec![],
+                estimated_lines: 10,
+            },
+            risks: vec![],
+            test_requirements: "none".into(),
+        };
+        crate::milestone_plan::write_plan(&dir, &plan).unwrap();
         let out = advance_one_milestone(
             Arc::new(StubClient), "gpt-4o".into(), 4096, 0.7, dir.clone(),
         ).unwrap().unwrap();
         assert_eq!(WorkGraph::read(&dir).get(1).unwrap().status, NodeStatus::Done);
         assert_eq!(out.subgoals[0].milestone_id, 1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn advance_with_preexisting_plan_does_exec_turn() {
+        let dir = std::env::temp_dir().join(format!("cc_plan_exec_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        ws(&dir);
+        // Pre-write a plan so the Exec Turn runs.
+        let plan = MilestonePlan {
+            milestone_id: 1,
+            title: "t1".into(),
+            skill_used: "engineer-coach".into(),
+            created_at: "2026-08-08T00:00:00Z".into(),
+            acceptance_criteria: vec!["complete the task".into()],
+            scope: crate::milestone_plan::MilestoneScope {
+                files_to_create: vec![],
+                files_to_modify: vec![],
+                estimated_lines: 10,
+            },
+            risks: vec![],
+            test_requirements: "none".into(),
+        };
+        crate::milestone_plan::write_plan(&dir, &plan).unwrap();
+        let out = advance_one_milestone(
+            Arc::new(StubClient), "gpt-4o".into(), 4096, 0.7, dir.clone(),
+        ).unwrap().unwrap();
+        // Should have Exec Turn events (not plan events).
+        assert!(out.events.iter().any(|e| e.starts_with("exec:")), "should run exec turn: {:?}", out.events);
+        assert!(out.events.iter().any(|e| e.contains("completed")), "should mark complete: {:?}", out.events);
+        assert_eq!(WorkGraph::read(&dir).get(1).unwrap().status, NodeStatus::Done);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -633,6 +830,22 @@ mod tests {
         let mut g = WorkGraph::default();
         g.add("t1", vec![]).unwrap();
         let _ = g.save(dir.path());
+        // Pre-write a plan so the Exec Turn runs (StubClient can't write one).
+        let plan = MilestonePlan {
+            milestone_id: 1,
+            title: "t1".into(),
+            skill_used: "engineer-coach".into(),
+            created_at: "2026-08-08T00:00:00Z".into(),
+            acceptance_criteria: vec!["complete the task".into()],
+            scope: crate::milestone_plan::MilestoneScope {
+                files_to_create: vec![],
+                files_to_modify: vec![],
+                estimated_lines: 10,
+            },
+            risks: vec![],
+            test_requirements: "none".into(),
+        };
+        crate::milestone_plan::write_plan(dir.path(), &plan).unwrap();
         let out = run_background_cfg(
             Arc::new(StubClient), "m".into(), 4096, 0.7, dir.path().to_path_buf(),
             String::new(), 3, 8,
