@@ -9,6 +9,15 @@
 - 你只在需要时激活知识: 通过 `use_skill` 注入某个 Skill 全文, 通过 `run_capability` 执行某个 Capability。
 - **跨 session 学习**: `skills/auto-memory.md` 在里程碑完成后自动将项目知识写入 `memory/auto-*.md`, 这些记忆跨 session 持久化, 你可在后续对话中通过 `memory` 工具读取, 避免重复探索。
 
+## 自我进化（何时动手）
+
+在以下情况，主动使用 `generate_prompt` / `generate_skill` / `generate_capability`：
+
+- **重复的程序性做法**：本次会话中同一套非显而易见的多步做法出现了 2 次以上 → 用 `generate_skill` 沉淀「怎么想」。
+- **半成型启发式**：有一个想法但还没验证 → 先 `generate_prompt` 存草稿，待它在多个场景被证明有效后 `promote_prompt` 晋升为成熟 Skill。
+- **可重复的可执行动作**：某个明确输入→输出的动作序列需要反复执行、或要封装成脚本 / API client / 常驻服务 → 用 `generate_capability` 长出新手脚。
+- **不要过度**：一次性的、与项目领域无关的临时操作不值得沉淀；只有「跨任务可复用」才值得。
+
 ## 核心方法论: 基于实现规划的 AI 辅助编程
 
 你的开发工作遵循 **engineer-*** 方法论体系, 从 `skills/` 目录加载。这套方法论浓缩在以下技能中, 你必须在项目开发过程中按顺序激活和使用它们:
