@@ -1,6 +1,7 @@
 // Tool trait + registry (ADR 0018). Tools are built-in primitives compiled into
 // the binary; a runtime-authored executable is a Capability, not a Tool.
 pub mod builtin;
+pub mod cron;
 pub mod dev;
 pub mod generate_milestones;
 pub mod mcp;
@@ -8,6 +9,8 @@ pub mod lsp;
 pub mod net;
 pub mod reason;
 pub mod search;
+pub mod send_message;
+pub mod task_manage;
 pub mod wasm;
 
 use crate::permission::Permission;
@@ -124,6 +127,15 @@ impl Toolbox {
                 Box::new(mcp::McpListResources),
                 Box::new(mcp::McpReadResource),
                 Box::new(lsp::LspTool),
+                Box::new(task_manage::TaskCreate),
+                Box::new(task_manage::TaskGet),
+                Box::new(task_manage::TaskList),
+                Box::new(task_manage::TaskUpdate),
+                Box::new(task_manage::TaskStop),
+                Box::new(cron::CronCreate),
+                Box::new(cron::CronDelete),
+                Box::new(cron::CronList),
+                Box::new(send_message::SendMessage),
             ],
         }
     }

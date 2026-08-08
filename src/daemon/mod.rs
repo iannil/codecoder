@@ -1,5 +1,6 @@
 // Daemon (ADR 待补): 长驻后台进程，管理 N 个 AgentLoop，对外暴露 Unix socket。
 // 本文件随 Task 2 起逐步填充真实逻辑；当前仅提供可空跑的骨架。
+use crate::agent::AgentCommand;
 use crate::config::Config;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -541,6 +542,60 @@ impl Daemon {
                     workgraph_mtime: None,
                 };
                 let _ = crate::recovery::write_stamp(&root_cleanup, &stamp);
+            }
+        });
+
+        // Cron 调度线程：每秒检查 poll_cron_due()，把到期的 prompt 注入到
+        // 第一个活跃 session 的 cmd_tx 中。不要求 session 存在——线程启动后
+        // 每轮重新查询 first_session_cmd_tx()，session 创建后自动生效。
+        let shutdown_cron = Arc::clone(&shutdown);
+        let mgr_cron = Arc::clone(&mgr);
+        let ts_cron = Arc::clone(&thread_status);
+        {
+            let mut ts = thread_status.lock().unwrap();
+            ts.push(crate::daemon::proto::ThreadStatus {
+                name: "cron".into(),
+                last_tick: None,
+                tick_count: 0,
+                last_event: "initializing".into(),
+            });
+        }
+        std::thread::spawn(move || {
+            let mut count = 0u64;
+            while !shutdown_cron.load(Ordering::SeqCst) {
+                std::thread::sleep(Duration::from_secs(1));
+                count += 1;
+
+                // 获取到期 prompt 列表
+                let due = crate::tool::cron::poll_cron_due();
+                let last_event = if due.is_empty() {
+                    "idle".into()
+                } else {
+                    // 尝试获取第一个活跃 session 的 cmd_tx
+                    let cmd_tx = mgr_cron.lock().ok()
+                        .and_then(|m| m.first_session_cmd_tx());
+                    match cmd_tx {
+                        Some(tx) => {
+                            for prompt in &due {
+                                if let Err(e) = tx.send(AgentCommand::ProcessMessage(prompt.clone())) {
+                                    eprintln!("ccd: cron send error: {e}");
+                                }
+                            }
+                            format!("injected {} prompt(s)", due.len())
+                        }
+                        None => {
+                            format!("{} prompt(s) due but no active session", due.len())
+                        }
+                    }
+                };
+
+                let mut status = ts_cron.lock().unwrap();
+                if let Some(s) = status.iter_mut().find(|s| s.name == "cron") {
+                    s.last_tick = Some(std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH).unwrap().as_secs());
+                    s.tick_count = count;
+                    s.last_event = last_event;
+                }
             }
         });
 

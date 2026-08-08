@@ -45,7 +45,7 @@ cargo run --bin ccda       # 启动 daemon
 cargo run --bin ccli       # 连接 (ccli 客户端)
 ```
 
-## 内置工具（31 个）
+## 内置工具（40 个）
 
 > **Tool / Skill / Capability 三分**:**Tool** 是编译进二进制的原生原语(下表);**Skill** 是 agent 自撰的 `.md` 程序性知识(改变怎么想);**Capability** 是 agent 自撰的可执行产物(长出新手脚)。**Skill** 另有一个草稿前身 **Prompt**(`prompts/`,经 `promote_prompt` 转正,见 `docs/adr/0025`)。详见 `CONTEXT.md` 与 `docs/adr/0020`–`0022`、`0025`。
 
@@ -82,6 +82,15 @@ cargo run --bin ccli       # 连接 (ccli 客户端)
 | `mcp_list_resources` | 列出 MCP 服务器暴露的资源（ADR 0040） |
 | `mcp_read_resource` | 按 URI 读取 MCP 服务器上的资源内容（ADR 0040） |
 | `lsp` | 代码智能查询（go_to_definition / find_references / hover / document_symbol / workspace_symbol / go_to_implementation，服务器按扩展名自动探测，ADR 0040） |
+| `task_create` | 创建内存任务（返回 id） |
+| `task_get` | 按 id 获取任务详情 |
+| `task_list` | 列出任务（可按 status 过滤） |
+| `task_update` | 更新任务字段/依赖 |
+| `task_stop` | 停止任务（标记为 deleted） |
+| `cron_create` | 注册 cron 定时任务（到点注入 prompt） |
+| `cron_delete` | 删除 cron 任务 |
+| `cron_list` | 列出 cron 任务 |
+| `send_message` | 向子代理/父代理发送消息 |
 
 ## 文件系统即自我
 

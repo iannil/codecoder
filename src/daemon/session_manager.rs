@@ -258,6 +258,11 @@ impl DaemonSessionManager {
         &self.root
     }
 
+    /// 获取第一个活跃 session 的 cmd_tx（供 cron 线程注入消息）。
+    pub fn first_session_cmd_tx(&self) -> Option<Sender<AgentCommand>> {
+        self.sessions.values().next().map(|s| s.cmd_tx.clone())
+    }
+
     /// 构建 daemon 健康状态快照。
     pub fn status(&self) -> DaemonStatus {
         let threads = match &self.thread_status {

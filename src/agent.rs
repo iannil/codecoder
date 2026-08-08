@@ -12,6 +12,7 @@ use crate::tool::{ToolCtx, Toolbox};
 use std::collections::BTreeSet;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::thread;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -239,6 +240,11 @@ pub struct AgentLoop {
     /// background sub-agents on completion, drained inside `process_turn` and
     /// injected as System messages before the next LLM call.
     task_notifications: SteerQueue,
+    /// Monotonic counter for unique sub-agent ids (send_message task). Each spawn
+    /// mints a distinct id (`sub_{procid}_{n}` for fork/fresh, `review_{n}` for
+    /// text) so the parent can address sub-agents individually via
+    /// `send_message { to: <id> }` even when several are live at once.
+    sub_agent_seq: AtomicU64,
     /// Derived tier-2 summary overlay (ADR 0023); never persisted.
     tier2: Option<Tier2Summary>,
     /// 最近一次 turn 的 provider 错误(若有)。BG runner 据此置 mission_state=Error(ADR 0033)。
@@ -251,6 +257,13 @@ pub struct AgentLoop {
     replay_buffer: Option<crate::trace::replay_buffer::ReplayBuffer>,
     /// Cached self-observation text to inject into next turn's system prompt.
     self_observation: Option<String>,
+    /// Parent's incoming message channel (ADR task: send_message). `Some` only on
+    /// agents that spawned (or were spawned by) a sub-agent: the parent registers
+    /// its `Sender` as "main" in `AGENT_REGISTRY` and stores the matching
+    /// `Receiver` here, so sub-agents' `send_message { to: "main" }` can reach it.
+    /// `process_turn` drains it each iteration like the steer queue. `None` for a
+    /// top-level agent with no message wiring.
+    parent_msg_rx: Option<Receiver<String>>,
 }
 
 impl AgentLoop {
@@ -477,6 +490,7 @@ impl AgentLoop {
             trust,
             steer: SteerQueue::default(),
             task_notifications: SteerQueue::default(),
+            sub_agent_seq: AtomicU64::new(0),
             tier2: None,
             last_error: None,
             shared_registry,
@@ -487,6 +501,7 @@ impl AgentLoop {
                 None
             },
             self_observation: None,
+            parent_msg_rx: None,
         };
         // Build observer_set: register TraceWriterObserver when CODECODER_TRACE is enabled.
         // Must happen after root is moved into Self (agent.root is available).
@@ -960,6 +975,23 @@ impl AgentLoop {
         true
     }
 
+    /// Drain parent messages arriving via `send_message { to: "main" }`
+    /// (send_message task). Each is appended as a `Role::User` message so the next
+    /// provider call sees it — the parent's counterpart to the sub-agent steering
+    /// queue. No-op when this agent has no parent channel wired (`parent_msg_rx`).
+    fn drain_parent_messages(&mut self) -> bool {
+        let Some(rx) = self.parent_msg_rx.take() else {
+            return false;
+        };
+        let mut drained = false;
+        while let Ok(text) = rx.try_recv() {
+            self.append(Role::User, vec![MessageItem::Text { text }]);
+            drained = true;
+        }
+        self.parent_msg_rx = Some(rx);
+        drained
+    }
+
     /// If trust is still `Pending` (interactive, undecided, config on disk), ask
     /// the user once before the first turn runs (ADR 0028). The answer resolves the
     /// state and — when trusted — loads the project's disk "self" now. A dropped
@@ -1044,6 +1076,9 @@ impl AgentLoop {
             // Inject any completed background-task notifications (ADR 0042) as
             // System messages before the next provider call.
             self.drain_task_notifications();
+            // Inject any parent messages (send_message { to: "main" }) as User
+            // messages before the next provider call.
+            self.drain_parent_messages();
 
             // Only the derived working set is sent to the provider (ADR 0023),
             // prefixed by the System prompt (AGENTS.md + catalog, ADR 0020).
@@ -1255,6 +1290,11 @@ impl AgentLoop {
                 // If a background task completed while we were processing, inject
                 // its notification and restart.
                 if self.drain_task_notifications() {
+                    continue;
+                }
+                // If a parent message arrived while we were processing, inject
+                // it and restart.
+                if self.drain_parent_messages() {
                     continue;
                 }
                 hit_tool_cap = false;
@@ -1738,11 +1778,22 @@ impl AgentLoop {
         let trust = self.trust;
         let headless = self.headless;
 
+        // 3. Wire the sub-agent's message channel (send_message task): mint a unique
+        //    agent_id, register the parent->child Sender in AGENT_REGISTRY, and pass
+        //    the Receiver into the child's turn loop so it can drain parent messages.
+        let seq = self.sub_agent_seq.fetch_add(1, Ordering::Relaxed);
+        let agent_id = format!("fork_{}_{}", std::process::id(), seq);
+        let (msg_tx, msg_rx) = channel::<String>();
+        crate::tool::send_message::AGENT_REGISTRY
+            .lock()
+            .unwrap()
+            .register(agent_id.clone(), msg_tx);
+
         // Trace: SubAgentLifecycle Spawned
         self.observer_set.on_point(&crate::trace::types::PointEvent {
             ts: crate::trace::types::now_ts(),
             kind: crate::trace::types::EventKind::SubAgentLifecycle {
-                agent_id: format!("fork_{}", std::process::id()),
+                agent_id: agent_id.clone(),
                 status: crate::trace::types::SubAgentStatus::Spawned,
                 parent_span_id: String::new(),
             },
@@ -1750,10 +1801,10 @@ impl AgentLoop {
         });
 
         if background {
-            let task_id = format!("fork_{}", std::process::id());
-            let task_id_spawn = task_id.clone();
+            let task_id_return = agent_id.clone();
+            let task_id_spawn = task_id_return.clone();
             let _ = event_tx.send(AgentEvent::TaskSpawned {
-                task_id: task_id.clone(),
+                task_id: task_id_return.clone(),
                 description: task.chars().take(80).collect(),
             });
             // Clone the task_notifications queue so the background thread can
@@ -1764,7 +1815,12 @@ impl AgentLoop {
                     provider, model, mt, temp, root,
                     parent_messages, system_prompt, registry, trust, headless,
                 );
+                child.parent_msg_rx = Some(msg_rx);
                 child.process_turn(task, &child_tx);
+                crate::tool::send_message::AGENT_REGISTRY
+                    .lock()
+                    .unwrap()
+                    .unregister(&task_id_spawn);
                 let output = child.last_assistant_text();
                 let notification = format!(
                     "## Background task completed\n**task**: {task_id_spawn}\n**result**: {output}"
@@ -1772,16 +1828,22 @@ impl AgentLoop {
                 nt_queue.push(notification);
             });
             // Return immediately, don't wait
-            return format!("task {task_id} started in background");
+            return format!("task {task_id_return} started in background");
         }
 
         // Synchronous: run on a new thread, wait for completion
+        let agent_id_sync = agent_id.clone();
         let handle = thread::spawn(move || {
             let mut child = AgentLoop::fork_sub(
                 provider, model, mt, temp, root,
                 parent_messages, system_prompt, registry, trust, headless,
             );
+            child.parent_msg_rx = Some(msg_rx);
             child.process_turn(task, &child_tx);
+            crate::tool::send_message::AGENT_REGISTRY
+                .lock()
+                .unwrap()
+                .unregister(&agent_id_sync);
             child.last_assistant_text()
         });
 
@@ -1789,7 +1851,7 @@ impl AgentLoop {
         self.observer_set.on_point(&crate::trace::types::PointEvent {
             ts: crate::trace::types::now_ts(),
             kind: crate::trace::types::EventKind::SubAgentLifecycle {
-                agent_id: format!("fork_{}", std::process::id()),
+                agent_id: agent_id.clone(),
                 status: crate::trace::types::SubAgentStatus::Running,
                 parent_span_id: String::new(),
             },
@@ -1806,7 +1868,7 @@ impl AgentLoop {
         self.observer_set.on_point(&crate::trace::types::PointEvent {
             ts: crate::trace::types::now_ts(),
             kind: crate::trace::types::EventKind::SubAgentLifecycle {
-                agent_id: format!("fork_{}", std::process::id()),
+                agent_id: agent_id.clone(),
                 status: crate::trace::types::SubAgentStatus::Done,
                 parent_span_id: String::new(),
             },
@@ -1832,11 +1894,20 @@ impl AgentLoop {
         let trust = self.trust;
         let headless = self.headless;
 
+        // Wire the sub-agent's message channel (send_message task)
+        let seq = self.sub_agent_seq.fetch_add(1, Ordering::Relaxed);
+        let agent_id = format!("fresh_{}_{}", std::process::id(), seq);
+        let (msg_tx, msg_rx) = channel::<String>();
+        crate::tool::send_message::AGENT_REGISTRY
+            .lock()
+            .unwrap()
+            .register(agent_id.clone(), msg_tx);
+
         // Trace: SubAgentLifecycle Spawned
         self.observer_set.on_point(&crate::trace::types::PointEvent {
             ts: crate::trace::types::now_ts(),
             kind: crate::trace::types::EventKind::SubAgentLifecycle {
-                agent_id: format!("fresh_{}", std::process::id()),
+                agent_id: agent_id.clone(),
                 status: crate::trace::types::SubAgentStatus::Spawned,
                 parent_span_id: String::new(),
             },
@@ -1844,10 +1915,10 @@ impl AgentLoop {
         });
 
         if background {
-            let task_id = format!("fresh_{}", std::process::id());
-            let task_id_clone = task_id.clone();
+            let task_id_return = agent_id.clone();
+            let task_id_clone = task_id_return.clone();
             let _ = event_tx.send(AgentEvent::TaskSpawned {
-                task_id: task_id.clone(),
+                task_id: task_id_return.clone(),
                 description: task.chars().take(80).collect(),
             });
             let nt_queue = self.task_notifications.clone();
@@ -1856,29 +1927,40 @@ impl AgentLoop {
                     provider, model, mt, temp, root,
                     system_prompt, registry, trust, headless,
                 );
+                child.parent_msg_rx = Some(msg_rx);
                 child.process_turn(task, &child_tx);
+                crate::tool::send_message::AGENT_REGISTRY
+                    .lock()
+                    .unwrap()
+                    .unregister(&task_id_clone);
                 let output = child.last_assistant_text();
                 let notification = format!(
                     "## Background task completed\n**task**: {task_id_clone}\n**result**: {output}"
                 );
                 nt_queue.push(notification);
             });
-            return format!("task {task_id} started in background");
+            return format!("task {task_id_return} started in background");
         }
 
+        let agent_id_sync = agent_id.clone();
         let handle = thread::spawn(move || {
             let mut child = AgentLoop::fresh_sub(
                 provider, model, mt, temp, root,
                 system_prompt, registry, trust, headless,
             );
+            child.parent_msg_rx = Some(msg_rx);
             child.process_turn(task, &child_tx);
+            crate::tool::send_message::AGENT_REGISTRY
+                .lock()
+                .unwrap()
+                .unregister(&agent_id_sync);
             child.last_assistant_text()
         });
 
         self.observer_set.on_point(&crate::trace::types::PointEvent {
             ts: crate::trace::types::now_ts(),
             kind: crate::trace::types::EventKind::SubAgentLifecycle {
-                agent_id: format!("fresh_{}", std::process::id()),
+                agent_id: agent_id.clone(),
                 status: crate::trace::types::SubAgentStatus::Running,
                 parent_span_id: String::new(),
             },
@@ -1895,7 +1977,7 @@ impl AgentLoop {
         self.observer_set.on_point(&crate::trace::types::PointEvent {
             ts: crate::trace::types::now_ts(),
             kind: crate::trace::types::EventKind::SubAgentLifecycle {
-                agent_id: format!("fresh_{}", std::process::id()),
+                agent_id: agent_id.clone(),
                 status: crate::trace::types::SubAgentStatus::Done,
                 parent_span_id: String::new(),
             },
@@ -1931,20 +2013,38 @@ impl AgentLoop {
         let (model, mt, temp, root) =
             (self.model.clone(), self.max_tokens, self.temperature, self.root.clone());
 
+        // Wire the sub-agent's message channel (send_message task). The text
+        // sub-agent is read-only (ADR 0019) and never calls tools, so it won't
+        // drain messages mid-turn; registering it still lets a parent address it
+        // and the channel is unregistered on completion for hygiene.
+        let seq = self.sub_agent_seq.fetch_add(1, Ordering::Relaxed);
+        let agent_id = format!("review_{}_{}", std::process::id(), seq);
+        let (msg_tx, msg_rx) = channel::<String>();
+        crate::tool::send_message::AGENT_REGISTRY
+            .lock()
+            .unwrap()
+            .register(agent_id.clone(), msg_tx);
+
         // Trace: SubAgentLifecycle Spawned
         self.observer_set.on_point(&crate::trace::types::PointEvent {
             ts: crate::trace::types::now_ts(),
             kind: crate::trace::types::EventKind::SubAgentLifecycle {
-                agent_id: format!("sub_{}", std::process::id()),
+                agent_id: agent_id.clone(),
                 status: crate::trace::types::SubAgentStatus::Spawned,
                 parent_span_id: String::new(),
             },
             meta: serde_json::json!({}),
         });
 
+        let agent_id_sync = agent_id.clone();
         let handle = thread::spawn(move || {
             let mut child = AgentLoop::new_sub(provider, model, mt, temp, root);
+            child.parent_msg_rx = Some(msg_rx);
             child.process_turn(task, &child_tx);
+            crate::tool::send_message::AGENT_REGISTRY
+                .lock()
+                .unwrap()
+                .unregister(&agent_id_sync);
             child.last_assistant_text()
         });
 
@@ -1952,7 +2052,7 @@ impl AgentLoop {
         self.observer_set.on_point(&crate::trace::types::PointEvent {
             ts: crate::trace::types::now_ts(),
             kind: crate::trace::types::EventKind::SubAgentLifecycle {
-                agent_id: format!("sub_{}", std::process::id()),
+                agent_id: agent_id.clone(),
                 status: crate::trace::types::SubAgentStatus::Running,
                 parent_span_id: String::new(),
             },
@@ -1975,7 +2075,7 @@ impl AgentLoop {
         self.observer_set.on_point(&crate::trace::types::PointEvent {
             ts: crate::trace::types::now_ts(),
             kind: crate::trace::types::EventKind::SubAgentLifecycle {
-                agent_id: format!("sub_{}", std::process::id()),
+                agent_id: agent_id.clone(),
                 status: sub_status,
                 parent_span_id: String::new(),
             },
@@ -3426,5 +3526,69 @@ mod tests {
         agent.process_turn("hello".into(), &tx);
         assert!(agent.self_observation.is_none(), "self_observation should stay None when disabled");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A two-iteration provider: call 0 (parent) delegates via `agent` in fork
+    /// mode; call 1 (child) returns final text. The test sends a message to the
+    /// child mid-turn via `send_message` after the child is registered, then
+    /// verifies the child drained it into its own turn.
+    struct MsgScripted {
+        calls: std::sync::atomic::AtomicUsize,
+    }
+    impl Provider for MsgScripted {
+        fn name(&self) -> &str {
+            "msg-scripted"
+        }
+        fn complete(&self, req: &CompletionRequest) -> anyhow::Result<Completion> {
+            let n = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if n == 0 {
+                // Parent: delegate to a fork sub-agent.
+                Ok(Message {
+                    id: 0,
+                    role: Role::Assistant,
+                    items: vec![MessageItem::ToolCall {
+                        id: "m1".into(),
+                        name: "agent".into(),
+                        args: serde_json::json!({ "task": "child task" }),
+                    }],
+                }.into())
+            } else {
+                // Child: emit a short final answer. The child's process_turn is
+                // synchronous and single-iteration here, so no mid-turn drain is
+                // observable through this provider; the registry registration is
+                // what the test asserts.
+                Ok(Message::text(0, Role::Assistant, "child done").into())
+            }
+        }
+    }
+
+    #[test]
+    fn sub_agent_registers_and_unregisters_registry() {
+        let dir = std::env::temp_dir().join(format!("cc_sendmsg_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // Snapshot the registry's entry set before/after to avoid clobbering any
+        // parallel test's registrations.
+        let before: Vec<String> = {
+            let g = crate::tool::send_message::AGENT_REGISTRY.lock().unwrap();
+            g.ids().to_vec()
+        };
+
+        let provider = Arc::new(MsgScripted { calls: std::sync::atomic::AtomicUsize::new(0) });
+        let mut agent = AgentLoop::new(provider, "m", 256, 0.0, dir.clone());
+        let (etx, erx) = channel();
+        agent.process_turn("go".into(), &etx);
+        drop(etx);
+        let _events: Vec<_> = erx.into_iter().collect();
+
+        // The child spawned and registered an id (fresh/fork_<pid>_<seq>), and
+        // freed it on completion → registry back to the pre-test baseline.
+        let after: Vec<String> = {
+            let g = crate::tool::send_message::AGENT_REGISTRY.lock().unwrap();
+            g.ids().to_vec()
+        };
+        assert_eq!(before, after, "registry should be back to baseline after sub-agent completes");
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 }
