@@ -271,7 +271,7 @@ systemd `OnFailure=` / cron 邮件可按非 0 退出码触发告警；账本文�
 
 ```bash
 cargo build      # 编译
-cargo test       # 运行 351 个测试（348 通过 + 3 个 #[ignore]：2 Docker e2e + L3 LLM 冒烟）
+cargo test       # 运行 538 个测试（534 通过 + 2 已知失败 + 2 个 #[ignore]：2 Docker e2e + L3 LLM 冒烟）
                  # tests/ 下为黑盒行为验证分层（L1 默认；L2/L3 门控，见 docs/testing/behavioral-validation.md）
 cargo run --bin ccda   # 启动 ccd daemon
 cargo run --bin ccli   # 启动 ccli 客户端

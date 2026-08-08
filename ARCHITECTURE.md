@@ -1,6 +1,6 @@
 # CodeCoder 架构
 
-自主 AI agent,Rust 编写,**事件驱动、文件系统即自我**。本文串起 43 个源文件 ↔ 32 个 ADR ↔ 26 个内置工具 ↔ 6 点自我进化诉求,供人与未来 agent 导航。术语以 `CONTEXT.md` 为准,决策依据见 `docs/adr/`。
+自主 AI agent,Rust 编写,**事件驱动、文件系统即自我**。本文串起 77 个源文件 ↔ 34 个 ADR ↔ 40 个内置工具 ↔ 6 点自我进化诉求,供人与未来 agent 导航。术语以 `CONTEXT.md` 为准,决策依据见 `docs/adr/`。
 
 ## 一句话
 
@@ -40,7 +40,7 @@
 | `permission.rs` | `PermScope`/`Permission`/`PermissionKey`/`SessionAllowlist` | 0005 0018 |
 | `tool/mod.rs` | `Tool` trait、`Toolbox`(父/子 read-only)、wire schema | 0018 0019 |
 | `tool/builtin.rs` | 文件/执行/自我进化/委派/验收工具 | 0018 0020 0022 |
-| `tool/{net,dev,reason,search,wasm}.rs` | 联网 / 开发 / **推理树(reason 工具,**跨 session 检索**) / glob·grep(含 AST)/ wasm 运行器 | 0018 0021 |
+| `tool/{net,dev,reason,search,wasm,mcp,lsp,cron,send_message,task_manage,generate_milestones}.rs` | 联网 / 开发 / **推理树(reason 工具,**跨 session 检索**) / glob·grep(含 AST)/ wasm 运行器 / MCP 工具 / LSP 代码智能 / 定时任务 / 子 agent 消息 / 任务管理 / 目标分解 | 0018 0021 0040 0041 |
 | `session.rs` | `Session`、自动落盘、前向迁移链、`/resume`、**树状会话(Phase A:parent 指针 + leaf)** | 0004 |
 | `compaction.rs` | 派生的 Context Working Set(不毁持久记录)。**tier-1 + tier-2 (LLM summarization)** | 0023 |
 | `tokenizer.rs` | tiktoken 精确计数 + 模型→窗口表 | 0023 |
@@ -70,7 +70,7 @@
    - **no-op 兜底**(迭代 4,ADR 0029 修订):连续 `CODECODER_NOOP_NUDGE_THRESHOLD`(默认 3,0=禁用)个「纯探索」迭代(tool_calls 全 ∈ read_file/glob/grep/diff)→ 注入一条 `User` steering 消息推动动手或声明阻塞,并发 `Notice`;非探索工具重置计数,每 turn 至多一次。
 8. 无工具调用 → `TurnComplete` → `run()` 循环自动调用 `drive_workgraph()` 推进 workgraph 就绪里程碑(**Plan #2 自动驱动**)。
 
-## 工具体系(26 内置)
+## 工具体系(40 内置)
 
 `Tool` 自报 `Permission`(0018):`None`(只读免问)/ `Ask{key}`(细粒度 key,命令类/前缀甜点区)。**子 agent 只能用 `Permission::None` 的一个只读子集(9 个),且无 `agent`——深度锁 1(0019)。**
 
@@ -89,6 +89,12 @@
 | | commit | Ask(`commit`) | |
 | | plan · milestone(工作图,`workgraph.rs`)· memory | None(本地 scratch) | |
 | 推理 | reason(推理树,`reason.rs` · `causal_tree.json`) | None(本地 scratch) | |
+| | generate_milestones(目标分解) | None(本地 scratch) | |
+| 代码智能 | lsp(go_to_definition/find_references/hover/document_symbol/workspace_symbol/go_to_implementation) | None | |
+| MCP | mcp_call_tool · mcp_list_resources · mcp_read_resource | Ask | |
+| 任务 | task_create · task_get · task_list · task_update · task_stop | None(本地) | |
+| 定时 | cron_create · cron_delete · cron_list | None(本地) | |
+| 消息 | send_message | None(本地) | |
 
 ## 自我进化闭环
 
@@ -149,11 +155,11 @@ codecoder 的「文件系统即自我」覆盖了三层身份与工作/推理层
 
 ## ADR 索引
 
-`0001` TUI 键位与 Mode 语义(已废弃)· `0002` slash 本地派发 · `0003` 中心 Theme(已废弃)· `0004` Session 持久化与迁移 · `0005` 权限 scope 与 allowlist · `0007` prompt 注入 slash · `0015` 统一消息模型 · `0016` channel 拓扑与事件模型 · `0017` provider 中立消息模型 · `0018` Tool trait 与 PermissionKey · `0019` 子 agent 能力边界 · `0020` Skills/Capabilities Registry · `0021` Capability 环境与生命周期 · `0022` 自撰安全回路 · `0023` 上下文压缩 · `0024` TUI 视口与渲染循环(已废弃)· `0025` Prompt 作为 Skill 草稿层 · `0026` Background Agent · `0027` pi 对照分析 · `0028` 项目信任加载门禁 · `0029` turn steering 与 follow-up · `0031` 拦截中间件边界论证(不做)· `0032` client-server 架构 · `0030` BG 客观验收门与失败写回 · `0033` BG 任务账本与退出码告警 · `0034` Persistent Capability 跨重启韧性 · `0035` workgraph 并发写保护 · `0036` 复合命令 keying · `0037` 工具输出长度截断 · `0038` 自适应 max_tokens 预算 · `0039` BG Review 门(独立评审)与 headless 可观测性 · `0040` 配置重构与 workgraph 门禁移除
+`0001` TUI 键位与 Mode 语义(已废弃)· `0002` slash 本地派发 · `0003` 中心 Theme(已废弃)· `0004` Session 持久化与迁移 · `0005` 权限 scope 与 allowlist · `0007` prompt 注入 slash · `0015` 统一消息模型 · `0016` channel 拓扑与事件模型 · `0017` provider 中立消息模型 · `0018` Tool trait 与 PermissionKey · `0019` 子 agent 能力边界 · `0020` Skills/Capabilities Registry · `0021` Capability 环境与生命周期 · `0022` 自撰安全回路 · `0023` 上下文压缩 · `0024` TUI 视口与渲染循环(已废弃)· `0025` Prompt 作为 Skill 草稿层 · `0026` Background Agent · `0027` pi 对照分析 · `0028` 项目信任加载门禁 · `0029` turn steering 与 follow-up · `0031` 拦截中间件边界论证(不做)· `0032` client-server 架构 · `0030` BG 客观验收门与失败写回 · `0033` BG 任务账本与退出码告警 · `0034` Persistent Capability 跨重启韧性 · `0035` workgraph 并发写保护 · `0036` 复合命令 keying · `0037` 工具输出长度截断 · `0038` 自适应 max_tokens 预算 · `0039` BG Review 门(独立评审)与 headless 可观测性 · `0040` 配置重构与 workgraph 门禁移除 · `0040` MCP/LSP 工具(同号重叠)· `0041` Task/Cron/SendMessage 工具
 
 ## 测试与验证边界
 
-- **348 个离线单元/集成测试**(默认套件,hermetic)+ **3 个 `#[ignore]`**(2 Docker e2e + L3 真实 LLM 冒烟;`cargo test -- --ignored`,部分另需门控 env)。Wasm e2e 在默认套件内(纯进程内)。
+- **536 个离线单元/集成测试**(534 通过 + 2 失败 + 2 个 `#[ignore]`);默认套件 hermetic,2 个失败为已知差异(默认模型名 "glm-5.2" vs 测试期望 "gpt-4o" + generate_milestones stub 输出变化)。`cargo test -- --ignored` 跑 2 Docker e2e + L3 真实 LLM 冒烟;部分另需门控 env)。Wasm e2e 在默认套件内(纯进程内)。
 - `tests/` 下为**黑盒行为验证分层**:只编译于 `src/lib.rs` 公共 API,驱动真实 `AgentLoop`+真实工具,断言只落三面(`AgentEvent` 流 / 文件系统+git / `ScriptedProvider` 记录的 `CompletionRequest`)。分层与门控开关见 `docs/testing/behavioral-validation.md`。
 - **L2 pty 冒烟测试已删除**(原 TUI 交互验证);client-server 交互由 daemon+`ccli` 的手动验收覆盖。
 - token 计数用 tiktoken(准确);`run_command`/`commit` 走真实 `git`/shell(运行期生效)。

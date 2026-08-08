@@ -87,7 +87,7 @@ _Avoid_: task (that word is reserved — see Background Agent / sub-agent), step
 These three are the load-bearing distinction of the whole system: **Tool is innate, Skill is a learned idea, Capability is a grown limb.** A Skill only changes *how the agent thinks*; a Capability grows *a new hand that acts*. Confusing them is the single most damaging naming error in the codebase.
 
 **Tool**:
-A primitive compiled into the binary and shipped with the release (26 of them: `read_file`, `run_command`, `agent`, `reason`, `generate_skill`, `generate_capability`, `promote_prompt`, …). The uniform thing an LLM invokes as a `tool_call` within a turn (see `Tool` trait, [[0018-tool-trait-and-permission-keys]]). Fixed at build time — a runtime-authored executable is **not** a Tool, it is a Capability.
+A primitive compiled into the binary and shipped with the release (40 of them: `read_file`, `run_command`, `agent`, `reason`, `generate_skill`, `generate_capability`, `promote_prompt`, `lsp`, `mcp_call_tool`, `task_create`, `cron_create`, `send_message`, …). The uniform thing an LLM invokes as a `tool_call` within a turn (see `Tool` trait, [[0018-tool-trait-and-permission-keys]]). Fixed at build time — a runtime-authored executable is **not** a Tool, it is a Capability.
 _Avoid_: capability, skill, function, command.
 
 **Skill**:
