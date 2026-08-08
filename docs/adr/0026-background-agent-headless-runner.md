@@ -1,5 +1,7 @@
 # Background Agent: headless one-shot runner
 
+> **Updated 2026-08-08 (refactor):** Per-milestone objective gates (`needs_fix` self-recovery loop, `fix_attempts`/`last_failure` fields, `retry_one_milestone`, `next_retryable`) were removed as part of the workgraph gate removal (ADR 0040). Milestones are now simple dependency-ordered nodes; the agent self-reports completion. The `CODECODER_BG_MAX_FIX_ATTEMPTS` env var is now configured via `bg_max_fix_attempts` in `codecoder.json`. The headless runner (`CODECODER_BG_TASK`/`CODECODER_BG_WORKGRAPH`) and its permission model (pre-authorized `codecoder.json` allowlist) are unchanged.
+
 A Background Agent is a full-LLM-loop agent that runs autonomously with **no user
 present** (CONTEXT.md). v1 ships the minimal shape: a **headless one-shot runner**
 triggered by `CODECODER_BG_TASK=<task>`, which drives exactly one turn and exits.
@@ -51,6 +53,8 @@ external scheduler bounds concurrency. (SIGINT/cancel, originally listed here,
 is now implemented above.)
 
 ## 修订(2026-07-24,迭代 1):needs_fix 自恢复循环
+
+> **已废弃(2026-08-08,ADR 0040):** 本迭代的 needs_fix 自恢复机制已被移除。见文首修订注记。
 
 此前 headless workgraph runner 只推进 `pending` 就绪里程碑:验收 `needs_fix` 后 runner 无法自恢复,需人手动重置 `pending` 才重试(dogfooding 评估的 P0 缺口,见 `docs/superpowers/audits/2026-07-23-coedit-dogfooding-evaluation.md`)。本迭代补上**有界自恢复**:
 

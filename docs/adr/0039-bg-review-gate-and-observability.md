@@ -1,5 +1,7 @@
 # ADR 0039 — BG Review 门(独立评审)与 headless 可观测性
 
+> **Updated 2026-08-08 (refactor):** The Review gate (independent read-only review sub-agent overriding the agent's self-reported VERDICT) was removed as part of the workgraph gate removal (ADR 0040). Milestones are now simple dependency-ordered nodes; the agent self-reports completion. The headless observability portion of this ADR (`.ccd.bg.ndjson` via `BgObserver`) is unchanged.
+
 - **状态**: Accepted
 - **日期**: 2026-07-25
 - **关联**: ADR 0026(headless runner)、ADR 0030(BG 客观验收门)、spec `docs/superpowers/specs/2026-07-25-codecoder-report-fixes-design.md`

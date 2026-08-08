@@ -1,5 +1,7 @@
 # ADR 0030 — BG 客观验收门 + 失败写回 + 任务策略
 
+> **Updated 2026-08-08 (refactor):** Per-milestone objective gates (`GateVerdict`, command gate, review gate, `next_action`, `extract_gate_command`, `Milestone.command` field, `gate_kind`) were removed (ADR 0040). The `bg_gate.rs` file is retained for historical reference only. Milestones are now simple dependency-ordered nodes; the agent self-reports completion. The `bg_max_auto`/`bg_circuit_k`/`bg_milestone_tool_cap`/`bg_max_fix_attempts` settings are now configured via `codecoder.json` instead of `CODECODER_*` env vars.
+
 - **状态**: Accepted
 - **日期**: 2026-07-22
 - **关联**: ADR 0026(Background Agent)、ADR 0021(Capability 验收)、`docs/superpowers/audits/2026-07-21-codecoder-capability-matrix.md`(审计 #1)、`docs/superpowers/specs/2026-07-22-bg-failure-handling-guardrails-design.md`

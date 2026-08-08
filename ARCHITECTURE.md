@@ -14,28 +14,28 @@
   │  daemon 线程  │                                    │  agent 线程   │
   │ (Unix socket)│ ◀─────────────────────────────── │  AgentLoop   │
   └──────────────┘  event_rx (AgentEvent: 流式增量/    └──────────────┘
-      cc 客户端          工具状态/权限请求/ask/通知)              │
+      ccli 客户端          工具状态/权限请求/ask/通知)              │
       stdin/stdout     经 AgentEvent 内嵌 reply_tx oneshot ◀────┘
    (permission/ask)
 ```
 
-- **client-server 架构**: `ccd` daemon 长驻,监听 Unix socket; `cc` 客户端无状态,经 stdin/stdout 交互(ADR 0032)。
-- **权限/ask/confirm/plan/trust 弹窗**经 daemon wire protocol 往返,`cc` 在终端行内显示 `y/n` 提示(Task 9a)。
+- **client-server 架构**: `ccda` daemon 长驻,监听 Unix socket; `ccli` 客户端无状态,经 stdin/stdout 交互(ADR 0032)。
+- **权限/ask/confirm/plan/trust 弹窗**经 daemon wire protocol 往返,`ccli` 在终端行内显示 `y/n` 提示(Task 9a)。
 - **无 async 运行时**:阻塞式,HTTP 用 ureq,子 agent/服务用 OS 线程/子进程。
-- **取消**是协作式:`cc` 的 `Ctrl+C`(仅当有 turn 在跑时)**直接翻转共享 `CancelToken`**。`run_command` 与 shell Capability 经同一 `run_shell_cancellable` 轮询该 token 并 kill 子进程,turn 循环在每次迭代顶部再检查一次(不硬杀线程)。
+- **取消**是协作式:`ccli` 的 `Ctrl+C`(仅当有 turn 在跑时)**直接翻转共享 `CancelToken`**。`run_command` 与 shell Capability 经同一 `run_shell_cancellable` 轮询该 token 并 kill 子进程,turn 循环在每次迭代顶部再检查一次(不硬杀线程)。
 - **daemon 整体** SIGINT/SIGTERM → shutdown flag → 监控线程自连接 socket → accept 退出 → shutdown_all 杀常驻 Capability → exit(0)(ADR 0032 修订)。
 
 ## 模块地图
 
 | 模块 | 职责 | ADR |
 |---|---|---|
-| `main.rs` | 入口分发(`bg_mode_from_env` 路由):`CODECODER_BG_TASK`→显式 BG、`CODECODER_BG_WORKGRAPH=1`→workgraph BG、否则→`run_daemon`;**入口最先 `autoload_ccd_env()`**(迭代 4) | 0016 0026 0033 |
-| `config.rs` | `CODECODER_*` 环境变量;**`.ccd.env` 自动加载**(`autoload_ccd_env`,迭代 4):启动时从项目根加载 `KEY=VALUE`,**只注入 `DOTENV_ALLOWED_KEYS` 安全调参白名单**且不覆盖已设 env——密钥/端点/trust 门/loader 变量一律拒绝(仓库本地文件不可信,这些必须来自真实 shell) | — |
+| `main.rs` | 入口分发(`bg_mode_from_env` 路由):`CODECODER_BG_TASK`→显式 BG、`CODECODER_BG_WORKGRAPH=1`→workgraph BG、否则→`run_daemon` | 0016 0026 0033 |
+| `config.rs` | 三层 JSON 配置(内置默认 → 用户级 `~/.codecoder/codecoder.json` → 项目级 `<root>/.codecoder/codecoder.json`);`Config.load()` 合并覆盖;`ConfigPatch` 提供部分覆盖(每字段可选,缺失不覆盖下层);保留少量 env 用于进程路由(`CODECODER_ROOT`/`DAEMON`/`BG_TASK`/`BG_WORKGRAPH`/`SCRIPT`) | — |
 | `message.rs` | `Message`/`MessageItem`/`MessageId`/`Role`(provider 中立) | 0015 0017 |
 | `provider/{mod,openai,stub}` | `Provider` trait;`OpenAiClient`(chat-completions)/`StubClient` | 0017 |
 | `agent.rs` | `AgentLoop`、turn 循环、工具分派、子 agent、ask_user、reload、**workgraph 自动推进(`drive_workgraph`)**、**no-op 探索兜底 nudge**(迭代 4,ADR 0029 修订) | 0016 0019 0029 |
-| `background.rs` | Background Agent headless one-shot runner;`run_background` 驱动一个 turn 到结束,汇总为 `BgOutcome`;**无显式 task 时从 workgraph 取就绪里程碑推进**;**客观验收门覆盖自报 + 失败写回 + continue/stop 策略**;**needs_fix 自恢复循环**(迭代 1):验收 `needs_fix` 后 runner 在预算内(`CODECODER_BG_MAX_FIX_ATTEMPTS`,默认 3,0=禁用)自动把 `last_failure` 注入修复 prompt 重试(`retry_one_milestone`,重试不计入 max_auto/连败熔断);预算耗尽仍 `needs_fix` 才落 `StuckNeedsFix`(退出码 2);重试计数 `fix_attempts` 持久化在 `workgraph.json` 的里程碑上,跨进程尊重预算 | 0026 0030 0033 |
-| `bg_gate.rs` | **BG 客观验收门 + 任务策略**(ADR 0030):`GateVerdict`/命令门/`evaluate`/`next_action`(BlockedAt/CircuitBreaker/CompletedAllReady);纯函数 + 可取消 shell,hermetic 可测;**迭代 3 契约化**:acceptance 支持结构化 `Milestone.command` 通道(显式 command 优先、旧数据启发式兜底),`gate_kind` 单一路由事实源并随 `SubgoalOutcome` 记入账本(强/弱门可观测) | 0030 |
+| `background.rs` | Background Agent headless one-shot runner;`run_background` 驱动一个 turn 到结束,汇总为 `BgOutcome`;**无显式 task 时从 workgraph 取就绪里程碑推进**;agent 自报完成,里程碑验收由独立里程碑节点承载 | 0026 0030 0033 |
+| `bg_gate.rs` | **BG 客观验收门 + 任务策略**(ADR 0030,已废弃):`GateVerdict`/命令门/`evaluate`/`next_action`(BlockedAt/CircuitBreaker/CompletedAllReady)。**Task 4 已移除**:per-milestone gates(acceptance/command/review/needs_fix)删除,验收改由独立里程碑节点承载、agent 自报完成;文件保留仅载历史 reference | 0030 |
 | `bg_ledger.rs` | **BG 任务账本**(ADR 0033):`append`/`read_recent`/`mission_exit_code`/`format_utc`;JSONL 持久化 + 退出码告警 | 0033 |
 | `permission.rs` | `PermScope`/`Permission`/`PermissionKey`/`SessionAllowlist` | 0005 0018 |
 | `tool/mod.rs` | `Tool` trait、`Toolbox`(父/子 read-only)、wire schema | 0018 0019 |
@@ -49,20 +49,20 @@
 | `supervisor_state.rs` | **Persistent 跨重启监督状态**(ADR 0034):`supervisor_state.json` 持久化 gave_up/crash_count/manifest mtime;load/save/reset/should_skip/record_crash | 0034 |
 | `recovery.rs` | **Daemon 崩溃自动恢复**:stamp 文件 + 重启循环;`daemon_auto_restart` 启用时以最多 5 次重启尝试包装 `run_daemon`;stamp 追踪 workgraph 进度，崩溃后 daemon 从中断处继续 | — |
 | `memory.rs` | `memory/<key>` 文件级 KV + 数据索引(**跨 session 共享**) | — |
-| `workgraph.rs` | **Work Graph(一等公民 #2)**:持久化、依赖有序的里程碑图,`Milestone` 节点含 `NodeStatus`(含 `Hypothesis`/`Locked`)、`next_ready()` 调度、`render_for_prompt()` 摘要;**fs2-locked RMW**(`with_lock`,ADR 0035,防并发 lost-update);节点带 `fix_attempts`/`last_failure` 重试状态,`next_retryable(max)` 选预算内最低 id 的 needs_fix | 设计文档 0035 |
-| `review.rs` | **结构化验收裁决(一等公民 #4)**:`Verdict`(pass/needs_fix/rebuild)+ 四信号(`foundation`/`over_engineering`/`volume`/`terminology`),纯函数解析 | 设计文档 |
+| `workgraph.rs` | **Work Graph(一等公民 #2)**:持久化、依赖有序的里程碑图,`Milestone` 节点含 `NodeStatus`(含 `Hypothesis`/`Locked`)、`next_ready()` 调度、`render_for_prompt()` 摘要;**fs2-locked RMW**(`with_lock`,ADR 0035,防并发 lost-update)。**Task 4 已移除 per-milestone gates**(acceptance/command/review/needs_fix),里程碑为简单依赖有序节点,agent 自报完成 | 设计文档 0035 |
+| `review.rs` | **结构化验收裁决(一等公民 #4)**:`Verdict`(pass/needs_fix/rebuild)+ 四信号(`foundation`/`over_engineering`/`volume`/`terminology`),纯函数解析。里程碑验收由 agent 自报完成,不再经 review 门强制覆盖 | 设计文档 |
 | `daemon/{mod,bus,proto,session_manager,socket}` | **Daemon(长驻服务)**:Unix socket 监听、多 client 复用、session 管理、permission/ask/confirm/plan/trust 往返 wire protocol | 0032 |
 | `daemon/task_source.rs` | **自动任务发现**:`TaskSource` trait + `GitHubIssuesPoller` 实现，按 `CODECODER_AUTOTASK_INTERVAL_SECS` 间隔轮询 GitHub Issues 生成 workgraph 里程碑 | — |
-| `client/mod.rs` | **cc 客户端**:daemon 连接、stdin→消息、消息→stdout 格式化、permission 弹窗行内 `y/n` | 0032 |
+| `client/mod.rs` | **ccli 客户端**:daemon 连接、stdin→消息、消息→stdout 格式化、permission 弹窗行内 `y/n` | 0032 |
 
 ## 一个 turn 的生命周期
 
-1. 用户在 `cc` 客户端输入 → 经 Unix socket 送 `AgentCommand::ProcessMessage`。
+1. 用户在 `ccli` 客户端输入 → 经 Unix socket 送 `AgentCommand::ProcessMessage`。
 2. `AgentLoop::process_turn`:追加 user `Message` → Session **自动落盘**(0004)。
 3. 取 **Context Working Set**(0023,派生自全量 messages)+ 前置 **System prompt**(AGENTS.md + 目录 + **workgraph 状态摘要**,0020)。
 4. `tokenizer` 精确计 token → `AgentEvent::Context{pct}` 驱动状态栏 `ctx%`。
 5. `Provider::complete`:中立消息 ↔ OpenAI 线格式翻译(0017);`Reasoning` 不回灌(0004)。
-6. **自适应 max_tokens 预算**(0038):命中截断(`StopReason::Length`)时,先把任何半序列化的 tool call 置为 `is_error` 的 `ToolResult`(**绝不执行**),再把该 turn 的有效 max_tokens 翻倍上调(初值 `CODECODER_MAX_TOKENS`,默认 8192;封顶 `CODECODER_MAX_TOKENS_CEILING`,默认 32768;每 turn 重置)并发 `Notice` 重试;达封顶仍截断则收尾,交里程碑客观门 → needs_fix 自恢复循环接手。该判定在 `tool_calls.is_empty()` 收尾**之前**——截断的纯文本响应不再被静默当作正常结束。
+6. **自适应 max_tokens 预算**(0038):命中截断(`StopReason::Length`)时,先把任何半序列化的 tool call 置为 `is_error` 的 `ToolResult`(**绝不执行**),再把该 turn 的有效 max_tokens 翻倍上调(初值 `max_tokens`,默认 8192;封顶 `max_tokens_ceiling`,默认 32768;每 turn 重置)并发 `Notice` 重试;达封顶仍截断则收尾,交 agent 自报接手。该判定在 `tool_calls.is_empty()` 收尾**之前**——截断的纯文本响应不再被静默当作正常结束。
 7. 回复含 `ToolCall` → 逐个**串行**分派(0016):
    - 权限闸门(0018):`None` 直跑;`Ask{key}` 查 allowlist,否则发 `PermissionRequest` **阻塞等 oneshot**。
    - `agent`/`review`/`ask_user` 被 `AgentLoop` **拦截**(需 provider/事件通道)。
@@ -142,21 +142,22 @@ codecoder 的「文件系统即自我」覆盖了三层身份与工作/推理层
 
 ## Client-Server UI(0032)
 
-- **`ccd` daemon**:长驻服务,监听 Unix socket,管理多 client、session 复用、Registry 共享。
-- **`cc` 客户端**:无状态 CLI,经 stdin/stdout 交互,permission/ask/confirm/plan/trust 弹窗行内 `y/n`。
-- **已移除 ratatui TUI**:原全屏托管视口(Mode/Dialog/Popup/alternate screen)已删除,仅 daemon+cc 两路。
+- **`ccda` daemon**:长驻服务,监听 Unix socket,管理多 client、session 复用、Registry 共享。
+- **`ccli` 客户端**:无状态 CLI,经 stdin/stdout 交互,permission/ask/confirm/plan/trust 弹窗行内 `y/n`。
+- **`ccweb`**:可选 Web 界面客户端,通过浏览器连接 daemon。
+- **已移除 ratatui TUI**:原全屏托管视口(Mode/Dialog/Popup/alternate screen)已删除,仅 daemon+ccli 两路主客户端。
 
 ## ADR 索引
 
-`0001` TUI 键位与 Mode 语义(已废弃)· `0002` slash 本地派发 · `0003` 中心 Theme(已废弃)· `0004` Session 持久化与迁移 · `0005` 权限 scope 与 allowlist · `0007` prompt 注入 slash · `0015` 统一消息模型 · `0016` channel 拓扑与事件模型 · `0017` provider 中立消息模型 · `0018` Tool trait 与 PermissionKey · `0019` 子 agent 能力边界 · `0020` Skills/Capabilities Registry · `0021` Capability 环境与生命周期 · `0022` 自撰安全回路 · `0023` 上下文压缩 · `0024` TUI 视口与渲染循环(已废弃)· `0025` Prompt 作为 Skill 草稿层 · `0026` Background Agent · `0027` pi 对照分析 · `0028` 项目信任加载门禁 · `0029` turn steering 与 follow-up · `0031` 拦截中间件边界论证(不做)· `0032` client-server 架构 · `0030` BG 客观验收门与失败写回 · `0033` BG 任务账本与退出码告警 · `0034` Persistent Capability 跨重启韧性 · `0035` workgraph 并发写保护 · `0036` 复合命令 keying · `0037` 工具输出长度截断 · `0038` 自适应 max_tokens 预算 · `0039` BG Review 门(独立评审)与 headless 可观测性 · `0040` 任务自我发现(autotask)
+`0001` TUI 键位与 Mode 语义(已废弃)· `0002` slash 本地派发 · `0003` 中心 Theme(已废弃)· `0004` Session 持久化与迁移 · `0005` 权限 scope 与 allowlist · `0007` prompt 注入 slash · `0015` 统一消息模型 · `0016` channel 拓扑与事件模型 · `0017` provider 中立消息模型 · `0018` Tool trait 与 PermissionKey · `0019` 子 agent 能力边界 · `0020` Skills/Capabilities Registry · `0021` Capability 环境与生命周期 · `0022` 自撰安全回路 · `0023` 上下文压缩 · `0024` TUI 视口与渲染循环(已废弃)· `0025` Prompt 作为 Skill 草稿层 · `0026` Background Agent · `0027` pi 对照分析 · `0028` 项目信任加载门禁 · `0029` turn steering 与 follow-up · `0031` 拦截中间件边界论证(不做)· `0032` client-server 架构 · `0030` BG 客观验收门与失败写回 · `0033` BG 任务账本与退出码告警 · `0034` Persistent Capability 跨重启韧性 · `0035` workgraph 并发写保护 · `0036` 复合命令 keying · `0037` 工具输出长度截断 · `0038` 自适应 max_tokens 预算 · `0039` BG Review 门(独立评审)与 headless 可观测性 · `0040` 配置重构与 workgraph 门禁移除
 
 ## 测试与验证边界
 
 - **348 个离线单元/集成测试**(默认套件,hermetic)+ **3 个 `#[ignore]`**(2 Docker e2e + L3 真实 LLM 冒烟;`cargo test -- --ignored`,部分另需门控 env)。Wasm e2e 在默认套件内(纯进程内)。
 - `tests/` 下为**黑盒行为验证分层**:只编译于 `src/lib.rs` 公共 API,驱动真实 `AgentLoop`+真实工具,断言只落三面(`AgentEvent` 流 / 文件系统+git / `ScriptedProvider` 记录的 `CompletionRequest`)。分层与门控开关见 `docs/testing/behavioral-validation.md`。
-- **L2 pty 冒烟测试已删除**(原 TUI 交互验证);client-server 交互由 daemon+`cc` 的手动验收覆盖。
+- **L2 pty 冒烟测试已删除**(原 TUI 交互验证);client-server 交互由 daemon+`ccli` 的手动验收覆盖。
 - token 计数用 tiktoken(准确);`run_command`/`commit` 走真实 `git`/shell(运行期生效)。
 
 ## 交互能力(全部实现)
 
-五种 Dialog 均有触发:`ToolPermission`(权限)· `PlanApproval`(`plan` 工具)· `AskQuestion`(`ask_user`)· `Confirm`(`confirm` 工具,yes/no)· `TrustQuestion`(`trust` 工具)。均经 daemon wire protocol 往返,`cc` 在终端行内显示 `y/n` 提示。grep AST 支持 rust/python/javascript/go/c。
+五种 Dialog 均有触发:`ToolPermission`(权限)· `PlanApproval`(`plan` 工具)· `AskQuestion`(`ask_user`)· `Confirm`(`confirm` 工具,yes/no)· `TrustQuestion`(`trust` 工具)。均经 daemon wire protocol 往返,`ccli` 在终端行内显示 `y/n` 提示。grep AST 支持 rust/python/javascript/go/c。

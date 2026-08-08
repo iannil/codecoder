@@ -1,5 +1,7 @@
 # ADR 0034 — Persistent Capability 跨重启韧性
 
+> **Updated 2026-08-08 (refactor):** The `CODECODER_SUPERVISOR_CRASH_BUDGET` env var is now configured via `supervisor_crash_budget` in `codecoder.json`. The `.ccd.env` autoload mechanism (which loaded the env var at startup) is replaced by the three-layer JSON config system (ADR 0040).
+
 - **状态**: Accepted
 - **日期**: 2026-07-22
 - **关联**: ADR 0021(Capability 环境与生命周期——不自动重启)、ADR 0022(自撰安全回路)、roadmap #3、`docs/superpowers/audits/2026-07-21-codecoder-capability-matrix.md`

@@ -7,28 +7,42 @@
 ## 快速开始
 
 ```bash
-# 1. 设置 API key
+# 1. 设置 API key（或通过 codecoder.json 配置，见下文）
 export CODECODER_API_KEY=sk-your-key-here
-export CODECODER_MODEL=gpt-4o  # 默认 gpt-4o
 
-# 2. 启动 daemon + 连接客户端
-CODECODER_DAEMON=1 cargo run  # 启动 ccd daemon
-cargo run --bin cc            # 连接 daemon (cc 客户端)
+# 2. 编译
+cargo build
 
-# 3. 在客户端中试试
-cc> 列出当前目录的文件
-cc> 搜索 GitHub 上的 Rust Web 框架
-cc> /help      # 查看所有命令
-cc> /exit      # 退出
+# 3. 启动 daemon + 连接客户端
+cargo run --bin ccda      # 启动 ccd daemon
+cargo run --bin ccli      # 连接 daemon (ccli 客户端)
+
+# 4. 在客户端中试试
+ccli> 列出当前目录的文件
+ccli> 搜索 GitHub 上的 Rust Web 框架
+ccli> /help      # 查看所有命令
+ccli> /exit      # 退出
 ```
+
+## 可执行文件
+
+CodeCoder 提供三个独立二进制（通过 `cargo run --bin <name>` 运行）：
+
+| 二进制 | 路径 | 用途 |
+|--------|------|------|
+| `ccda` | `src/bin/ccda.rs` | 守护进程（daemon），长驻后台，监听 Unix socket |
+| `ccli` | `src/bin/ccli.rs` | 交互式 CLI 客户端，连接 daemon 进行对话 |
+| `ccweb` | `src/bin/ccweb.rs` | Web 界面客户端，通过浏览器连接 daemon |
+
+**启动 daemon 后，ccli（或 ccweb）才能连接。**
 
 ## 无需 API key 运行
 
 不设置 API key 时使用 StubClient（模拟 LLM 响应），可用于测试：
 
 ```bash
-CODECODER_DAEMON=1 cargo run  # 启动 daemon
-cargo run --bin cc            # 连接 (cc 客户端)
+cargo run --bin ccda       # 启动 daemon
+cargo run --bin ccli       # 连接 (ccli 客户端)
 ```
 
 ## 内置工具（27 个）
@@ -58,7 +72,7 @@ cargo run --bin cc            # 连接 (cc 客户端)
 | `commit` | Git 提交 |
 | `review` | 架构审查(只读子 agent → 结构化 Verdict + 漂移 rubric) |
 | `plan` | 任务计划 |
-| `milestone` | 工作图管理（list/add/start/done/needs_fix/next/remove，持久依赖有序；`add` 可带结构化 `command` 作客观验收门，见 ADR 0030 修订） |
+| `milestone` | 工作图管理（list/add/start/done/needs_fix/next/remove，持久依赖有序） |
 | `memory` | 持久化 key-value 记忆读写（**跨 session 共享**） |
 | `ask_user` | 用户交互 |
 | `confirm` | yes/no 确认对话 |
@@ -122,47 +136,88 @@ project/
 
 详见 `docs/adr/0021-capability-environments-and-lifecycle.md`。
 
-## 环境变量
+## 配置：三层 JSON 配置
 
-| 变量 | 默认值 | 说明 |
-|------|--------|------|
-| `CODECODER_API_KEY` | — | LLM API key（必需） |
-| `CODECODER_MODEL` | `gpt-4o` | 模型名称 |
-| `CODECODER_API_BASE` | `https://api.openai.com/v1` | API 端点 |
-| `CODECODER_MAX_TOKENS` | `8192` | 单次生成的 max_tokens。命中截断时按 `CODECODER_MAX_TOKENS_CEILING` 自适应上调（ADR 0038） |
-| `CODECODER_MAX_TOKENS_CEILING` | `32768` | 截断自适应上调的封顶值：命中 `StopReason::Length` 时该 turn 有效 max_tokens 翻倍直至此上限（ADR 0038） |
-| `CODECODER_TEMPERATURE` | `0.7` | 温度参数 |
-| `CODECODER_ROOT` | 当前目录 | 项目根目录 |
-| `CODECODER_DAEMON` | — | 设置后以 daemon 模式启动长驻服务（client-server 架构，无 TUI；见 ADR 0032） |
-| `CODECODER_BG_TASK` | — | 设置后以 Background Agent headless 模式跑完该 task 即退出（无 daemon、无用户在场；权限走 `codecoder.json` 预授权，见 ADR 0026） |
-| `CODECODER_BG_WORKGRAPH` | — | 设为 `1` 时以 headless **workgraph 模式**跑（无显式 task，逐里程碑推进 workgraph；产出 mission_state→退出码 0/2/3/4/5=EmptyGraph（空图，需先 seed），见 ADR 0033 修订） |
-| `CODECODER_BG_MAX_AUTO` | `10` | BG workgraph 模式下，单次调用最多推进的里程碑数（ADR 0030；默认 3→10 见 ADR 0039，熔断 `bg_circuit_k` 仍兜底） |
-| `CODECODER_BG_CIRCUIT_K` | `2` | BG 连续失败里程碑的熔断阈值：连续 K 个 fail 即停止（ADR 0030） |
-| `CODECODER_BG_MILESTONE_TOOL_CAP` | `8` | BG 单里程碑 turn 的工具迭代上限（< 全局 12，防固着；ADR 0030） |
-| `CODECODER_BG_MAX_FIX_ATTEMPTS` | `3` | headless workgraph 中单个 milestone 验收 `needs_fix` 后最多自动重试次数（0 = 禁用自恢复；预算耗尽才落 `StuckNeedsFix`，退出码 2；ADR 0026/0033 修订） |
-| `CODECODER_SUPERVISOR_CRASH_BUDGET` | `3` | Persistent Capability 跨重启崩溃预算：累计崩溃达此值后 daemon 重启不再 spawn（会话内仍守 ADR 0021 不自动重启；manifest 变更自动重置；ADR 0034） |
-| `CODECODER_DEFAULT_TRUST` | `never` | 无用户在场（headless）时的默认信任策略：`never`/`always`/`once`（见 ADR 0028）。未信任则不加载 `AGENTS.md`/skills/capabilities 与 `codecoder.json` allowlist |
-| `CODECODER_TRUST_FILE` | `~/.codecoder/trust.json` | 全局信任决策存储路径（就近祖先匹配，见 ADR 0028） |
-| `CODECODER_MAX_TOOL_OUTPUT` | `262144` | `read_file` / `run_command` 单次输出字节上限，超长截断带 marker（ADR 0037） |
-| `CODECODER_NOOP_NUDGE_THRESHOLD` | `3` | 单 turn 连续多少「纯探索」步（read_file/glob/grep/diff）后注入一次 steering nudge，推动动手或声明阻塞（0 = 禁用；每 turn 至多一次；迭代 4，ADR 0029 修订） |
-| `CODECODER_COMPACTION_TIER2` | `true` | 是否启用 tier-2 compaction（LLM 摘要），设为 `false` 则仅执行 tier-1 压缩（ADR 0023） |
-| `CODECODER_PROVIDER_RETRY_MAX` | `3` | LLM provider 调用重试次数（0 = 禁用重试） |
-| `CODECODER_PROVIDER_RETRY_INITIAL_MS` | `1000` | LLM provider 重试初始等待毫秒数（指数退避基准） |
-| `CODECODER_FALLBACK_API_BASE` | — | 可选，主 provider 不可用时回退的 API 端点 |
-| `CODECODER_FALLBACK_MODEL` | — | 可选，回退时使用的模型名称 |
-| `CODECODER_WG_TICK_SECS` | `30` | daemon 后台 workgraph 自动推进间隔秒数 |
-| `CODECODER_DAEMON_AUTO_RESTART` | `false` | daemon 崩溃后自动重启并恢复 session（stamp 文件追踪 workgraph 进度，最多 5 次重启尝试） |
-| `CODECODER_MAX_SESSIONS` | `100` | `sessions/` 目录最大文件数，超限时删除最旧的。`0` = 不限制 |
-| `CODECODER_MAX_LEDGER_LINES` | `10000` | `bg_ledger.jsonl` 最大行数，超限时截断。`0` = 不限制 |
-| `CODECODER_AUTOTASK_INTERVAL_SECS` | `300` | 自动任务发现轮询间隔秒数（0 = 禁用） |
-| `CODECODER_AUTOTASK_SOURCE` | `github_issues` | 自动任务来源（当前仅支持 `github_issues`） |
-| `CODECODER_SUPERVISOR_TICK_SECS` | `1` | daemon Persistent 服务监督线程检查间隔秒数 |
-| `CODECODER_ALERT_WEBHOOK` | — | BG 失败告警 webhook URL（非空时 BG 非 0 退出即 POST JSON 至该 URL） |
-| `CODECODER_ALERT_ON_FAILURE_ONLY` | `true` | 设为 `false` 时，BG 每次退出（含成功）都触发告警；默认仅非 0 退出时告警 |
-| `CODECODER_ONDEMAND_REAPER_SECS` | `5` | OnDemand capability 自动回收延迟秒数 |
-| `GITHUB_TOKEN` | — | GitHub API token（提升 rate limit） |
+所有配置不再使用环境变量表，改为三层 JSON 文件覆盖：
 
-> **`.ccd.env` 自动加载**：`ccd`/`cc`/headless BG 启动时自动加载项目根（`CODECODER_ROOT` 或 CWD）的 `.ccd.env`（`KEY=VALUE` 每行一条，支持 `#` 注释与引号值；已 gitignore）。**只注入一个安全调参白名单**（`MODEL`、`MAX_TOKENS`、`MAX_TOKENS_CEILING`、`TEMPERATURE`、`MAX_TOOL_OUTPUT`、`BG_MAX_AUTO`、`BG_CIRCUIT_K`、`BG_MILESTONE_TOOL_CAP`、`BG_MAX_FIX_ATTEMPTS`、`NOOP_NUDGE_THRESHOLD`、`SUPERVISOR_CRASH_BUDGET`，均带 `CODECODER_` 前缀），且**不覆盖**已设置的进程 env。密钥/端点（`CODECODER_API_KEY`/`CODECODER_API_BASE`/`GITHUB_TOKEN`）、trust 门（`CODECODER_DEFAULT_TRUST`）与 loader/shell 变量（`LD_*`/`PATH` 等）**一律拒绝注入**并 stderr 告警——`.ccd.env` 是仓库本地文件、可能不可信，这些必须来自你的真实 shell。
+```
+层级 1 (内置默认)  ── 编译期默认值，无需任何配置文件
+层级 2 (用户级)    ── ~/.codecoder/codecoder.json，全局生效
+层级 3 (项目级)    ── <project_root>/.codecoder/codecoder.json，项目专属
+```
+
+后一层覆盖前一层：项目级 > 用户级 > 内置默认。每层只需提供要覆盖的字段，缺失则使用下层值。
+
+### 完整模板
+
+以下是一个完整的 `codecoder.json`，包含所有可配置字段及其默认值：
+
+```json
+{
+  "model": "gpt-4o",
+  "api_base": "https://api.openai.com/v1",
+  "api_key": null,
+  "max_tokens": 8192,
+  "max_tokens_ceiling": 32768,
+  "temperature": 0.7,
+  "github_token": null,
+  "bg_max_auto": 0,
+  "bg_circuit_k": 2,
+  "bg_milestone_tool_cap": 15,
+  "bg_max_fix_attempts": 3,
+  "supervisor_crash_budget": 3,
+  "max_tool_output": 262144,
+  "command_timeout_secs": 0,
+  "compaction_tier2": true,
+  "wg_tick_secs": 30,
+  "supervisor_tick_secs": 1,
+  "ondemand_reaper_secs": 5,
+  "auto_task_interval_secs": 300,
+  "auto_task_source": "github_issues",
+  "provider_retry_max": 3,
+  "provider_retry_initial_ms": 1000,
+  "fallback_api_base": null,
+  "fallback_model": null,
+  "alert_webhook": null,
+  "alert_on_failure_only": true,
+  "daemon_auto_restart": false,
+  "probe_failure_threshold": 5,
+  "wg_auto_renew": true,
+  "max_sessions": 100,
+  "max_ledger_lines": 10000,
+  "self_observe": false,
+  "noop_nudge_threshold": 3
+}
+```
+
+### 最小示例
+
+大多数项目只需覆盖少数几个字段：
+
+```json
+{
+  "model": "gpt-4o",
+  "bg_max_auto": 10,
+  "bg_max_fix_attempts": 3,
+  "max_tokens": 16384
+}
+```
+
+### 保留的环境变量
+
+以下环境变量仍被识别，用于进程路由和覆写（优先级高于 JSON 配置）：
+
+| 变量 | 说明 |
+|------|------|
+| `CODECODER_ROOT` | 项目根目录（默认当前工作目录） |
+| `CODECODER_DAEMON` | 设置后以 daemon 模式启动长驻服务（无 TUI） |
+| `CODECODER_BG_TASK` | 设置后以 headless 模式跑完该 task 即退出 |
+| `CODECODER_BG_WORKGRAPH` | 设为 `1` 时以 headless workgraph 模式跑 |
+| `CODECODER_SCRIPT` | 脚本模式：从文件路径读取指令并执行 |
+| `CODECODER_API_KEY` | LLM API key（也可在 codecoder.json 中配置） |
+| `GITHUB_TOKEN` | GitHub API token（提升 rate limit） |
+
+其他所有 `CODECODER_*` 环境变量已废弃，请迁移到 `codecoder.json`。
 
 > **`.ccd.bg.ndjson` 实时 BG 日志**：headless BG（`CODECODER_BG_TASK`/`CODECODER_BG_WORKGRAPH`）运行期间，`BgObserver` 把每个 BG 事件同时写 stderr 与项目根的 `<root>/.ccd.bg.ndjson`（每行一条 JSON，一次 truncate 开轮 + 逐事件 append 累积整条流；已 gitignore），可 `tail -f` 实时观察进展（ADR 0039）。
 
@@ -174,7 +229,7 @@ project/
 |---|---|
 | `CompletedAllReady` / `Running`（正常） | 0 |
 | `BlockedAt(_)`（硬依赖断裂） | 2 |
-| `StuckNeedsFix(_)`（needs_fix 重试预算耗尽，见 `CODECODER_BG_MAX_FIX_ATTEMPTS`） | 2 |
+| `StuckNeedsFix(_)`（needs_fix 重试预算耗尽，见 `bg_max_fix_attempts`） | 2 |
 | `CircuitBreaker`（连续失败熔断） | 3 |
 | `Error(_)`（turn/provider 出错） | 4 |
 | `EmptyGraph`（空图，需先 seed） | 5 |
@@ -185,10 +240,10 @@ project/
 查账本（直读文件，不经 daemon——BG 运行时 daemon 常不在场）：
 
 ```bash
-cc ledger                 # 最近 10 次（单行摘要：ts / state / counts）
-cc ledger --last 50       # 最近 N 次
-cc ledger --failed        # 仅需关注（state ≠ CompletedAllReady）
-cc ledger --detail        # 最近一次的完整 subgoals 明细
+ccli ledger                 # 最近 10 次（单行摘要：ts / state / counts）
+ccli ledger --last 50       # 最近 N 次
+ccli ledger --failed        # 仅需关注（state ≠ CompletedAllReady）
+ccli ledger --detail        # 最近一次的完整 subgoals 明细
 ```
 
 systemd `OnFailure=` / cron 邮件可按非 0 退出码触发告警；账本文件 append-only，用外部 logrotate 轮转。
@@ -205,8 +260,8 @@ systemd `OnFailure=` / cron 邮件可按非 0 退出码触发告警；账本文�
 cargo build      # 编译
 cargo test       # 运行 351 个测试（348 通过 + 3 个 #[ignore]：2 Docker e2e + L3 LLM 冒烟）
                  # tests/ 下为黑盒行为验证分层（L1 默认；L2/L3 门控，见 docs/testing/behavioral-validation.md）
-CODECODER_DAEMON=1 cargo run  # 启动 ccd daemon
-cargo run --bin cc            # 启动 cc 客户端
+cargo run --bin ccda   # 启动 ccd daemon
+cargo run --bin ccli   # 启动 ccli 客户端
 ```
 
 ## 架构
