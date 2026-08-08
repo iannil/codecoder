@@ -9,7 +9,7 @@ use crate::trace::replay_buffer::{ObservationEvent, ObservationKind};
 use crate::trace::types::{EventKind, PointEvent};
 use crate::trust::{self, TrustDecision};
 use crate::tool::{ToolCtx, Toolbox};
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -201,6 +201,9 @@ pub struct AgentLoop {
     provider: Arc<dyn Provider>,
     session: Session,
     toolbox: Toolbox,
+    /// 已通过 tool_search 加载的扩展工具名集合。这些工具会追加到 turn 的
+    /// tools 数组(wire_schemas_core + wire_schemas_subset),使 LLM 可以调用。
+    loaded_extra_tools: HashSet<String>,
     allowlist: SessionAllowlist,
     /// Persisted project-scope grants (`codecoder.json`, ADR 0005), loaded at
     /// startup and consulted alongside the in-memory session allowlist.
@@ -471,6 +474,7 @@ impl AgentLoop {
             provider,
             session: Session::new(model.clone()),
             toolbox,
+            loaded_extra_tools: HashSet::new(),
             allowlist: SessionAllowlist::default(),
             project_allowlist,
             root,
@@ -1110,7 +1114,11 @@ impl AgentLoop {
                 messages,
                 max_tokens: effective_max_tokens,
                 temperature: self.temperature,
-                tools: self.toolbox.wire_schemas(),
+                tools: {
+                    let mut schemas = self.toolbox.wire_schemas_core();
+                    schemas.extend(self.toolbox.wire_schemas_subset(&self.loaded_extra_tools));
+                    schemas
+                },
             };
 
             // ReplayBuffer: LLM call
