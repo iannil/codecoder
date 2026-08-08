@@ -29,6 +29,21 @@ fn main() -> anyhow::Result<()> {
             "  /tree                  Show session tree\n",
             "  /fork <id>             Navigate session tree\n",
             "  /clone                 Clone current session\n",
+            "Subcommands:\n",
+            "  sessions               List sessions\n",
+            "  resume <id>            Resume a session\n",
+            "  status                 Show daemon status\n",
+            "  shutdown               Shutdown the daemon\n",
+            "  tree                   Show session tree\n",
+            "  fork <id>              Navigate session tree\n",
+            "  clone                  Clone current session\n",
+            "  ledger                 Show BG task ledger\n",
+            "  workgraph              Show workgraph status\n",
+            "  workgraph-pause        Pause workgraph auto-advance\n",
+            "  workgraph-resume       Resume workgraph auto-advance\n",
+            "  services               List persistent services\n",
+            "  autotask on/off/status  Autotask management\n",
+            "  health                 Daemon health check\n",
         ),
         skills: &[
             codecoder::help::SkillEntry {
@@ -54,8 +69,29 @@ fn main() -> anyhow::Result<()> {
             },
             codecoder::help::SkillEntry {
                 name: "session",
-                description: "List sessions, resume, tree, fork, clone",
+                description: "List, resume, tree, fork, clone sessions",
                 usage: &["ccli sessions", "ccli resume <id>", "ccli tree", "ccli fork <id>", "ccli clone"],
+                schema: None,
+                template: None,
+            },
+            codecoder::help::SkillEntry {
+                name: "resume",
+                description: "Resume a session by ID",
+                usage: &["ccli resume <id>"],
+                schema: None,
+                template: None,
+            },
+            codecoder::help::SkillEntry {
+                name: "status",
+                description: "Show daemon status",
+                usage: &["ccli status"],
+                schema: None,
+                template: None,
+            },
+            codecoder::help::SkillEntry {
+                name: "shutdown",
+                description: "Shutdown the daemon",
+                usage: &["ccli shutdown"],
                 schema: None,
                 template: None,
             },
@@ -111,6 +147,14 @@ fn main() -> anyhow::Result<()> {
                 println!("{}", codecoder::help::render_help(&help_spec));
                 return Ok(());
             }
+            codecoder::help::HelpRequest::Skills { json: true } => {
+                println!("{}", serde_json::to_string_pretty(&codecoder::help::skills_json(&help_spec, &skills_dir)).unwrap());
+                return Ok(());
+            }
+            codecoder::help::HelpRequest::Skills { json: false } => {
+                println!("{}", codecoder::help::render_skills_list(&help_spec, &skills_dir));
+                return Ok(());
+            }
             codecoder::help::HelpRequest::Skill { name, json: true } => {
                 match codecoder::help::skill_json(&help_spec, &name, &skills_dir) {
                     Some(v) => println!("{}", serde_json::to_string_pretty(&v).unwrap()),
@@ -130,10 +174,21 @@ fn main() -> anyhow::Result<()> {
 
     match args.as_slice() {
         [] => repl(&sock),
+        // --version/-v 与 ccda 对齐
+        [one] if one == "--version" || one == "-v" => {
+            println!("CodeCoder {}", env!("CARGO_PKG_VERSION"));
+            Ok(())
+        }
+        [one] if one == "--list-skills" || one == "--skills" => {
+            println!("{}", codecoder::help::render_skills_list(&help_spec, &Config::from_env().root.join("skills")));
+            Ok(())
+        }
         [one] if one == "sessions" => send_one(&sock, ClientRequest::ListSessions),
         [one] if one == "status" => send_one(&sock, ClientRequest::Status),
         [one] if one == "shutdown" => send_one(&sock, ClientRequest::Shutdown),
         [one] if one == "tree" => send_one(&sock, ClientRequest::TreeShow),
+        [one] if one == "resume" => send_one(&sock, ClientRequest::Resume { id: String::new() }),
+        [one, id] if one == "resume" => send_one(&sock, ClientRequest::Resume { id: id.clone() }),
         [one, id] if one == "fork" => {
             let id: u64 = id.parse().map_err(|e| anyhow::anyhow!("fork <id>: {e}"))?;
             send_one(&sock, ClientRequest::TreeNav { id })

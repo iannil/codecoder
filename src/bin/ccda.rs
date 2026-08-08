@@ -13,6 +13,10 @@ fn main() -> anyhow::Result<()> {
             "ccda [FLAGS]",
             "CODECODER_BG_TASK=<task> ccda",
             "CODECODER_BG_WORKGRAPH=1 ccda",
+            "ccda --help              Show this help",
+            "ccda --skills            List all skills",
+            "ccda --version           Show version",
+            "ccda --skill <name>      Show skill details",
         ],
         config_note: concat!(
             "Environment variables (see README.md):\n",
@@ -77,6 +81,14 @@ fn main() -> anyhow::Result<()> {
             }
             codecoder::help::HelpRequest::Help { json: false } => {
                 println!("{}", codecoder::help::render_help(&help_spec));
+                return Ok(());
+            }
+            codecoder::help::HelpRequest::Skills { json: true } => {
+                println!("{}", serde_json::to_string_pretty(&codecoder::help::skills_json(&help_spec, &skills_dir)).unwrap());
+                return Ok(());
+            }
+            codecoder::help::HelpRequest::Skills { json: false } => {
+                println!("{}", codecoder::help::render_skills_list(&help_spec, &skills_dir));
                 return Ok(());
             }
             codecoder::help::HelpRequest::Skill { name, json: true } => {

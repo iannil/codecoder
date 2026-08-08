@@ -30,15 +30,18 @@ pub struct HelpSpec {
 pub enum HelpRequest {
     Help { json: bool },
     Skill { name: String, json: bool },
+    Skills { json: bool },
 }
 
-/// 扫描参数找 `--help`/`-h`、`--skill <name>`/`-s <name>`、`--json`。
+/// 扫描参数找 `--help`/`-h`、`--skill <name>`/`-s <name>`、
+/// `--skills`/`--list-skills`、`--json`。
 /// 返回 None 表示无帮助请求（正常运行）。
 pub fn parse_help_request(args: &[String]) -> Option<HelpRequest> {
     let mut json = false;
     let mut skill: Option<String> = None;
     let mut i = 0;
     let mut help = false;
+    let mut list_skills = false;
     while i < args.len() {
         match args[i].as_str() {
             "--json" => json = true,
@@ -48,13 +51,19 @@ pub fn parse_help_request(args: &[String]) -> Option<HelpRequest> {
                     skill = Some(args[i + 1].clone());
                     i += 1;
                 }
+                // 无参数：退化到 --skills 列表
+                list_skills = true;
             }
+            "--skills" | "--list-skills" => list_skills = true,
             _ => {}
         }
         i += 1;
     }
     if let Some(name) = skill {
         return Some(HelpRequest::Skill { name, json });
+    }
+    if list_skills {
+        return Some(HelpRequest::Skills { json });
     }
     if help {
         return Some(HelpRequest::Help { json });
@@ -65,7 +74,7 @@ pub fn parse_help_request(args: &[String]) -> Option<HelpRequest> {
 /// 渲染纯文本帮助（markdown）。
 pub fn render_help(spec: &HelpSpec) -> String {
     let mut s = String::new();
-    s.push_str(&format!("# {} — {}\n\n{}\n\n", spec.title, spec.description, spec.description));
+    s.push_str(&format!("# {} — {}\n\n{}\n\n", spec.title, spec.description, spec.config_note));
     s.push_str("## USAGE\n\n");
     for u in spec.usage {
         s.push_str(&format!("```\n{u}\n```\n"));
@@ -78,8 +87,59 @@ pub fn render_help(spec: &HelpSpec) -> String {
     }
     s.push_str("\n查看某技能详情：`");
     s.push_str(spec.binary);
-    s.push_str(" --skill <name>`；结构化输出追加 `--json`。\n");
+    s.push_str(" --skill <name>`；列出所有技能：`");
+    s.push_str(spec.binary);
+    s.push_str(" --skills`；结构化输出追加 `--json`。\n");
     s
+}
+
+/// 渲染技能列表（纯文本），含内置技能 + 仓库 `skills/` 目录。
+pub fn render_skills_list(spec: &HelpSpec, dir: &Path) -> String {
+    let mut s = format!("# {} — Skills\n\n", spec.binary);
+    s.push_str("## Built-in\n\n");
+    for sk in spec.skills {
+        s.push_str(&format!("- **`{}`** — {}\n", sk.name, sk.description));
+    }
+    // 扫描仓库 skills/ 目录
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        let mut extra: Vec<String> = entries
+            .filter_map(|e| e.ok())
+            .filter(|e| e.path().extension().map(|ext| ext == "md").unwrap_or(false))
+            .filter_map(|e| e.file_name().into_string().ok())
+            .map(|f| f.trim_end_matches(".md").to_string())
+            .collect();
+        extra.sort();
+        if !extra.is_empty() {
+            s.push_str("\n## Repository (`skills/`)\n\n");
+            for name in &extra {
+                if !spec.skills.iter().any(|sk| sk.name == name.as_str()) {
+                    s.push_str(&format!("- `{}`\n", name));
+                }
+            }
+        }
+    }
+    s
+}
+
+/// 技能列表的 JSON 输出。
+pub fn skills_json(spec: &HelpSpec, dir: &Path) -> Value {
+    let mut skills: Vec<Value> = spec.skills.iter().map(|sk| skill_to_value(sk.name, sk)).collect();
+    // 扫描仓库 skills/ 目录
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        let mut extra: Vec<String> = entries
+            .filter_map(|e| e.ok())
+            .filter(|e| e.path().extension().map(|ext| ext == "md").unwrap_or(false))
+            .filter_map(|e| e.file_name().into_string().ok())
+            .map(|f| f.trim_end_matches(".md").to_string())
+            .collect();
+        extra.sort();
+        for name in &extra {
+            if !spec.skills.iter().any(|sk| sk.name == name.as_str()) {
+                skills.push(serde_json::json!({ "name": name, "source": "skills/" }));
+            }
+        }
+    }
+    serde_json::json!({ "binary": spec.binary, "skills": skills })
 }
 
 fn find_skill<'a>(spec: &'a HelpSpec, name: &str) -> Option<&'a SkillEntry> {
@@ -173,6 +233,10 @@ mod tests {
         assert!(matches!(parse_help_request(&["-h".into(), "--json".into()]), Some(HelpRequest::Help{json:true})));
         assert!(matches!(parse_help_request(&["--skill".into(), "daemon".into()]), Some(HelpRequest::Skill{name, json:false}) if name=="daemon"));
         assert!(matches!(parse_help_request(&["--skill".into(), "daemon".into(), "--json".into()]), Some(HelpRequest::Skill{json:true,..})));
+        assert!(matches!(parse_help_request(&["--skills".into()]), Some(HelpRequest::Skills{json:false})));
+        assert!(matches!(parse_help_request(&["--list-skills".into(), "--json".into()]), Some(HelpRequest::Skills{json:true})));
+        // --skill 无参数 → 退化为列技能
+        assert!(matches!(parse_help_request(&["--skill".into()]), Some(HelpRequest::Skills{json:false})));
         assert!(parse_help_request(&["--port".into(), "9876".into()]).is_none());
     }
 
@@ -188,6 +252,20 @@ mod tests {
         assert!(text.contains("ccda"));
         assert!(text.contains("daemon"));
         assert!(text.contains("--skill"));
+        assert!(text.contains("--skills"));
+        // 修复：description 不再重复打印
+        assert_eq!(text.matches("Autonomous AI agent daemon").count(), 1);
+    }
+
+    #[test]
+    fn render_skills_list_and_json() {
+        let s = spec();
+        let text = render_skills_list(&s, Path::new("/nonexistent"));
+        assert!(text.contains("daemon"));
+        assert!(text.contains("Built-in"));
+        let j = skills_json(&s, Path::new("/nonexistent"));
+        assert_eq!(j["binary"], "ccda");
+        assert_eq!(j["skills"][0]["name"], "daemon");
     }
 
     #[test]

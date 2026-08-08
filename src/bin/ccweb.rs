@@ -61,6 +61,14 @@ fn main() {
                 println!("{}", codecoder::help::render_help(&help_spec));
                 return;
             }
+            codecoder::help::HelpRequest::Skills { json: true } => {
+                println!("{}", serde_json::to_string_pretty(&codecoder::help::skills_json(&help_spec, &skills_dir)).unwrap());
+                return;
+            }
+            codecoder::help::HelpRequest::Skills { json: false } => {
+                println!("{}", codecoder::help::render_skills_list(&help_spec, &skills_dir));
+                return;
+            }
             codecoder::help::HelpRequest::Skill { name, json: true } => {
                 match codecoder::help::skill_json(&help_spec, &name, &skills_dir) {
                     Some(v) => println!("{}", serde_json::to_string_pretty(&v).unwrap()),
@@ -75,6 +83,14 @@ fn main() {
                 }
                 return;
             }
+        }
+    }
+
+    // --version/-v 与 ccda 对齐（在 arg 解析循环前拦截）
+    for a in &args[1..] {
+        if a == "--version" || a == "-v" {
+            println!("CodeCoder {}", env!("CARGO_PKG_VERSION"));
+            return;
         }
     }
 
