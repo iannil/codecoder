@@ -64,6 +64,11 @@ impl Tool for GenerateMilestones {
         );
         if !context.is_empty() {
             prompt.push_str(&format!("Context:\n{context}\n\n"));
+            prompt.push_str(
+                "If the context mentions existing milestones, make sure new milestones \
+                 depend on all relevant existing milestones as prerequisites. \
+                 Do not redo work that is already marked as complete.\n"
+            );
         }
         prompt.push_str(
             "Output milestones in the following format, one per milestone. \
