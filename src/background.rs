@@ -587,6 +587,8 @@ mod tests {
         for s in [
             MissionState::Running,
             MissionState::Completed,
+            MissionState::EmptyGraph,
+            MissionState::NeedsReview,
             MissionState::Error("boom".into()),
         ] {
             let j = serde_json::to_string(&s).unwrap();

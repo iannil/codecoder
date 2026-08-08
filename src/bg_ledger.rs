@@ -17,6 +17,7 @@ pub enum MissionState {
     Running,
     Completed,
     EmptyGraph,
+    NeedsReview,
     Error(String),
 }
 
@@ -50,6 +51,7 @@ pub fn mission_exit_code(state: &MissionState) -> i32 {
     match state {
         MissionState::Completed | MissionState::Running => 0,
         MissionState::EmptyGraph => 5,
+        MissionState::NeedsReview => 3,
         MissionState::Error(_) => 4,
     }
 }
@@ -202,12 +204,28 @@ mod tests {
     fn exit_code_mapping() {
         assert_eq!(mission_exit_code(&MissionState::Completed), 0);
         assert_eq!(mission_exit_code(&MissionState::Running), 0);
+        assert_eq!(mission_exit_code(&MissionState::NeedsReview), 3);
         assert_eq!(mission_exit_code(&MissionState::Error("e".into())), 4);
     }
 
     #[test]
     fn empty_graph_exit_code_is_5() {
         assert_eq!(mission_exit_code(&MissionState::EmptyGraph), 5);
+    }
+
+    #[test]
+    fn serde_roundtrip_all_variants() {
+        for s in [
+            MissionState::Running,
+            MissionState::Completed,
+            MissionState::EmptyGraph,
+            MissionState::NeedsReview,
+            MissionState::Error("boom".into()),
+        ] {
+            let j = serde_json::to_string(&s).unwrap();
+            let back: MissionState = serde_json::from_str(&j).unwrap();
+            assert_eq!(format!("{back:?}"), format!("{s:?}"));
+        }
     }
 
     #[test]
