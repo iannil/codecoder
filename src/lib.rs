@@ -13,6 +13,7 @@ pub mod compaction;
 pub mod config;
 pub mod help;
 pub mod memory;
+pub mod milestone_plan;
 pub mod message;
 pub mod permission;
 pub mod provider;
