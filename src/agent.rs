@@ -9,6 +9,7 @@ use crate::trace::replay_buffer::{ObservationEvent, ObservationKind};
 use crate::trace::types::{EventKind, PointEvent};
 use crate::trust::{self, TrustDecision};
 use crate::tool::{ToolCtx, Toolbox};
+use serde_json::Value;
 use std::collections::{BTreeSet, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -1682,6 +1683,28 @@ impl AgentLoop {
             Ok(o) => o,
             Err(e) => crate::tool::ToolOutput::err(format!("tool error: {e}")),
         };
+        // Special handling for tool_search: read the query from the meta mark,
+        // search the toolbox, and rewrite the output with matched tool names.
+        if name == "tool_search" {
+            if let Some(mark) = &output.session_meta_mark {
+                if let Some(query) = mark.get("tool_search_query").and_then(Value::as_str) {
+                    let matches = self.toolbox.search(query);
+                    let names: Vec<&str> = matches.iter().map(|t| t.name()).collect();
+                    if names.is_empty() {
+                        output.content = format!("no tools found matching: {query}");
+                    } else {
+                        for n in &names {
+                            self.loaded_extra_tools.insert(n.to_string());
+                        }
+                        output.content = format!(
+                            "Found {} tool(s): {}\n\nUse them directly by name — they are now available in this session.",
+                            names.len(),
+                            names.join(", ")
+                        );
+                    }
+                }
+            }
+        }
         if let Some(mark) = output.session_meta_mark.take() {
             self.apply_session_meta_mark(mark);
         }

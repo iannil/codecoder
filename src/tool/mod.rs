@@ -12,6 +12,7 @@ pub mod search;
 pub mod send_message;
 pub mod task_manage;
 pub mod wasm;
+pub mod tool_search;
 pub mod worktree;
 
 use crate::permission::Permission;
@@ -143,6 +144,7 @@ impl Toolbox {
             Box::new(send_message::SendMessage),
             Box::new(worktree::EnterWorktree),
             Box::new(worktree::ExitWorktree),
+            Box::new(tool_search::ToolSearch),
         ];
         Self { core_tools, extra_tools }
     }
