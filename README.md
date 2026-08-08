@@ -72,7 +72,7 @@ cargo run --bin ccli       # 连接 (ccli 客户端)
 | `commit` | Git 提交 |
 | `review` | 架构审查(只读子 agent → 结构化 Verdict + 漂移 rubric) |
 | `plan` | 任务计划 |
-| `milestone` | 工作图管理（list/add/start/done/needs_fix/next/remove，持久依赖有序） |
+| `milestone` | 工作图管理（list/add/start/done/next/remove/plan，持久依赖有序） |
 | `memory` | 持久化 key-value 记忆读写（**跨 session 共享**） |
 | `ask_user` | 用户交互 |
 | `confirm` | yes/no 确认对话 |
@@ -175,6 +175,7 @@ project/
   "temperature": 0.7,
   "github_token": null,
   "bg_max_auto": 0,
+  "bg_max_auto_cycles": 3,
   "bg_circuit_k": 2,
   "bg_milestone_tool_cap": 15,
   "bg_max_fix_attempts": 3,

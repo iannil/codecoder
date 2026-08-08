@@ -34,7 +34,7 @@
 | `message.rs` | `Message`/`MessageItem`/`MessageId`/`Role`(provider 中立) | 0015 0017 |
 | `provider/{mod,openai,stub}` | `Provider` trait;`OpenAiClient`(chat-completions)/`StubClient` | 0017 |
 | `agent.rs` | `AgentLoop`、turn 循环、工具分派、子 agent、ask_user、reload、**workgraph 自动推进(`drive_workgraph`)**、**no-op 探索兜底 nudge**(迭代 4,ADR 0029 修订) | 0016 0019 0029 |
-| `background.rs` | Background Agent headless one-shot runner;`run_background` 驱动一个 turn 到结束,汇总为 `BgOutcome`;**无显式 task 时从 workgraph 取就绪里程碑推进**;agent 自报完成,里程碑验收由独立里程碑节点承载 | 0026 0030 0033 |
+| `background.rs` | Background Agent headless one-shot runner;`run_background` 驱动一个 turn 到结束,汇总为 `BgOutcome`;**无显式 task 时从 workgraph 取就绪里程碑推进**;agent 自报完成,里程碑验收由独立里程碑节点承载;每个里程碑先走 Plan Turn(自动选 engineer skill 出计划→持久化到 .codecoder/milestone-plans/)再走 Exec Turn;所有里程碑完成后跑质量检查外循环(增量补充,≤bg_max_auto_cycles 轮) | 0026 0030 0033 |
 | `bg_gate.rs` | **BG 客观验收门 + 任务策略**(ADR 0030,已废弃):`GateVerdict`/命令门/`evaluate`/`next_action`(BlockedAt/CircuitBreaker/CompletedAllReady)。**Task 4 已移除**:per-milestone gates(acceptance/command/review/needs_fix)删除,验收改由独立里程碑节点承载、agent 自报完成;文件保留仅载历史 reference | 0030 |
 | `bg_ledger.rs` | **BG 任务账本**(ADR 0033):`append`/`read_recent`/`mission_exit_code`/`format_utc`;JSONL 持久化 + 退出码告警 | 0033 |
 | `permission.rs` | `PermScope`/`Permission`/`PermissionKey`/`SessionAllowlist` | 0005 0018 |
@@ -49,6 +49,7 @@
 | `supervisor_state.rs` | **Persistent 跨重启监督状态**(ADR 0034):`supervisor_state.json` 持久化 gave_up/crash_count/manifest mtime;load/save/reset/should_skip/record_crash | 0034 |
 | `recovery.rs` | **Daemon 崩溃自动恢复**:stamp 文件 + 重启循环;`daemon_auto_restart` 启用时以最多 5 次重启尝试包装 `run_daemon`;stamp 追踪 workgraph 进度，崩溃后 daemon 从中断处继续 | — |
 | `memory.rs` | `memory/<key>` 文件级 KV + 数据索引(**跨 session 共享**) | — |
+| `milestone_plan.rs` | 里程碑计划持久化:Plan Turn 生成的计划写入 .codecoder/milestone-plans/N-plan.json,供 Exec Turn 读取 | — |
 | `workgraph.rs` | **Work Graph(一等公民 #2)**:持久化、依赖有序的里程碑图,`Milestone` 节点含 `NodeStatus`(含 `Hypothesis`/`Locked`)、`next_ready()` 调度、`render_for_prompt()` 摘要;**fs2-locked RMW**(`with_lock`,ADR 0035,防并发 lost-update)。**Task 4 已移除 per-milestone gates**(acceptance/command/review/needs_fix),里程碑为简单依赖有序节点,agent 自报完成 | 设计文档 0035 |
 | `review.rs` | **结构化验收裁决(一等公民 #4)**:`Verdict`(pass/needs_fix/rebuild)+ 四信号(`foundation`/`over_engineering`/`volume`/`terminology`),纯函数解析。里程碑验收由 agent 自报完成,不再经 review 门强制覆盖 | 设计文档 |
 | `daemon/{mod,bus,proto,session_manager,socket}` | **Daemon(长驻服务)**:Unix socket 监听、多 client 复用、session 管理、permission/ask/confirm/plan/trust 往返 wire protocol | 0032 |
