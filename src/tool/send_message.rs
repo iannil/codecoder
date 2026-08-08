@@ -32,6 +32,9 @@ impl AgentRegistry {
     pub fn contains(&self, id: &str) -> bool {
         self.agents.contains_key(id)
     }
+    pub fn ids(&self) -> Vec<String> {
+        self.agents.keys().cloned().collect()
+    }
 }
 
 pub static AGENT_REGISTRY: LazyLock<Mutex<AgentRegistry>> =
@@ -107,6 +110,18 @@ mod tests {
         reg.unregister("sub_1");
         assert!(!reg.contains("sub_1"));
         assert!(reg.send("sub_1", "x").is_err());
+    }
+
+    #[test]
+    fn registry_ids_returns_all_keys() {
+        let mut reg = AgentRegistry::new();
+        let (tx1, _) = mpsc::channel();
+        let (tx2, _) = mpsc::channel();
+        reg.register("a".into(), tx1);
+        reg.register("b".into(), tx2);
+        let mut ids = reg.ids();
+        ids.sort();
+        assert_eq!(ids, vec!["a", "b"]);
     }
 
     #[test]
