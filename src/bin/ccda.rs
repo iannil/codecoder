@@ -3,8 +3,6 @@
 //   2. CODECODER_BG_WORKGRAPH=1      → headless background runner,workgraph 逐里程碑模式
 //   3. 其它                          → ccd daemon(client-server 架构,无 TUI)
 fn main() -> anyhow::Result<()> {
-    codecoder::config::autoload_ccd_env();
-
     // ── CLI arg 解析（先于 env 路由，--help/--version 直接退出）──
     let args: Vec<String> = std::env::args().collect();
     let help_spec = codecoder::help::HelpSpec {

@@ -6,7 +6,6 @@ use codecoder::Config;
 use std::io::{BufRead, Write};
 
 fn main() -> anyhow::Result<()> {
-    codecoder::config::autoload_ccd_env();
     let cfg = Config::from_env();
     let sock = default_sock_path(&cfg);
     let args: Vec<String> = std::env::args().skip(1).collect();
