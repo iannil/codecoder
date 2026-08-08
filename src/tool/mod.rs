@@ -8,6 +8,7 @@ pub mod lsp;
 pub mod net;
 pub mod reason;
 pub mod search;
+pub mod task_manage;
 pub mod wasm;
 
 use crate::permission::Permission;
@@ -124,6 +125,11 @@ impl Toolbox {
                 Box::new(mcp::McpListResources),
                 Box::new(mcp::McpReadResource),
                 Box::new(lsp::LspTool),
+                Box::new(task_manage::TaskCreate),
+                Box::new(task_manage::TaskGet),
+                Box::new(task_manage::TaskList),
+                Box::new(task_manage::TaskUpdate),
+                Box::new(task_manage::TaskStop),
             ],
         }
     }
