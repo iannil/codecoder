@@ -642,28 +642,7 @@ impl AgentLoop {
                 }
                 AgentCommand::Resume => self.resume_latest(&event_tx),
                 AgentCommand::Reload => {
-                    // Only a trusted project re-scans its disk "self" (ADR 0028);
-                    // an untrusted/pending one keeps its empty identity.
-                    if self.trust == TrustState::Trusted {
-                        // Acquire the read-lock ONCE for both `n` (count) and the
-                        // rendered catalog, then DROP it before any disk I/O
-                        // (Critical #2 + Important #4 — avoids both a held-lock-
-                        // across-I/O and a TOCTOU between count and prompt).
-                        let (n, catalog) = match &self.shared_registry {
-                            Some(reg) => {
-                                let g = reg.read().unwrap();
-                                (g.catalog.len(), g.render_catalog())
-                            }
-                            None => {
-                                let r = Registry::scan(&self.root);
-                                (r.catalog.len(), r.render_catalog())
-                            }
-                        };
-                        self.system_prompt = build_system_prompt_with_catalog(&self.root, &catalog);
-                        let _ = event_tx.send(AgentEvent::Notice(format!("reloaded — {n} skills/capabilities in catalog")));
-                    } else {
-                        let _ = event_tx.send(AgentEvent::Notice("project not trusted; nothing reloaded".into()));
-                    }
+                    self.reload_now(&event_tx);
                     let _ = event_tx.send(AgentEvent::TurnComplete);
                 }
                 AgentCommand::Clear => {
@@ -685,6 +664,34 @@ impl AgentLoop {
                 AgentCommand::Cancel => self.cancel.cancel(),
                 AgentCommand::Shutdown => break,
             }
+        }
+    }
+
+    /// Re-scan the disk "self" (skills/prompts/capabilities) and rebuild the
+    /// system prompt. Extracted from the `AgentCommand::Reload` handler so tool
+    /// runs can also trigger it (auto-reload after generate_*).
+    fn reload_now(&mut self, event_tx: &Sender<AgentEvent>) {
+        // Only a trusted project re-scans its disk "self" (ADR 0028);
+        // an untrusted/pending one keeps its empty identity.
+        if self.trust == TrustState::Trusted {
+            // Acquire the read-lock ONCE for both `n` (count) and the
+            // rendered catalog, then DROP it before any disk I/O
+            // (Critical #2 + Important #4 — avoids both a held-lock-
+            // across-I/O and a TOCTOU between count and prompt).
+            let (n, catalog) = match &self.shared_registry {
+                Some(reg) => {
+                    let g = reg.read().unwrap();
+                    (g.catalog.len(), g.render_catalog())
+                }
+                None => {
+                    let r = Registry::scan(&self.root);
+                    (r.catalog.len(), r.render_catalog())
+                }
+            };
+            self.system_prompt = build_system_prompt_with_catalog(&self.root, &catalog);
+            let _ = event_tx.send(AgentEvent::Notice(format!("reloaded — {n} skills/capabilities in catalog")));
+        } else {
+            let _ = event_tx.send(AgentEvent::Notice("project not trusted; nothing reloaded".into()));
         }
     }
 
@@ -1688,6 +1695,12 @@ impl AgentLoop {
                     }
                 }
             }
+        }
+        // Auto-reload after a successful self-evolution tool (ADR 0020/0022).
+        // The artifact is now on disk; re-scanning registers it immediately so
+        // the model doesn't need a separate `/reload` command.
+        if !output.is_error && matches!(name, "generate_skill" | "generate_prompt" | "promote_prompt" | "generate_capability") {
+            self.reload_now(event_tx);
         }
         if let Some(mark) = output.session_meta_mark.take() {
             self.apply_session_meta_mark(mark);

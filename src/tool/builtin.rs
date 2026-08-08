@@ -696,7 +696,13 @@ impl Tool for GenerateSkill {
         "generate_skill"
     }
     fn description(&self) -> &str {
-        "Author a new Skill (.md, ideally with name/description frontmatter) into skills/. Takes effect on /reload."
+        "Author a new Skill (.md, ideally with name/description frontmatter) into skills/. \
+         Takes effect on /reload.\
+         \n\nUse when: you notice a non-obvious multi-step procedure, heuristic, or task \
+         pattern appearing more than once in this session — procedural knowledge worth \
+         reusing across sessions. A Skill changes how you think, not what you execute. \
+         Examples: a code-review checklist for a specific framework, a troubleshooting \
+         flow for a common error, a multi-step build/deploy ritual."
     }
     fn schema(&self) -> Value {
         json!({
@@ -721,7 +727,7 @@ impl Tool for GenerateSkill {
         let dir = ctx.root.join("skills");
         std::fs::create_dir_all(&dir)?;
         std::fs::write(dir.join(format!("{name}.md")), content)?;
-        Ok(ToolOutput::ok(format!("wrote skill '{name}' — run /reload to register it")))
+        Ok(ToolOutput::ok(format!("wrote skill '{name}' — auto-registered into the catalog")))
     }
 }
 
@@ -732,7 +738,10 @@ impl Tool for GeneratePrompt {
         "generate_prompt"
     }
     fn description(&self) -> &str {
-        "Author a reusable prompt template into prompts/<name>.md."
+        "Author a reusable prompt template into prompts/<name>.md (a draft-tier Skill).\
+         \n\nUse when: you have a half-formed heuristic or approach you haven't yet proven \
+         across scenarios — park it as a draft, then promote it to a durable Skill with \
+         promote_prompt once it proves useful. Lower priority than a matured Skill."
     }
     fn schema(&self) -> Value {
         json!({
@@ -756,7 +765,7 @@ impl Tool for GeneratePrompt {
         let dir = ctx.root.join("prompts");
         std::fs::create_dir_all(&dir)?;
         std::fs::write(dir.join(format!("{name}.md")), content)?;
-        Ok(ToolOutput::ok(format!("wrote prompt template 'prompts/{name}.md'")))
+        Ok(ToolOutput::ok(format!("wrote prompt template 'prompts/{name}.md' — auto-registered into the catalog")))
     }
 }
 
@@ -769,7 +778,9 @@ impl Tool for PromotePrompt {
     fn description(&self) -> &str {
         "Promote a draft prompts/<name>.md into a durable Skill at skills/<name>.md, \
          removing the draft. Omit `content` to promote verbatim; pass it to land a \
-         refined version. Errors if the Skill already exists. Takes effect on /reload."
+         refined version. Errors if the Skill already exists. Takes effect on /reload.\
+         \n\nUse when: a draft prompt has proven useful across multiple scenarios and \
+         deserves to be a first-class Skill (no [draft] prefix in the catalog)."
     }
     fn schema(&self) -> Value {
         json!({
@@ -812,10 +823,10 @@ impl Tool for PromotePrompt {
         // still stands; surface it so a stale draft can be cleaned up.
         match std::fs::remove_file(&draft) {
             Ok(()) => Ok(ToolOutput::ok(format!(
-                "promoted '{name}': wrote skills/{name}.md, removed draft — run /reload to register it"
+                "promoted '{name}': wrote skills/{name}.md, removed draft — auto-registered into the catalog"
             ))),
             Err(e) => Ok(ToolOutput::ok(format!(
-                "promoted '{name}' to skills/{name}.md, but could not remove prompts/{name}.md ({e}); delete it manually. Run /reload."
+                "promoted '{name}' to skills/{name}.md, but could not remove prompts/{name}.md ({e}); delete it manually. Auto-registered into the catalog."
             ))),
         }
     }
@@ -828,7 +839,11 @@ impl Tool for GenerateCapability {
         "generate_capability"
     }
     fn description(&self) -> &str {
-        "Author a new Capability (manifest + optional entry script) into capabilities/. Takes effect on /reload."
+        "Author a new Capability (manifest + optional entry script) into capabilities/. Takes effect on /reload.\
+         \n\nUse when: you need a repeatable executable action — a script, API client, or \
+         long-running service — that becomes a new runtime hand beyond the built-in tools. \
+         Declare environment (shell/wasm/docker) × lifecycle (one_shot/on_demand/persistent). \
+         Examples: a project-specific linter, a deploy script, a fetcher for a private API."
     }
     fn schema(&self) -> Value {
         json!({
@@ -896,7 +911,7 @@ impl Tool for GenerateCapability {
             usage: args.get("usage").and_then(Value::as_str).unwrap_or_default().to_string(),
         };
         std::fs::write(dir.join("manifest.json"), serde_json::to_string_pretty(&manifest)?)?;
-        Ok(ToolOutput::ok(format!("wrote capability '{name}' — run /reload to register it")))
+        Ok(ToolOutput::ok(format!("wrote capability '{name}' — auto-registered into the catalog")))
     }
 }
 

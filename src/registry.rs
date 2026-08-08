@@ -44,7 +44,9 @@ impl Registry {
     /// Render the resident catalog for injection into the system prompt (ADR 0020).
     pub fn render_catalog(&self) -> String {
         if self.catalog.is_empty() {
-            return String::new();
+            return "Skills/Capabilities: none yet. When a reusable procedure or action \
+                    pattern emerges, use `generate_skill` / `generate_capability` to author one."
+                .to_string();
         }
         let mut skills = Vec::new();
         let mut drafts = Vec::new();
