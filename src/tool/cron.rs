@@ -48,6 +48,36 @@ impl CronStore {
     pub fn get_mut(&mut self, id: u64) -> Option<&mut CronEntry> { self.entries.iter_mut().find(|e| e.id == id) }
 }
 
+/// Reap due cron entries: return the prompts that should fire now, and update
+/// last_fired. One-shot entries that fire are removed. Called by the daemon's
+/// cron thread once per tick.
+pub fn poll_cron_due() -> Vec<String> {
+    let mut store = CRON_STORE.lock().unwrap();
+    let now = std::time::SystemTime::now();
+    let mut due = Vec::new();
+    let mut to_remove = Vec::new();
+    for e in store.entries.iter_mut() {
+        if cron_matches_now(&e.cron, &now) {
+            // Skip if we already fired within this minute (avoid re-firing).
+            let already_fired = e.last_fired.map_or(false, |lf| {
+                let secs = now.duration_since(lf).unwrap_or_default().as_secs();
+                secs < 60
+            });
+            if !already_fired {
+                due.push(e.prompt.clone());
+                e.last_fired = Some(now);
+                if e.is_one_shot {
+                    to_remove.push(e.id);
+                }
+            }
+        }
+    }
+    for id in to_remove {
+        store.entries.retain(|e| e.id != id);
+    }
+    due
+}
+
 pub static CRON_STORE: LazyLock<Mutex<CronStore>> = LazyLock::new(|| Mutex::new(CronStore::new()));
 
 /// Validate a 5-field cron expression: `min hour dom mon dow`.
@@ -258,5 +288,35 @@ mod tests {
         assert!(matches!(CronCreate.permission(&json!({}), Path::new(".")), Permission::Ask { key } if key == "cron"));
         assert!(matches!(CronDelete.permission(&json!({}), Path::new(".")), Permission::Ask { key } if key == "cron"));
         assert!(matches!(CronList.permission(&json!({}), Path::new(".")), Permission::None));
+    }
+
+    #[test]
+    fn poll_cron_due_fires_matching_and_removes_one_shot() {
+        // CRON_STORE is a process-wide singleton; clean it between tests.
+        CRON_STORE.lock().unwrap().entries.clear();
+        CRON_STORE.lock().unwrap().next_id = 1;
+
+        // Match current minute so it fires now.
+        let dt = chrono::Local::now();
+        let cron_now = format!("{} * * * *", dt.minute());
+        let recurring = CRON_STORE.lock().unwrap()
+            .create(cron_now.clone(), "recurring-fire".into(), "".into(), false).unwrap();
+        let one_shot = CRON_STORE.lock().unwrap()
+            .create(cron_now.clone(), "one-shot-fire".into(), "".into(), true).unwrap();
+
+        let due = poll_cron_due();
+        assert_eq!(due, vec!["recurring-fire".to_string(), "one-shot-fire".to_string()]);
+
+        // One-shot removed; recurring stays.
+        let remaining: Vec<String> = CRON_STORE.lock().unwrap().list().iter()
+            .map(|e| e.prompt.clone()).collect();
+        assert_eq!(remaining, vec!["recurring-fire".to_string()]);
+
+        // Immediate re-poll within the same minute must not re-fire.
+        let due2 = poll_cron_due();
+        assert!(due2.is_empty(), "no re-fire within the same minute");
+
+        let _ = (recurring, one_shot);
+        CRON_STORE.lock().unwrap().entries.clear();
     }
 }
