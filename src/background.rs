@@ -225,29 +225,70 @@ pub(crate) fn run_background_cfg(
         });
     }
     let mut advanced = 0usize;
+    let mut cycle = 0usize;
+    let max_cycles = crate::config::Config::load().bg_max_auto_cycles;
     loop {
-        if advanced >= max_auto {
-            out.mission_state = MissionState::Completed;
+        // ── 内层 milestone 推进循环 ──
+        let mut inner_error = None;
+        loop {
+            if advanced >= max_auto {
+                break;
+            }
+            match advance_one_milestone(
+                provider.clone(), model.clone(), max_tokens, temperature, root.clone(),
+            ) {
+                Ok(Some(step)) => {
+                    // 累积输出。
+                    out.final_text.push_str(&step.final_text);
+                    out.tool_calls.extend(step.tool_calls);
+                    out.denied.extend(step.denied);
+                    out.events.extend(step.events);
+                    out.subgoals.extend(step.subgoals);
+                    advanced += 1;
+                }
+                Ok(None) => {
+                    // 无可就绪里程碑 → 全部完成（无错误）。
+                    break;
+                }
+                Err(e) => {
+                    inner_error = Some(e);
+                    break;
+                }
+            }
+        }
+
+        // 如果内层有错误，直接退出外循环。
+        if let Some(e) = inner_error {
+            out.mission_state = MissionState::Error(e.to_string());
             break;
         }
-        match advance_one_milestone(
-            provider.clone(), model.clone(), max_tokens, temperature, root.clone(),
+
+        // ── 外循环:质量检查 → 增量补充 ──
+        cycle += 1;
+        if cycle >= max_cycles {
+            out.mission_state = MissionState::NeedsReview;
+            external_obs.emit_external("needs_review", &format!(
+                "outer cycle {} reached limit {}", cycle, max_cycles
+            ));
+            break;
+        }
+
+        match run_quality_review_turn(
+            provider.clone(), model.clone(), max_tokens, temperature,
+            root.clone(), cycle,
         ) {
-            Ok(Some(step)) => {
-                // 累积输出。
-                out.final_text.push_str(&step.final_text);
-                out.tool_calls.extend(step.tool_calls);
-                out.denied.extend(step.denied);
-                out.events.extend(step.events);
-                out.subgoals.extend(step.subgoals);
-                advanced += 1;
+            Ok(true) => {
+                external_obs.emit_external("rework", "quality review found issues, re-seeding workgraph");
+                // 继续外循环（generate_milestones 已在 turn 内 seed 了新节点）
+                continue;
             }
-            Ok(None) => {
-                // 无可就绪里程碑 → 全部完成。
+            Ok(false) => {
+                external_obs.emit_external("quality_pass", "all milestones completed with high quality");
                 out.mission_state = MissionState::Completed;
                 break;
             }
             Err(e) => {
+                external_obs.emit_external("quality_error", &e.to_string());
                 out.mission_state = MissionState::Error(e.to_string());
                 break;
             }
@@ -523,6 +564,86 @@ pub fn advance_one_milestone(
     let _ = update_bg_checkpoint(&root, milestone_id, &title, &m.touched);
 
     Ok(Some(out))
+}
+
+/// 所有里程碑完成后，执行质量检查 turn。LLM 评估整体质量状态。
+/// 如果有质量问题，调用 generate_milestones 工具增量补充新里程碑。
+/// 返回 true = 需要继续下一个外循环，false = 目标已高质量完成。
+fn run_quality_review_turn(
+    provider: Arc<dyn Provider>,
+    model: String,
+    max_tokens: u32,
+    temperature: f32,
+    root: PathBuf,
+    cycle: usize,
+) -> anyhow::Result<bool> {
+    use crate::workgraph::WorkGraph;
+
+    let g = WorkGraph::read(&root);
+    let graph_render = g.render();
+    let plans = crate::milestone_plan::all_plans(&root);
+    let plan_count = plans.len();
+    let done_count = g.nodes.iter().filter(|n| n.status == crate::workgraph::NodeStatus::Done).count();
+
+    drop(g); // 不再需要
+
+    let plan_list = plans.iter().map(|p| format!(
+        "#{}: {} (skill: {}, criteria: {})",
+        p.milestone_id, p.title, p.skill_used, p.acceptance_criteria.len()
+    )).collect::<Vec<_>>().join("\n");
+
+    let prompt = format!(
+        "你是一个质量评审助手。当前项目已完成所有里程碑，\
+         需要进行整体质量评估。\n\n\
+         已完成里程碑数: {done_count}/{plan_count}（有计划的里程碑）\n\n\
+         workgraph 当前状态:\n{graph_render}\n\n\
+         里程碑计划文件:\n{plan_list}\n\n\
+         请综合评估整个项目当前的质量状态。\
+         对照每个里程碑的验收标准，检查是否所有目标都已高质量完成。\n\n\
+         如果存在质量问题（测试不足、实现不完整、代码质量不达标等），\
+         请调用 generate_milestones 工具增量补充新的里程碑。\
+         已完成的里程碑不可修改，但可追加新的里程碑来修复/增强。\
+         新增里程碑时，在 context 参数中注入当前 workgraph 状态，\
+         让新里程碑自动依赖所有已完成的节点。\n\n\
+         如果认为所有目标都已高质量完成，就不需要再生成任何里程碑。\
+         输出 'QUALITY_PASS' 表示通过。\n\
+         这是第 {cycle} 轮外循环。",
+    );
+
+    let mut agent = AgentLoop::new_background(provider, model, max_tokens, temperature, root.clone());
+    agent.observer_set.register(Box::new(
+        crate::bg_observer::BgObserver::new(&agent.root)
+    ));
+    if let Err(e) = agent.cancel_token().cancel_on_sigint() {
+        eprintln!("ccd: SIGINT cancel not wired: {e}");
+    }
+    let cfg = crate::config::Config::load();
+    agent.set_tool_cap(cfg.bg_milestone_tool_cap);
+
+    let (tx, rx) = channel::<AgentEvent>();
+    let handle = std::thread::spawn(move || {
+        agent.run_one_turn(prompt, &tx);
+        drop(tx);
+        agent
+    });
+    let mut tmp_out = BgOutcome::default();
+    drain_bg_events(rx, &mut tmp_out, None);
+    let _agent = match handle.join() {
+        Ok(agent) => agent,
+        Err(panic) => {
+            eprintln!("quality review turn panicked: {}", panic_message(panic));
+            // 超时/panic 时视为"需要人工检查"，暂停外循环。
+            return Err(anyhow::anyhow!("quality review panicked"));
+        }
+    };
+
+    // 检查是否调用了 generate_milestones → workgraph 有新节点
+    let g2 = WorkGraph::read(&root);
+    let has_new = g2.nodes.len() > plan_count;
+    let all_done = g2.nodes.iter().all(|n| n.status == crate::workgraph::NodeStatus::Done);
+    let needs_rework = has_new || !all_done;
+
+    Ok(needs_rework)
 }
 
 /// 在 `memory/` 中追加一条 checkpoint 记录:已完成里程碑 + 触及文件。
