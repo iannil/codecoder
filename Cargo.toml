@@ -52,6 +52,8 @@ tiny_http = "0.12"
 lsp-types = "0.97"
 # URL parsing for proper file:// URI percent-encoding (used by LSP tool)
 url = "2"
+# Cron scheduling: cron expression parsing and matching
+chrono = "0.4"
 
 [dev-dependencies]
 insta = { version = "1", features = ["colors"] }

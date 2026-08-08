@@ -1,6 +1,7 @@
 // Tool trait + registry (ADR 0018). Tools are built-in primitives compiled into
 // the binary; a runtime-authored executable is a Capability, not a Tool.
 pub mod builtin;
+pub mod cron;
 pub mod dev;
 pub mod generate_milestones;
 pub mod mcp;
@@ -130,6 +131,9 @@ impl Toolbox {
                 Box::new(task_manage::TaskList),
                 Box::new(task_manage::TaskUpdate),
                 Box::new(task_manage::TaskStop),
+                Box::new(cron::CronCreate),
+                Box::new(cron::CronDelete),
+                Box::new(cron::CronList),
             ],
         }
     }
