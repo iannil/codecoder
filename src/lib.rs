@@ -6,7 +6,6 @@
 pub mod agent;
 pub mod alert;
 pub mod background;
-pub mod bg_gate;
 pub mod bg_ledger;
 pub mod bg_observer;
 pub mod capability;
@@ -162,7 +161,7 @@ pub fn run_daemon(cfg: Config) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use crate::background::BgOutcome;
-    use crate::bg_gate::MissionState;
+    use crate::bg_ledger::MissionState;
 
     #[test]
     fn run_background_ledger_append_and_exit_code() {
@@ -172,11 +171,11 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let mut o = BgOutcome::default();
-        o.mission_state = MissionState::BlockedAt(9);
+        o.mission_state = MissionState::Error("x".into());
         crate::bg_ledger::append(&dir, &o, "workgraph").unwrap();
         let recs = crate::bg_ledger::read_recent(&dir, 5, false);
         assert_eq!(recs.len(), 1);
-        assert_eq!(crate::bg_ledger::mission_exit_code(&recs[0].mission_state), 2);
+        assert_eq!(crate::bg_ledger::mission_exit_code(&recs[0].mission_state), 4);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

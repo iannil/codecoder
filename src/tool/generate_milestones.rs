@@ -2,6 +2,8 @@
 // Uses the main provider to generate the decomposition, then seeds each
 // milestone into workgraph.json. Permission::None — local scratch, same
 // as plan/milestone. Sub-agents are excluded (same as milestone/plan/memory).
+//
+// Task 4: only generates milestone titles, no acceptance criteria.
 
 use super::{Tool, ToolCtx, ToolOutput};
 use crate::message::{Message, MessageItem, Role};
@@ -21,9 +23,8 @@ impl Tool for GenerateMilestones {
     fn description(&self) -> &str {
         "Decompose a high-level goal into workgraph milestones. \
          Takes a goal description and optional context, calls the LLM \
-         to generate structured milestones with acceptance criteria, \
-         then seeds them into the workgraph. \
-         Returns the list of created milestone IDs."
+         to generate structured milestone titles, then seeds them into \
+         the workgraph. Returns the list of created milestone IDs."
     }
 
     fn schema(&self) -> Value {
@@ -58,7 +59,7 @@ impl Tool for GenerateMilestones {
         // Build the provider prompt.
         let mut prompt = format!(
             "You are a project planner. Decompose the following high-level goal into \
-             a sequence of milestones with acceptance criteria.\n\n\
+             a sequence of milestone titles.\n\n\
              Goal: {goal}\n"
         );
         if !context.is_empty() {
@@ -66,18 +67,16 @@ impl Tool for GenerateMilestones {
         }
         prompt.push_str(
             "Output milestones in the following format, one per milestone. \
-             Each milestone must have a title (short, imperative) and acceptance criteria \
-             (specific, testable conditions). Decompose into 3-8 milestones. \
+             Each milestone must have a title (short, imperative). Decompose into 3-8 milestones. \
              Order them such that earlier milestones are prerequisites for later ones. \
              Do NOT add numbering or bullet markers — use the exact format:\n\n\
-             MILESTONE: <title>\n\
-             ACCEPTANCE: <criteria>\n\n\
+             MILESTONE: <title>\n\n\
              Separate milestones with a blank line."
         );
 
         // Build a simple provider request (no tools, just a text completion).
         let req = CompletionRequest {
-            model: crate::config::Config::from_env().model,
+            model: crate::config::Config::load().model,
             messages: vec![
                 Message::text(0, Role::User, prompt),
             ],
@@ -86,7 +85,7 @@ impl Tool for GenerateMilestones {
             tools: vec![],
         };
 
-        let provider = crate::select_provider(&crate::config::Config::from_env());
+        let provider = crate::select_provider(&crate::config::Config::load());
         let completion = provider.complete(&req)?;
 
         let response_text = completion
@@ -104,18 +103,18 @@ impl Tool for GenerateMilestones {
             .join("\n");
 
         // Parse the LLM response into milestones.
-        let milestones = parse_milestones(&response_text);
-        if milestones.is_empty() {
+        let titles = parse_milestones(&response_text);
+        if titles.is_empty() {
             return Ok(ToolOutput::err(
-                "LLM did not produce any parseable milestones. Response:\n{response_text}",
+                format!("LLM did not produce any parseable milestones. Response:\n{response_text}"),
             ));
         }
 
         // Write each milestone to the workgraph.
         let root = ctx.root.to_path_buf();
         let mut created_ids = Vec::new();
-        for (title, acceptance) in &milestones {
-            match WorkGraph::with_lock(&root, |g| g.add(title, acceptance, vec![])) {
+        for title in &titles {
+            match WorkGraph::with_lock(&root, |g| g.add(title, vec![])) {
                 Ok(id) => created_ids.push(id),
                 Err(e) => {
                     // If one milestone fails, report partial success.
@@ -144,55 +143,47 @@ impl Tool for GenerateMilestones {
     }
 }
 
-/// Parse the LLM response into a list of (title, acceptance_criteria) pairs.
+/// Parse the LLM response into a list of milestone titles.
 /// Expects the format:
 ///   MILESTONE: <title>
-///   ACCEPTANCE: <criteria>
-fn parse_milestones(response: &str) -> Vec<(String, String)> {
-    let mut milestones = Vec::new();
+fn parse_milestones(response: &str) -> Vec<String> {
+    let mut titles = Vec::new();
     let mut current_title: Option<String> = None;
-    let mut current_acceptance: Option<String> = None;
 
     for line in response.lines() {
         let trimmed = line.trim();
         if trimmed.is_empty() {
             // Blank line: flush the current milestone.
-            if let (Some(title), Some(acceptance)) = (current_title.take(), current_acceptance.take()) {
-                milestones.push((title, acceptance));
+            if let Some(title) = current_title.take() {
+                titles.push(title);
             }
             current_title = None;
-            current_acceptance = None;
             continue;
         }
 
         if let Some(title) = trimmed.strip_prefix("MILESTONE:") {
             // Flush any previous un-flushed milestone.
-            if let (Some(t), Some(a)) = (current_title.take(), current_acceptance.take()) {
-                milestones.push((t, a));
+            if let Some(t) = current_title.take() {
+                titles.push(t);
             }
             current_title = Some(title.trim().to_string());
-            current_acceptance = None;
-        } else if let Some(acc) = trimmed.strip_prefix("ACCEPTANCE:") {
-            current_acceptance = Some(acc.trim().to_string());
         } else if trimmed.starts_with("MILESTONE") && trimmed.contains(':') {
             // Handle variations like "MILESTONE 1:" — strip the number.
             let after_colon = trimmed.splitn(2, ':').nth(1).unwrap_or("").trim();
-            if let (Some(t), Some(a)) = (current_title.take(), current_acceptance.take()) {
-                milestones.push((t, a));
+            if let Some(t) = current_title.take() {
+                titles.push(t);
             }
             current_title = Some(after_colon.to_string());
-            current_acceptance = None;
         }
-        // Lines that don't match either pattern are ignored (e.g. blank lines
-        // between blocks, or commentary).
+        // Lines that don't match either pattern are ignored.
     }
 
     // Flush the last milestone if accumulated.
-    if let (Some(title), Some(acceptance)) = (current_title.take(), current_acceptance.take()) {
-        milestones.push((title, acceptance));
+    if let Some(title) = current_title.take() {
+        titles.push(title);
     }
 
-    milestones
+    titles
 }
 
 #[cfg(test)]
@@ -204,30 +195,24 @@ mod tests {
     fn parse_milestones_basic() {
         let input = "\
 MILESTONE: Set up data model
-ACCEPTANCE: Schema is defined, migrations run, basic CRUD works
 
-MILESTONE: Implement API endpoints
-ACCEPTANCE: All endpoints return correct status codes, integration tests pass";
+MILESTONE: Implement API endpoints";
         let ms = parse_milestones(input);
         assert_eq!(ms.len(), 2);
-        assert_eq!(ms[0].0, "Set up data model");
-        assert!(ms[0].1.contains("Schema is defined"));
-        assert_eq!(ms[1].0, "Implement API endpoints");
-        assert!(ms[1].1.contains("integration tests pass"));
+        assert_eq!(ms[0], "Set up data model");
+        assert_eq!(ms[1], "Implement API endpoints");
     }
 
     #[test]
     fn parse_milestones_with_numbered_variant() {
         let input = "\
 MILESTONE 1: Scaffold project
-ACCEPTANCE: Project compiles, basic structure in place
 
-MILESTONE 2: Core logic
-ACCEPTANCE: Core algorithm handles edge cases, tests pass";
+MILESTONE 2: Core logic";
         let ms = parse_milestones(input);
         assert_eq!(ms.len(), 2);
-        assert_eq!(ms[0].0, "Scaffold project");
-        assert_eq!(ms[1].0, "Core logic");
+        assert_eq!(ms[0], "Scaffold project");
+        assert_eq!(ms[1], "Core logic");
     }
 
     #[test]
@@ -242,28 +227,23 @@ ACCEPTANCE: Core algorithm handles edge cases, tests pass";
 Here is my plan:
 
 MILESTONE: Login feature
-ACCEPTANCE: User can log in with email and password
 
 Some notes here.
 
-MILESTONE: Dashboard
-ACCEPTANCE: Dashboard shows user data";
+MILESTONE: Dashboard";
         let ms = parse_milestones(input);
         assert_eq!(ms.len(), 2);
-        assert_eq!(ms[0].0, "Login feature");
-        assert_eq!(ms[1].0, "Dashboard");
+        assert_eq!(ms[0], "Login feature");
+        assert_eq!(ms[1], "Dashboard");
     }
 
     #[test]
-    fn parse_milestones_acceptance_after_last_milestone_without_blank_line_flushes() {
-        // The last milestone should be flushed even without a trailing blank line.
+    fn parse_milestones_last_milestone_without_blank_line_flushes() {
         let input = "\
-MILESTONE: Only one
-ACCEPTANCE: Works";
+MILESTONE: Only one";
         let ms = parse_milestones(input);
         assert_eq!(ms.len(), 1);
-        assert_eq!(ms[0].0, "Only one");
-        assert_eq!(ms[0].1, "Works");
+        assert_eq!(ms[0], "Only one");
     }
 
     #[test]

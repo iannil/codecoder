@@ -155,26 +155,7 @@ pub fn seed_issues_as_milestones(root: &Path, issues: &[GitHubIssue]) -> anyhow:
     WorkGraph::with_lock(root, |g| {
         for issue in issues {
             let title = format!("#{}: {}", issue.number, issue.title);
-            let acceptance = issue.body.as_deref().unwrap_or("")
-                .lines()
-                .filter(|l| {
-                    let t = l.trim();
-                    t.starts_with("acceptance:") || t.starts_with("ACCEPTANCE:")
-                })
-                .map(|l| {
-                    l.trim_start_matches("acceptance:")
-                        .trim_start_matches("ACCEPTANCE:")
-                        .trim()
-                        .to_string()
-                })
-                .collect::<Vec<_>>()
-                .join("\n");
-            let acceptance = if acceptance.is_empty() {
-                format!("Resolve GitHub issue #{}. See: {}", issue.number, issue.html_url)
-            } else {
-                acceptance
-            };
-            if g.add(&title, &acceptance, vec![]).is_ok() {
+            if g.add(&title, vec![]).is_ok() {
                 count += 1;
             }
         }
@@ -273,7 +254,7 @@ mod tests {
     fn filter_unseeded_issues_excludes_seeded() {
         let dir = tempfile::tempdir().unwrap();
         let mut g = WorkGraph::default();
-        g.add("#1: Fix bug", "acc", vec![]).unwrap();
+        g.add("#1: Fix bug", vec![]).unwrap();
         g.save(dir.path()).unwrap();
         let issues = vec![
             GitHubIssue {
@@ -318,7 +299,6 @@ mod tests {
         let g = WorkGraph::read(dir.path());
         assert_eq!(g.nodes.len(), 1);
         assert_eq!(g.nodes[0].title, "#42: The answer");
-        assert_eq!(g.nodes[0].acceptance, "make it work");
     }
 
     #[test]
@@ -338,14 +318,14 @@ mod tests {
         let count = seed_issues_as_milestones(dir.path(), &issues).unwrap();
         assert_eq!(count, 1);
         let g = WorkGraph::read(dir.path());
-        assert_eq!(g.nodes[0].acceptance, "Resolve GitHub issue #7. See: https://github.com/user/repo/issues/7");
+        assert_eq!(g.nodes[0].title, "#7: No acceptance");
     }
 
     #[test]
     fn seed_issues_as_milestones_skips_duplicate() {
         let dir = tempfile::tempdir().unwrap();
         let mut g = WorkGraph::default();
-        g.add("#1: First", "acc", vec![]).unwrap();
+        g.add("#1: First", vec![]).unwrap();
         g.save(dir.path()).unwrap();
         let issues = vec![
             GitHubIssue {

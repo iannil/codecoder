@@ -50,16 +50,14 @@ fn seed_milestones_creates_workgraph_entries() {
     let g = WorkGraph::read(&ws.root());
     assert_eq!(g.nodes.len(), 2);
     assert_eq!(g.nodes[0].title, "#1: Implement login");
-    assert_eq!(g.nodes[0].acceptance, "user can log in with email");
     assert_eq!(g.nodes[1].title, "#2: Add logout");
-    assert!(g.nodes[1].acceptance.contains("Resolve GitHub issue #2"));
 }
 
 #[test]
 fn seed_milestones_skips_duplicate_issue_number() {
     let ws = Workspace::new();
     let mut g = WorkGraph::default();
-    g.add("#3: Original", "acc", vec![]).unwrap();
+    g.add("#3: Original", vec![]).unwrap();
     g.save(&ws.root()).unwrap();
 
     // An issue with number 3 — but the workgraph already has #3 in its title.
@@ -110,7 +108,7 @@ fn filter_unseeded_returns_all_when_no_workgraph() {
 fn filter_unseeded_excludes_already_seeded() {
     let ws = Workspace::new();
     let mut g = WorkGraph::default();
-    g.add("#5: Bug fix", "acc", vec![]).unwrap();
+    g.add("#5: Bug fix", vec![]).unwrap();
     g.save(&ws.root()).unwrap();
 
     let issues = vec![

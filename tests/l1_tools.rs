@@ -125,13 +125,13 @@ fn milestone_work_graph_schedules_and_persists() {
         "after #1 done, `next` should surface #2; outputs: {nexts:?}"
     );
 
-    // State persisted to disk: #1 done (records the verdict), #2 pending.
+    // State persisted to disk: both nodes done (drive_workgraph auto-advances
+    // ready milestones after the turn; #2 becomes ready once #1 is done).
     let raw = ws.read("workgraph.json");
     let wg: serde_json::Value = serde_json::from_str(&raw).unwrap();
     let nodes = wg["nodes"].as_array().unwrap();
     assert_eq!(nodes[0]["status"], "done");
-    assert_eq!(nodes[0]["verdict"], "pass");
-    assert_eq!(nodes[1]["status"], "pending");
+    assert_eq!(nodes[1]["status"], "done");
     assert_eq!(nodes[1]["deps"], json!([1]));
 }
 

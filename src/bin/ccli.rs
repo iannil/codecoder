@@ -61,7 +61,7 @@ fn main() -> anyhow::Result<()> {
             codecoder::help::SkillEntry {
                 name: "workgraph",
                 description: "Show workgraph milestone status and control auto-advance",
-                usage: &["cc workgraph", "cc workgraph-pause", "cc workgraph-resume", "cc milestone-reset <id>"],
+                usage: &["cc workgraph", "cc workgraph-pause", "cc workgraph-resume"],
                 schema: None,
                 template: None,
             },
@@ -146,10 +146,6 @@ fn main() -> anyhow::Result<()> {
         [one, cmd] if one == "autotask" && cmd == "on" => send_one(&sock, ClientRequest::AutotaskOn),
         [one, cmd] if one == "autotask" && cmd == "off" => send_one(&sock, ClientRequest::AutotaskOff),
         [one] if one == "health" => send_one(&sock, ClientRequest::HealthCheck),
-        [one, id] if one == "milestone-reset" => {
-            let id: u64 = id.parse().map_err(|e| anyhow::anyhow!("milestone-reset <id>: {e}"))?;
-            send_one(&sock, ClientRequest::MilestoneReset { id })
-        }
         [one, rest @ ..] if one == "ledger" => {
             // 直读 bg_ledger.jsonl,不经 daemon(BG 独立于 daemon)。
             let root = codecoder::Config::from_env().root;
@@ -181,8 +177,8 @@ fn main() -> anyhow::Result<()> {
                 println!("  counts:  {:?}", r.counts);
                 for sg in &r.subgoals {
                     println!(
-                        "  - milestone #{}: {:?}  {}",
-                        sg.milestone_id, sg.verdict, sg.gate_reason
+                        "  - milestone #{}: {} touched files",
+                        sg.milestone_id, sg.touched_files.len()
                     );
                 }
             } else {
