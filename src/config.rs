@@ -25,6 +25,8 @@ pub struct Config {
     pub github_token: Option<String>,
     /// BG 护栏:每次 BG 调用最多推进的 milestone 数(spec 2026-07-22)。
     pub bg_max_auto: usize,
+    /// BG 外循环自动轮数上限。超过此数后暂停询问用户。默认 3。
+    pub bg_max_auto_cycles: usize,
     /// BG 护栏:连续失败熔断阈值。
     pub bg_circuit_k: usize,
     /// BG 护栏:单 milestone turn 的工具迭代上限(< 全局 12)。
@@ -90,6 +92,7 @@ pub struct ConfigPatch {
     pub temperature: Option<f32>,
     pub github_token: Option<String>,
     pub bg_max_auto: Option<usize>,
+    pub bg_max_auto_cycles: Option<usize>,
     pub bg_circuit_k: Option<usize>,
     pub bg_milestone_tool_cap: Option<usize>,
     pub bg_max_fix_attempts: Option<usize>,
@@ -133,6 +136,7 @@ impl Config {
             root,
             github_token: None,
             bg_max_auto: 0,
+            bg_max_auto_cycles: 3,
             bg_circuit_k: 2,
             bg_milestone_tool_cap: 15,
             bg_max_fix_attempts: 3,
@@ -194,7 +198,7 @@ impl Config {
         // 标量字段（Config 中为具体类型，patch 中为 Option<T>）。
         set!(model); set!(api_base); set!(max_tokens);
         set!(max_tokens_ceiling); set!(noop_nudge_threshold); set!(temperature);
-        set!(bg_max_auto); set!(bg_circuit_k);
+        set!(bg_max_auto); set!(bg_max_auto_cycles); set!(bg_circuit_k);
         set!(bg_milestone_tool_cap); set!(bg_max_fix_attempts); set!(supervisor_crash_budget);
         set!(max_tool_output); set!(command_timeout_secs); set!(compaction_tier2);
         set!(wg_tick_secs); set!(supervisor_tick_secs); set!(ondemand_reaper_secs);
@@ -247,6 +251,7 @@ mod tests {
         assert_eq!(c.noop_nudge_threshold, 3);
         assert_eq!(c.temperature, 0.7);
         assert_eq!(c.bg_max_auto, 0);
+        assert_eq!(c.bg_max_auto_cycles, 3);
         assert_eq!(c.bg_circuit_k, 2);
         assert_eq!(c.bg_milestone_tool_cap, 15);
         assert_eq!(c.bg_max_fix_attempts, 3);

@@ -646,7 +646,7 @@ mod tests {
         let cfg = Config {
             api_key: None, model: "gpt-4o".into(), api_base: "https://api.openai.com/v1".into(),
             max_tokens: 4096, temperature: 0.7, root: dir.clone(), github_token: None,
-            bg_max_auto: 3, bg_circuit_k: 2, bg_milestone_tool_cap: 15, bg_max_fix_attempts: 3,
+            bg_max_auto: 3, bg_max_auto_cycles: 3, bg_circuit_k: 2, bg_milestone_tool_cap: 15, bg_max_fix_attempts: 3,
             supervisor_crash_budget: 3,
             max_tool_output: 256 * 1024,
             max_tokens_ceiling: 32768,
