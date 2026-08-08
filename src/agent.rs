@@ -1483,6 +1483,22 @@ impl AgentLoop {
         // Permission gate (ADR 0018): None runs freely; Ask consults the session
         // allowlist, else a blocking prompt over the embedded reply_tx (ADR 0016).
         if let Permission::Ask { key } = tool.permission(&args, &self.root) {
+            // headless 沙盒模式:自动运行的白名单由 allowlist 决定,但 headless 下
+            // 无人在场,allowlist 仅用于手动 cc 会话的记录。headless 时只要操作
+            // 在沙盒(项目目录)内即自动放行,不受 allowlist 限制。
+            if self.headless && crate::sandbox::tool_in_sandbox(name, &args, &self.root) {
+                // Trace: PermissionFull (headless sandbox auto-grant)
+                self.observer_set.on_point(&crate::trace::types::PointEvent {
+                    ts: crate::trace::types::now_ts(),
+                    kind: crate::trace::types::EventKind::PermissionFull {
+                        key: key.clone(),
+                        decision: crate::trace::types::PermissionDecision::AutoGranted,
+                        tool: name.to_string(),
+                        headless: self.headless,
+                    },
+                    meta: serde_json::json!({}),
+                });
+            } else {
             let session_allows = self.allowlist.allows(&key);
             let project_allows = self.project_allowlist.allows(&key, &args, &self.root);
             if !session_allows && !project_allows {
@@ -1596,6 +1612,7 @@ impl AgentLoop {
                     },
                     meta: serde_json::json!({}),
                 });
+            }
             }
         }
 
