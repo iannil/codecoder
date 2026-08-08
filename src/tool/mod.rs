@@ -12,6 +12,7 @@ pub mod search;
 pub mod send_message;
 pub mod task_manage;
 pub mod wasm;
+pub mod worktree;
 
 use crate::permission::Permission;
 use serde_json::{Value, json};
@@ -136,6 +137,8 @@ impl Toolbox {
                 Box::new(cron::CronDelete),
                 Box::new(cron::CronList),
                 Box::new(send_message::SendMessage),
+                Box::new(worktree::EnterWorktree),
+                Box::new(worktree::ExitWorktree),
             ],
         }
     }
