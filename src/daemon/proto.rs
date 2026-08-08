@@ -10,7 +10,6 @@ pub struct WorkgraphStatus {
     pub total: usize,
     pub pending: usize,
     pub done: usize,
-    pub needs_fix: usize,
     pub blocked: usize,
     pub last_advanced: Option<String>,
     pub paused: bool,
@@ -109,8 +108,6 @@ pub enum ClientRequest {
     WorkgraphResume,
     /// 查询 workgraph 暂停状态（`cc workgraph-status` 附带）。
     WorkgraphPaused,
-    /// 重置一个 needs_fix 里程碑为 pending（`cc milestone-reset <id>`）。
-    MilestoneReset { id: u64 },
     /// 查询 autotask 轮询状态（`cc autotask status`）。
     AutotaskStatus,
     /// 启动 autotask 轮询（`cc autotask on`）。
@@ -516,7 +513,7 @@ mod tests {
 
     #[test]
     fn workgraph_status_round_trips() {
-        let ws = WorkgraphStatus { total: 5, pending: 2, done: 2, needs_fix: 1, blocked: 0, last_advanced: None, paused: false };
+        let ws = WorkgraphStatus { total: 5, pending: 2, done: 2, blocked: 0, last_advanced: None, paused: false };
         let ev = ServerEvent::WorkgraphStatus(ws.clone());
         let json = serde_json::to_string(&ev).unwrap();
         let back: ServerEvent = serde_json::from_str(&json).unwrap();

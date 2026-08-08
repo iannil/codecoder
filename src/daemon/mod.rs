@@ -675,7 +675,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         // 1 个 pending milestone。
         let mut g = WorkGraph::default();
-        g.add("ship feature X", "acceptance criteria", vec![]).unwrap();
+        g.add("ship feature X", vec![]).unwrap();
         g.save(&dir).unwrap();
 
         // 真实 advance：与 daemon::run 内部调用一致。

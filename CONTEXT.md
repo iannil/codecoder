@@ -4,7 +4,7 @@
 
 ## Interaction & UI
 
-> **NOTE:** The following terms (Mode, Dialog, Popup, Overlay, Reasoning, Frame, DisplayState) are **legacy TUI concepts** from the pre-client-server architecture. Since ADR 0032 (client-server migration), the UI is handled by the `cc` CLI client over stdin/stdout; permission/ask/confirm/plan/trust dialogs are rendered inline as `y/n` prompts. These terms are kept for historical reference and ADR consistency but no longer represent the current UI implementation.
+> **NOTE:** The following terms (Mode, Dialog, Popup, Overlay, Reasoning, Frame, DisplayState) are **legacy TUI concepts** from the pre-client-server architecture. Since ADR 0032 (client-server migration), the UI is handled by the `ccli` CLI client over stdin/stdout; permission/ask/confirm/plan/trust dialogs are rendered inline as `y/n` prompts. These terms are kept for historical reference and ADR consistency but no longer represent the current UI implementation.
 
 **Mode**:
 The TUI's current interaction context, governing how key presses are interpreted. Concrete modes: `INSERT` (normal input), `SEARCH` (Ctrl+F), `R-SEARCH` (Ctrl+R reverse search), `DIALOG` (permission/plan/ask overlay open), `HELP`, `MODEL` (model picker), `SLASH` (an input-completion popup is open — either the slash-command list or the `@`-file-completion list; both are non-blocking popups above the input), `BROWSE` (message-list browse after Up/Down on empty input). **Derived, not stored:** `TuiApp` holds no `mode` field — the active mode is *computed each frame* from authoritative sub-state via a fixed precedence chain (dialog → popup → search → browse → INSERT), so "exactly one mode per frame" is structurally true and the mode can never desync from what is actually open. Computing it during render keeps `Frame` read-only. Shown in the status bar. See [[0001-tui-keybinding-and-mode-semantics]].
@@ -79,7 +79,7 @@ The durable, dependency-ordered graph of **Milestone** nodes, persisted to `work
 _Avoid_: todo list, backlog, plan (plan is the one-shot approval gesture), roadmap.
 
 **Milestone**:
-One node of the Work Graph: `id · title · acceptance · deps · status · verdict? · touched`. `acceptance` is the contract written *before* coding. `status` is `pending / in_progress / blocked / needs_fix / done / hypothesis / locked` — where **`blocked` is DERIVED** from unmet dependencies (recomputed, never the authoritative record of intent), the others set explicitly by an action. `hypothesis` and `locked` are diagnostic-side variants (P2, for future inference-tree use in the workgraph context). `verdict` attaches a **Review Verdict** (from the `review` tool, #4) on acceptance; a non-`pass` verdict lands `needs_fix`, not `done`.
+One node of the Work Graph: `id · title · deps · status`. `status` is `pending / in_progress / blocked / done / hypothesis / locked` — where **`blocked` is DERIVED** from unmet dependencies (recomputed, never the authoritative record of intent), the others set explicitly by an action. `hypothesis` and `locked` are diagnostic-side variants (P2, for future inference-tree use in the workgraph context). Per-milestone gates (`acceptance`/`command`/review/`needs_fix`) were removed: verification is the agent's own responsibility, and completion is self-reported by the agent.
 _Avoid_: task (that word is reserved — see Background Agent / sub-agent), step, ticket, issue.
 
 ## Extensibility & Self-Evolution
@@ -135,7 +135,7 @@ A child `AgentLoop` spawned by the `agent` **or** `review` tool to run a delegat
 _Avoid_: worker, thread, task, child process.
 
 **Review Verdict**:
-The structured outcome of the `review` tool: one of `pass` / `needs_fix` / `rebuild`, plus the four **Drift Signals**. The sub-agent self-reports a verdict, but the kernel is the authority: it takes the **more-severe** of the reported verdict and the verdict *derived* from the signals (a lenient reviewer can never downgrade below what the signals imply; a foundation fail forces `rebuild`). If the reviewer ignores the two-line output contract, the verdict defaults to `needs_fix (unparsed)` — never a silent pass. Parsed and aggregated in `src/review.rs` (pure functions); the `review` interception in `agent.rs` formats it as a deterministic header above the sub-agent's prose. A future Plan node's acceptance result is exactly this value (`docs/design/2026-07-19-review-verdict-rubric.md`).
+The structured outcome of the `review` tool: one of `pass` / `needs_fix` / `rebuild`, plus the four **Drift Signals**. The sub-agent self-reports a verdict, but the kernel is the authority: it takes the **more-severe** of the reported verdict and the verdict *derived* from the signals (a lenient reviewer can never downgrade below what the signals imply; a foundation fail forces `rebuild`). If the reviewer ignores the two-line output contract, the verdict defaults to `needs_fix (unparsed)` — never a silent pass. Parsed and aggregated in `src/review.rs` (pure functions); the `review` interception in `agent.rs` formats it as a deterministic header above the sub-agent's prose. The `review` tool remains a standalone architecture-review aid; it is no longer wired into per-milestone acceptance (which is now agent self-reported).
 _Avoid_: grade, score, rating, result (unqualified).
 
 **Drift Signal**:

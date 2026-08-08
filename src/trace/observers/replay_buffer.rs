@@ -202,10 +202,9 @@ fn translate_to_observation(kind: &EventKind) -> Option<ObservationKind> {
             total,
             pending,
             done,
-            needs_fix,
         } => Some(ObservationKind::Notice {
             text: format!(
-                "workgraph: {total} total, {pending} pending, {done} done, {needs_fix} needs_fix"
+                "workgraph: {total} total, {pending} pending, {done} done"
             ),
         }),
 

@@ -252,13 +252,12 @@ pub fn handle_connection(
                 let paused = mgr.lock().unwrap().workgraph_is_paused();
                 drop(mgr);
                 let g = crate::workgraph::WorkGraph::read(&root);
-                let mut counts = (0usize, 0usize, 0usize, 0usize, 0usize);
+                let mut counts = (0usize, 0usize, 0usize, 0usize);
                 for n in &g.nodes {
                     match n.status {
                         crate::workgraph::NodeStatus::Pending => counts.0 += 1,
                         crate::workgraph::NodeStatus::Done => counts.1 += 1,
-                        crate::workgraph::NodeStatus::NeedsFix => counts.2 += 1,
-                        crate::workgraph::NodeStatus::Blocked => counts.3 += 1,
+                        crate::workgraph::NodeStatus::Blocked => counts.2 += 1,
                         _ => {}
                     }
                 }
@@ -266,8 +265,7 @@ pub fn handle_connection(
                     total: g.nodes.len(),
                     pending: counts.0,
                     done: counts.1,
-                    needs_fix: counts.2,
-                    blocked: counts.3,
+                    blocked: counts.2,
                     last_advanced: None,
                     paused,
                 }));
@@ -298,21 +296,6 @@ pub fn handle_connection(
                 } else {
                     "workgraph auto-advance is RUNNING".into()
                 }});
-                let _ = body_tx.send(ServerEvent::TurnComplete);
-            }
-            ClientRequest::MilestoneReset { id } => {
-                let g = mgr.lock().unwrap();
-                match g.milestone_reset(id) {
-                    Ok(true) => {
-                        let _ = body_tx.send(ServerEvent::Notice { text: format!("milestone #{id} reset to pending") });
-                    }
-                    Ok(false) => {
-                        let _ = body_tx.send(ServerEvent::Error { message: format!("milestone #{id} not found or not in needs_fix state") });
-                    }
-                    Err(e) => {
-                        let _ = body_tx.send(ServerEvent::Error { message: format!("milestone reset failed: {e}") });
-                    }
-                }
                 let _ = body_tx.send(ServerEvent::TurnComplete);
             }
             ClientRequest::AutotaskOn => {

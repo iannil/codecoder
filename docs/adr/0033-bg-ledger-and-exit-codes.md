@@ -1,5 +1,7 @@
 # ADR 0033 — BG 任务账本与退出码告警
 
+> **Updated 2026-08-08 (refactor):** The `StuckNeedsFix` and `BlockedAt` mission states are retained (exit code 2) but their semantics simplified: `needs_fix` is now a milestone status set by the agent when it self-reports failure, without the objective gate infrastructure. The self-recovery loop (`next_retryable`, `retry_one_milestone`, `fix_attempts`/`last_failure` fields) was removed (ADR 0040). The `bg_max_fix_attempts` setting is now configured via `codecoder.json`.
+
 - **状态**: Accepted
 - **日期**: 2026-07-22
 - **关联**: ADR 0026(Background Agent)、ADR 0030(BG 客观验收门,提供 `BgOutcome.subgoals`/`mission_state`)、roadmap #2、`docs/background-agent-scheduling.md`

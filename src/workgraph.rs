@@ -6,35 +6,16 @@
 //
 // The scheduling/validation logic here is pure; the `milestone` tool
 // (src/tool/dev.rs) owns I/O and rendering, the AgentLoop owns dispatch.
+//
+// Task 4: per-milestone gates (acceptance, command, review, needs_fix, etc.)
+// have been removed. Milestones are simple dependency-ordered nodes; the agent
+// self-reports completion. Verification is the agent's own responsibility.
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-pub const WG_SCHEMA_VERSION: u32 = 1;
-
-/// 确定性检查项的类型。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum CheckType {
-    /// 跑一个命令，检查退出码是否为 0。
-    BuildExitZero,
-    /// glob 匹配文件，grep 禁止内容。
-    NoTemplateContent,
-    /// 目录下最少文件数。
-    FileCountMin,
-    /// 业务文件最少行数。
-    MinLinesPerFile,
-}
-
-/// 一条确定性的验收检查项。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CheckSpec {
-    #[serde(rename = "type")]
-    pub type_: CheckType,
-    #[serde(default)]
-    pub params: HashMap<String, serde_json::Value>,
-}
+pub const WG_SCHEMA_VERSION: u32 = 2;
 
 /// A milestone's lifecycle state. `Blocked` is DERIVED from unmet dependencies
 /// (recomputed, never the authoritative record of intent); the others are set
@@ -45,7 +26,6 @@ pub enum NodeStatus {
     Pending,
     InProgress,
     Blocked,
-    NeedsFix,
     Done,
     /// A candidate cause in a diagnostic (rc) tree — not yet verified (P2).
     Hypothesis,
@@ -59,7 +39,6 @@ impl NodeStatus {
             NodeStatus::Pending => " ",
             NodeStatus::InProgress => "~",
             NodeStatus::Blocked => "#",
-            NodeStatus::NeedsFix => "!",
             NodeStatus::Done => "x",
             NodeStatus::Hypothesis => "?",
             NodeStatus::Locked => "·",
@@ -70,7 +49,6 @@ impl NodeStatus {
             NodeStatus::Pending => "pending",
             NodeStatus::InProgress => "in_progress",
             NodeStatus::Blocked => "blocked",
-            NodeStatus::NeedsFix => "needs_fix",
             NodeStatus::Done => "done",
             NodeStatus::Hypothesis => "hypothesis",
             NodeStatus::Locked => "locked",
@@ -84,29 +62,11 @@ pub struct Milestone {
     pub id: u64,
     pub title: String,
     #[serde(default)]
-    pub acceptance: String,
-    #[serde(default)]
     pub deps: Vec<u64>,
     pub status: NodeStatus,
-    /// The Review Verdict (#4) attached when this milestone was accepted.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub verdict: Option<String>,
     /// Files / commits touched — a human-readable trail, not load-bearing.
     #[serde(default)]
     pub touched: Vec<String>,
-    /// 自恢复循环:该 milestone 已消耗的 needs_fix 重试次数(ADR 0026 迭代 1)。
-    #[serde(default)]
-    pub fix_attempts: usize,
-    /// 最近一次验收失败原因,供重试 prompt 注入;跨进程持久化。Pass 时清空。
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub last_failure: Option<String>,
-    /// 可选客观验收命令(迭代 3):独占一行裸命令(如 `cargo test`)。存在→bg_gate 走命令门;
-    /// 缺失→回退 extract_gate_command(acceptance) 启发式,再回退 review 门。
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub command: Option<String>,
-    /// 可选确定性检查项列表（Phase 1 新增）。存在时，命令门 pass 后执行。
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub checks: Option<Vec<CheckSpec>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -238,7 +198,7 @@ impl WorkGraph {
     /// edge set would become cyclic. A brand-new node cannot itself create a
     /// cycle (nothing depends on it yet), but `validate` guards migrations and
     /// any future edge-editing path.
-    pub fn add(&mut self, title: &str, acceptance: &str, deps: Vec<u64>) -> anyhow::Result<u64> {
+    pub fn add(&mut self, title: &str, deps: Vec<u64>) -> anyhow::Result<u64> {
         if title.trim().is_empty() {
             anyhow::bail!("milestone needs a `title`");
         }
@@ -251,15 +211,9 @@ impl WorkGraph {
         self.nodes.push(Milestone {
             id,
             title: title.trim().to_string(),
-            acceptance: acceptance.trim().to_string(),
             deps,
             status: NodeStatus::Pending,
-            verdict: None,
             touched: Vec::new(),
-            fix_attempts: 0,
-            last_failure: None,
-            command: None,
-            checks: None,
         });
         if let Err(e) = self.validate() {
             self.nodes.pop();
@@ -303,30 +257,13 @@ impl WorkGraph {
             .min_by_key(|n| n.id)
     }
 
-    /// 下一个可重试的 needs_fix milestone:状态 NeedsFix、deps 全 Done、且重试预算
-    /// 未耗尽(`fix_attempts < max_attempts`),取最低 id。`max_attempts == 0` 恒返回
-    /// None(禁用自恢复)。`None` 表示无可重试项。
-    pub fn next_retryable(&self, max_attempts: usize) -> Option<&Milestone> {
-        self.nodes
-            .iter()
-            .filter(|n| {
-                n.status == NodeStatus::NeedsFix
-                    && self.deps_done(n)
-                    && n.fix_attempts < max_attempts
-                    // 排除 GateKind::None 的里程碑 — 这类 failures 是"验收标准缺失"
-                    // 而非代码问题,重试也无法解决。允许其他 pending 里程碑继续推进。
-                    && crate::bg_gate::gate_kind(n) != crate::bg_gate::GateKind::None
-            })
-            .min_by_key(|n| n.id)
-    }
-
     fn deps_done(&self, n: &Milestone) -> bool {
         n.deps.iter().all(|d| self.get(*d).map(|m| m.status == NodeStatus::Done).unwrap_or(false))
     }
 
     /// Recompute the DERIVED `Blocked` state: a not-yet-active node with an unmet
     /// dependency shows `Blocked`; when its deps clear it returns to `Pending`.
-    /// Never touches `InProgress` / `NeedsFix` / `Done` / `Hypothesis` / `Locked`
+    /// Never touches `InProgress` / `Done` / `Hypothesis` / `Locked`
     /// (explicit intent).
     fn recompute_blocked(&mut self) {
         let unmet: Vec<bool> = self.nodes.iter().map(|n| !self.deps_done(n)).collect();
@@ -392,19 +329,13 @@ impl WorkGraph {
             if Some(n.id) == ready {
                 line.push_str("  ▶ready");
             }
-            if let Some(v) = &n.verdict {
-                line.push_str(&format!("  ✓{v}"));
-            }
-            if let Some(c) = &n.command {
-                line.push_str(&format!("  cmd:{c}"));
-            }
             lines.push(line);
         }
         lines.join("\n")
     }
 
     /// Render a concise text summary suitable for system-prompt injection.
-    /// Lists ready, in-progress, needs-fix, and blocked nodes in a compact form
+    /// Lists ready, in-progress, and blocked nodes in a compact form
     /// so the agent is aware of its outstanding work.
     pub fn render_for_prompt(&self) -> String {
         if self.nodes.is_empty() {
@@ -417,7 +348,7 @@ impl WorkGraph {
             self.nodes.iter().filter(|n| n.status == NodeStatus::Done).count(),
         )];
         // Bound the prompt: a large graph would bloat every system message. Urgent
-        // rows (ready / in_progress / needs_fix) are always shown; the long tail of
+        // rows (ready / in_progress) are always shown; the long tail of
         // pending/blocked is capped with an elision note.
         const MAX_PROMPT_NODES: usize = 40;
         let mut shown = 0usize;
@@ -426,7 +357,7 @@ impl WorkGraph {
             if n.status == NodeStatus::Done {
                 continue;
             }
-            let urgent = matches!(n.status, NodeStatus::InProgress | NodeStatus::NeedsFix)
+            let urgent = matches!(n.status, NodeStatus::InProgress)
                 || Some(n.id) == ready;
             if !urgent && shown >= MAX_PROMPT_NODES {
                 elided += 1;
@@ -438,7 +369,6 @@ impl WorkGraph {
                 NodeStatus::Pending => "  pending",
                 NodeStatus::InProgress => "~active",
                 NodeStatus::Blocked => "#blocked",
-                NodeStatus::NeedsFix => "!needs_fix",
                 NodeStatus::Hypothesis => "?hypothesis",
                 NodeStatus::Locked => "·locked",
             };
@@ -464,6 +394,37 @@ impl WorkGraph {
 fn migrate(from: u32, json: serde_json::Value) -> anyhow::Result<serde_json::Value> {
     match from {
         0 => Ok(json), // 0 -> 1: initial schema, nothing to transform.
+        1 => {
+            // 1 -> 2: needs_fix → pending, drop gate fields.
+            if let Some(nodes) = json.get("nodes").and_then(|v| v.as_array()) {
+                let nodes: Vec<serde_json::Value> = nodes
+                    .iter()
+                    .map(|n| {
+                        if let Some(o) = n.as_object() {
+                            let mut o = o.clone();
+                            if o.get("status").and_then(|s| s.as_str()) == Some("needs_fix") {
+                                o.insert("status".into(), serde_json::json!("pending"));
+                            }
+                            for key in ["acceptance","verdict","fix_attempts","last_failure","command","checks"] {
+                                o.remove(key);
+                            }
+                            serde_json::Value::Object(o)
+                        } else {
+                            n.clone()
+                        }
+                    })
+                    .collect();
+                let mut map = if let Some(o) = json.as_object() {
+                    o.clone()
+                } else {
+                    return Ok(json);
+                };
+                map.insert("nodes".into(), serde_json::Value::Array(nodes));
+                Ok(serde_json::Value::Object(map))
+            } else {
+                Ok(json)
+            }
+        }
         other => anyhow::bail!("no workgraph migration registered from schema_version {other}"),
     }
 }
@@ -483,15 +444,9 @@ fn migrate_todos(raw: &str) -> Option<WorkGraph> {
         .map(|t| Milestone {
             id: t.id,
             title: t.text,
-            acceptance: String::new(),
             deps: Vec::new(),
             status: if t.done { NodeStatus::Done } else { NodeStatus::Pending },
-            verdict: None,
             touched: Vec::new(),
-            fix_attempts: 0,
-            last_failure: None,
-            command: None,
-            checks: None,
         })
         .collect();
     Some(WorkGraph { schema_version: WG_SCHEMA_VERSION, nodes })
@@ -508,8 +463,8 @@ mod tests {
     #[test]
     fn add_assigns_ids_and_next_ready_respects_deps() {
         let mut g = wg();
-        let a = g.add("data model", "", vec![]).unwrap();
-        let b = g.add("logic", "", vec![a]).unwrap();
+        let a = g.add("data model", vec![]).unwrap();
+        let b = g.add("logic", vec![a]).unwrap();
         assert_eq!((a, b), (1, 2));
         // Only the dep-free node is ready; #2 is blocked behind #1.
         assert_eq!(g.next_ready().map(|n| n.id), Some(1));
@@ -550,7 +505,7 @@ mod tests {
     fn read_checked_valid_is_ok() {
         let dir = tempfile::tempdir().unwrap();
         let mut g = WorkGraph::default();
-        g.add("m", "acc", vec![]).unwrap();
+        g.add("m", vec![]).unwrap();
         g.save(dir.path()).unwrap();
         let g2 = WorkGraph::read_checked(dir.path()).unwrap();
         assert_eq!(g2.nodes.len(), 1);
@@ -559,15 +514,15 @@ mod tests {
     #[test]
     fn add_rejects_unknown_dep() {
         let mut g = wg();
-        assert!(g.add("x", "", vec![99]).is_err());
+        assert!(g.add("x", vec![99]).is_err());
         assert!(g.nodes.is_empty());
     }
 
     #[test]
     fn explicit_status_not_clobbered_by_recompute() {
         let mut g = wg();
-        let a = g.add("a", "", vec![]).unwrap();
-        let b = g.add("b", "", vec![a]).unwrap();
+        let a = g.add("a", vec![]).unwrap();
+        let b = g.add("b", vec![a]).unwrap();
         g.set_status(b, NodeStatus::InProgress); // human insists, deps unmet
         // recompute must NOT downgrade an explicit InProgress to Blocked.
         assert_eq!(g.get(b).unwrap().status, NodeStatus::InProgress);
@@ -579,8 +534,8 @@ mod tests {
         let g = WorkGraph {
             schema_version: WG_SCHEMA_VERSION,
             nodes: vec![
-                Milestone { id: 1, title: "a".into(), acceptance: String::new(), deps: vec![2], status: NodeStatus::Pending, verdict: None, touched: vec![], fix_attempts: 0, last_failure: None, command: None, checks: None },
-                Milestone { id: 2, title: "b".into(), acceptance: String::new(), deps: vec![1], status: NodeStatus::Pending, verdict: None, touched: vec![], fix_attempts: 0, last_failure: None, command: None, checks: None },
+                Milestone { id: 1, title: "a".into(), deps: vec![2], status: NodeStatus::Pending, touched: vec![] },
+                Milestone { id: 2, title: "b".into(), deps: vec![1], status: NodeStatus::Pending, touched: vec![] },
             ],
         };
         assert!(g.validate().is_err());
@@ -589,8 +544,8 @@ mod tests {
     #[test]
     fn remove_rejected_when_depended_on() {
         let mut g = wg();
-        let a = g.add("a", "", vec![]).unwrap();
-        g.add("b", "", vec![a]).unwrap();
+        let a = g.add("a", vec![]).unwrap();
+        g.add("b", vec![a]).unwrap();
         assert!(g.remove(a).is_err()); // #2 depends on #1
         assert!(g.get(a).is_some());
     }
@@ -600,7 +555,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("wg_test_{}", std::process::id()));
         let _ = std::fs::create_dir_all(&dir);
         let mut g = wg();
-        g.add("only", "accept it", vec![]).unwrap();
+        g.add("only", vec![]).unwrap();
         g.save(&dir).unwrap();
         let raw = std::fs::read_to_string(path(&dir)).unwrap();
         let back = WorkGraph::load(&raw).unwrap();
@@ -612,18 +567,45 @@ mod tests {
     }
 
     #[test]
-    fn load_legacy_json_without_new_fields_defaults_them() {
-        // 迭代 1 之前的 workgraph.json 没有 fix_attempts / last_failure 字段;
-        // #[serde(default)] 必须让它们缺省为 0 / None(锁定向后兼容契约)。
+    fn load_legacy_json_without_gate_fields_defaults_them() {
+        // v2 schema: no gate fields. A v1-style JSON with needs_fix and
+        // gate fields should migrate cleanly.
         let raw = format!(
-            r#"{{"schema_version": {WG_SCHEMA_VERSION},
+            r#"{{"schema_version": 1,
                  "nodes": [{{"id": 1, "title": "legacy", "acceptance": "cargo test",
-                             "deps": [], "status": "needs_fix", "touched": []}}]}}"#
+                             "deps": [], "status": "needs_fix", "touched": [],
+                             "verdict": "needs_fix", "fix_attempts": 2, "last_failure": "x",
+                             "command": "cargo test", "checks": []}}]}}"#
         );
         let g = WorkGraph::load(&raw).unwrap();
         let n = g.get(1).unwrap();
-        assert_eq!(n.fix_attempts, 0, "缺省 fix_attempts 应为 0");
-        assert_eq!(n.last_failure, None, "缺省 last_failure 应为 None");
+        assert_eq!(n.status, NodeStatus::Pending, "needs_fix → pending after migration");
+        // Gate fields should not exist on the struct; verify the JSON round-trip
+        // doesn't include them.
+        let saved = serde_json::to_string(&g).unwrap();
+        assert!(!saved.contains("acceptance"), "gate fields should not be serialized: {saved}");
+        assert!(!saved.contains("fix_attempts"), "gate fields should not be serialized: {saved}");
+        assert!(!saved.contains("verdict"), "gate fields should not be serialized: {saved}");
+    }
+
+    #[test]
+    fn migrate_v1_needs_fix_to_pending_and_drops_gate_fields() {
+        let raw = r#"{"schema_version":1,"nodes":[
+            {"id":1,"title":"a","acceptance":"cargo test","deps":[],"status":"needs_fix","touched":[],
+             "verdict":"needs_fix","fix_attempts":2,"last_failure":"x","command":"cargo test","checks":[]},
+            {"id":2,"title":"b","acceptance":"","deps":[1],"status":"pending","touched":[]}
+        ]}"#;
+        let g = WorkGraph::load(raw).unwrap();
+        assert_eq!(g.get(1).unwrap().status, NodeStatus::Pending, "needs_fix → pending");
+        assert_eq!(g.get(2).unwrap().status, NodeStatus::Pending);
+        // Verify that the deserialized struct doesn't have gate fields.
+        let saved = serde_json::to_string(&g).unwrap();
+        assert!(!saved.contains("acceptance"), "acceptance dropped: {saved}");
+        assert!(!saved.contains("verdict"), "verdict dropped: {saved}");
+        assert!(!saved.contains("fix_attempts"), "fix_attempts dropped: {saved}");
+        assert!(!saved.contains("last_failure"), "last_failure dropped: {saved}");
+        assert!(!saved.contains("\"command\""), "command dropped: {saved}");
+        assert!(!saved.contains("checks"), "checks dropped: {saved}");
     }
 
     #[test]
@@ -639,7 +621,7 @@ mod tests {
     #[test]
     fn node_status_hypothesis_and_locked_round_trip() {
         let mut g = wg();
-        g.add("root cause candidate", "", vec![]).unwrap();
+        g.add("root cause candidate", vec![]).unwrap();
         g.set_status(1, NodeStatus::Hypothesis);
         assert_eq!(g.get(1).unwrap().status, NodeStatus::Hypothesis);
         assert_eq!(g.get(1).unwrap().status.tag(), "?");
@@ -663,8 +645,8 @@ mod tests {
     #[test]
     fn render_for_prompt_omits_done_and_shows_ready() {
         let mut g = wg();
-        g.add("first", "", vec![]).unwrap();
-        g.add("second", "", vec![1]).unwrap();
+        g.add("first", vec![]).unwrap();
+        g.add("second", vec![1]).unwrap();
         g.set_status(1, NodeStatus::Done);
         let prompt = g.render_for_prompt();
         // #1 is done → omitted in prompt.
@@ -683,30 +665,29 @@ mod tests {
     #[test]
     fn render_for_prompt_shows_all_statuses() {
         let mut g = wg();
-        g.add("ready", "do it", vec![]).unwrap();
-        g.add("active", "", vec![]).unwrap();
+        g.add("ready", vec![]).unwrap();
+        g.add("active", vec![]).unwrap();
         g.set_status(2, NodeStatus::InProgress);
         // Blocked manually: add a dep that won't be done.
-        g.add("blocked", "", vec![1]).unwrap(); // #1 is pending → blocked
-        g.add("fixme", "", vec![]).unwrap();
-        g.set_status(4, NodeStatus::NeedsFix);
-        g.add("done", "", vec![]).unwrap();
-        g.set_status(5, NodeStatus::Done);
-        g.add("hyp", "", vec![]).unwrap();
-        g.set_status(6, NodeStatus::Hypothesis);
-        g.add("locked", "", vec![]).unwrap();
-        g.set_status(7, NodeStatus::Locked);
+        g.add("blocked", vec![1]).unwrap(); // #1 is pending → blocked
+        g.add("done", vec![]).unwrap();
+        g.set_status(4, NodeStatus::Done);
+        g.add("hyp", vec![]).unwrap();
+        g.set_status(5, NodeStatus::Hypothesis);
+        g.add("locked", vec![]).unwrap();
+        g.set_status(6, NodeStatus::Locked);
 
         let prompt = g.render_for_prompt();
         // Done node omitted from list but header may mention count.
-        assert!(!prompt.contains("- [x] #5"), "done node should be omitted: {prompt}");
+        assert!(!prompt.contains("- [x] #4"), "done node should be omitted: {prompt}");
         // Others present with correct tags.
         assert!(prompt.contains("▶ready"), "ready marker: {prompt}");
         assert!(prompt.contains("~active"), "active marker: {prompt}");
         assert!(prompt.contains("#blocked"), "blocked marker: {prompt}");
-        assert!(prompt.contains("!needs_fix"), "needs_fix marker: {prompt}");
         assert!(prompt.contains("?hypothesis"), "hypothesis marker: {prompt}");
         assert!(prompt.contains("·locked"), "locked marker: {prompt}");
+        // needs_fix should not appear.
+        assert!(!prompt.contains("needs_fix"), "needs_fix should not appear: {prompt}");
     }
 
     #[test]
@@ -715,7 +696,7 @@ mod tests {
         // 50 pending nodes exceeds MAX_PROMPT_NODES (40); the non-urgent tail
         // is elided with a note, while the urgent ready node still shows.
         for i in 0..50 {
-            g.add(&format!("task-{i}"), "", vec![]).unwrap();
+            g.add(&format!("task-{i}"), vec![]).unwrap();
         }
         let prompt = g.render_for_prompt();
         assert!(
@@ -723,71 +704,6 @@ mod tests {
             "large graph should elide the tail: {prompt}"
         );
         assert!(prompt.contains("▶ready"), "ready node must survive the cap: {prompt}");
-    }
-
-    #[test]
-    fn next_retryable_picks_lowest_needs_fix_within_budget() {
-        let mut g = WorkGraph::default();
-        let a = g.add("a", "acc", vec![]).unwrap();
-        let b = g.add("b", "acc", vec![]).unwrap();
-        g.set_status(a, NodeStatus::NeedsFix);
-        g.set_status(b, NodeStatus::NeedsFix);
-        // 两个都在预算内 → 取最低 id。
-        assert_eq!(g.next_retryable(3).map(|n| n.id), Some(a));
-        // a 耗尽预算 → 取 b。
-        g.nodes.iter_mut().find(|n| n.id == a).unwrap().fix_attempts = 3;
-        assert_eq!(g.next_retryable(3).map(|n| n.id), Some(b));
-        // 都耗尽 → None。
-        g.nodes.iter_mut().find(|n| n.id == b).unwrap().fix_attempts = 3;
-        assert_eq!(g.next_retryable(3), None);
-    }
-
-    #[test]
-    fn next_retryable_skips_pending_and_blocked_and_respects_deps() {
-        let mut g = WorkGraph::default();
-        let a = g.add("a", "acc", vec![]).unwrap();
-        let b = g.add("b", "acc", vec![a]).unwrap(); // 依赖 a
-        g.set_status(b, NodeStatus::NeedsFix);        // b needs_fix 但 dep a 未 Done
-        // a 仍 Pending（非 needs_fix）→ 不可重试；b 的 dep 未 Done → 不可重试。
-        assert_eq!(g.next_retryable(3), None);
-        // 关闭预算 → 即便 needs_fix 也不选。
-        g.set_status(a, NodeStatus::Done);            // 现在 b 的 dep 满足
-        assert_eq!(g.next_retryable(3).map(|n| n.id), Some(b));
-        assert_eq!(g.next_retryable(0), None);        // max_attempts=0 → 禁用
-    }
-
-    #[test]
-    fn new_milestone_defaults_retry_state() {
-        let mut g = WorkGraph::default();
-        let a = g.add("a", "acc", vec![]).unwrap();
-        let n = g.get(a).unwrap();
-        assert_eq!(n.fix_attempts, 0);
-        assert_eq!(n.last_failure, None);
-    }
-
-    #[test]
-    fn new_milestone_command_defaults_none() {
-        let mut g = WorkGraph::default();
-        let a = g.add("a", "acc", vec![]).unwrap();
-        assert_eq!(g.get(a).unwrap().command, None);
-    }
-
-    #[test]
-    fn render_shows_command_when_present() {
-        let mut g = WorkGraph::default();
-        let a = g.add("core", "acc", vec![]).unwrap();
-        g.nodes.iter_mut().find(|n| n.id == a).unwrap().command = Some("cargo test".into());
-        let r = g.render();
-        assert!(r.contains("cmd:cargo test"), "render should show command: {r}");
-    }
-
-    #[test]
-    fn load_legacy_json_without_command_defaults_none() {
-        let raw = format!(
-            r#"{{"schema_version":{WG_SCHEMA_VERSION},"nodes":[{{"id":1,"title":"t","acceptance":"a","deps":[],"status":"pending","touched":[]}}]}}"#
-        );
-        let g = WorkGraph::load(&raw).unwrap();
-        assert_eq!(g.get(1).unwrap().command, None);
     }
 
     #[test]
@@ -805,7 +721,7 @@ mod tests {
                 let d = Arc::clone(&dir);
                 thread::spawn(move || {
                     WorkGraph::with_lock(&d, |g| {
-                        g.add(&format!("t{i}"), "", vec![])?;
+                        g.add(&format!("t{i}"), vec![])?;
                         Ok(())
                     })
                 })
@@ -827,71 +743,12 @@ mod tests {
         WorkGraph::default().save(&dir).unwrap();
         for _ in 0..5 {
             WorkGraph::with_lock(&dir, |g| {
-                g.add("t", "", vec![])?;
+                g.add("t", vec![])?;
                 Ok(())
             })
             .unwrap();
         }
         assert_eq!(WorkGraph::read(&dir).nodes.len(), 5);
         let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn check_type_deserializes() {
-        let ct: CheckType = serde_json::from_str(r#""build_exit_zero""#).unwrap();
-        assert_eq!(ct, CheckType::BuildExitZero);
-        let ct: CheckType = serde_json::from_str(r#""no_template_content""#).unwrap();
-        assert_eq!(ct, CheckType::NoTemplateContent);
-        let ct: CheckType = serde_json::from_str(r#""file_count_min""#).unwrap();
-        assert_eq!(ct, CheckType::FileCountMin);
-        let ct: CheckType = serde_json::from_str(r#""min_lines_per_file""#).unwrap();
-        assert_eq!(ct, CheckType::MinLinesPerFile);
-    }
-
-    #[test]
-    fn check_spec_deserializes_with_params() {
-        let spec: CheckSpec = serde_json::from_str(
-            r#"{"type":"no_template_content","params":{"patterns":["src/**/*.tsx"],"forbidden":["PlaceholderPage"]}}"#,
-        )
-        .unwrap();
-        assert_eq!(spec.type_, CheckType::NoTemplateContent);
-        let patterns = spec.params.get("patterns").and_then(|v| v.as_array());
-        assert!(patterns.is_some(), "patterns should be an array");
-    }
-
-    #[test]
-    fn milestone_checks_round_trip() {
-        let spec = CheckSpec {
-            type_: CheckType::NoTemplateContent,
-            params: [(
-                "patterns".to_string(),
-                serde_json::json!(["src/**/*.tsx"]),
-            )]
-            .into_iter()
-            .collect(),
-        };
-        let mut m = Milestone {
-            id: 42,
-            title: "round-trip".into(),
-            acceptance: "acc".into(),
-            deps: vec![],
-            status: NodeStatus::Pending,
-            verdict: None,
-            touched: vec![],
-            fix_attempts: 0,
-            last_failure: None,
-            command: Some("true".into()),
-            checks: Some(vec![spec]),
-        };
-        let json = serde_json::to_string(&m).unwrap();
-        let back: Milestone = serde_json::from_str(&json).unwrap();
-        assert_eq!(back.checks, m.checks);
-    }
-
-    #[test]
-    fn milestone_checks_defaults_none() {
-        let raw = r#"{"id":1,"title":"t","acceptance":"a","deps":[],"status":"pending","touched":[]}"#;
-        let m: Milestone = serde_json::from_str(raw).unwrap();
-        assert_eq!(m.checks, None);
     }
 }

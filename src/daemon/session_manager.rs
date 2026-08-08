@@ -142,8 +142,8 @@ impl DaemonSessionManager {
         crate::daemon::proto::AutotaskStatus { running, last_event, tick_count }
     }
 
-    /// 重置一个 needs_fix 里程碑的状态为 pending（快捷重置）。
-    /// Ok(true) = 重置成功，Ok(false) = 里程碑不存在或非 needs_fix 状态。
+    /// 重置一个里程碑的状态为 pending（快捷重置）。
+    /// Ok(true) = 重置成功，Ok(false) = 里程碑不存在或已 Done。
     pub fn milestone_reset(&self, id: u64) -> anyhow::Result<bool> {
         let root = self.root.clone();
         crate::workgraph::WorkGraph::with_lock(&root, |g| {
@@ -152,7 +152,7 @@ impl DaemonSessionManager {
                 return Ok(false);
             }
             let status = node.unwrap().status;
-            if !matches!(status, crate::workgraph::NodeStatus::NeedsFix) {
+            if status == crate::workgraph::NodeStatus::Done {
                 return Ok(false);
             }
             Ok(g.set_status(id, crate::workgraph::NodeStatus::Pending))

@@ -86,7 +86,7 @@ pub enum EventKind {
     Notice { text: String },
     StreamDelta { text: String },
     SubAgentResult { agent_id: String, summary: String },
-    WorkgraphStatus { total: usize, pending: usize, done: usize, needs_fix: usize },
+    WorkgraphStatus { total: usize, pending: usize, done: usize },
     ExitCode { code: i32 },
     /// 子 agent 调用边（用于重建调用树）
     AgentGraphEdge(AgentGraphEdge),

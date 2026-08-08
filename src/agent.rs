@@ -2089,78 +2089,41 @@ impl AgentLoop {
                 let g = WorkGraph::read(&self.root);
                 let n = g.get(milestone_id).expect("just read, must exist");
                 let t = format!(
-                    "workgraph milestone #{}: {}\nacceptance: {}\n\n\
-                     Complete this milestone, then self-review. You MUST end your reply \
-                     with a final line in EXACTLY this format (nothing after it) so the \
-                     kernel can parse and auto-update the milestone status:\n\
-                     VERDICT: <pass|needs_fix|rebuild>",
-                    n.id,
-                    n.title,
-                    if n.acceptance.is_empty() { "(none)" } else { &n.acceptance },
+                    "workgraph milestone #{}: {}\n\n\
+                     Complete this milestone. When done, it will be marked complete \
+                     automatically; no verdict line is required.",
+                    n.id, n.title,
                 );
                 (t, n.title.clone())
             };
             self.cancel.reset();
             self.process_turn(task, event_tx);
 
-            // Auto-writeback: parse the turn's final assistant text for a review
-            // verdict. When found, update the milestone status accordingly.
-            let text = self.last_assistant_text();
-            let outcome = crate::review::parse_review(&text);
-            if !outcome.unparsed {
-                let (status, verdict_str) = match outcome.verdict {
-                    crate::review::Verdict::Pass => (NodeStatus::Done, "pass"),
-                    crate::review::Verdict::NeedsFix => (NodeStatus::NeedsFix, "needs_fix"),
-                    crate::review::Verdict::Rebuild => (NodeStatus::NeedsFix, "rebuild"),
-                };
-                // Trace: capture old status before set_status
-                let old_status = WorkGraph::read(&self.root)
-                    .get(milestone_id)
-                    .map(|n| format!("{:?}", n.status))
-                    .unwrap_or_default();
-                let _ = WorkGraph::with_lock(&self.root, |g| {
-                    g.set_status(milestone_id, status);
-                    if let Some(n) = g.nodes.iter_mut().find(|n| n.id == milestone_id) {
-                        n.verdict = Some(verdict_str.to_string());
-                    }
-                    Ok(())
-                });
-                // Trace: MilestoneStatus
-                self.observer_set.on_point(&crate::trace::types::PointEvent {
-                    ts: crate::trace::types::now_ts(),
-                    kind: crate::trace::types::EventKind::MilestoneStatus {
-                        id: milestone_id,
-                        title: title.clone(),
-                        old_status,
-                        new_status: verdict_str.to_string(),
-                    },
-                    meta: serde_json::json!({}),
-                });
-                let _ = event_tx.send(AgentEvent::Notice(format!(
-                    "milestone #{} ({}) auto-updated: {}",
-                    milestone_id, title, verdict_str,
-                )));
-
-                // Non-blocking auto-memory nudge: after a Pass, prompt the agent
-                // to write memory entries. Best-effort — failure is silently ignored.
-                if matches!(status, NodeStatus::Done) {
-                    let memory_task = format!(
-                        "Milestone #{} ({}) passed. Run `use_skill auto-memory` to write \
-                         knowledge entries about what you learned. This is non-blocking \
-                         — skip if you cannot complete it.",
-                        milestone_id, title,
-                    );
-                    self.cancel.reset();
-                    self.process_turn(memory_task, event_tx);
-                }
-            } else {
-                // No VERDICT: line parsed — surface it instead of leaving the
-                // milestone silently stuck in_progress.
-                let _ = event_tx.send(AgentEvent::Notice(format!(
-                    "milestone #{} ({}) ran but emitted no VERDICT: line; status left unchanged",
-                    milestone_id, title,
-                )));
-            }
+            // Auto-writeback: mark the milestone Done regardless of what the agent
+            // said. The agent determines completion; the kernel just marks it.
+            let old_status = WorkGraph::read(&self.root)
+                .get(milestone_id)
+                .map(|n| format!("{:?}", n.status))
+                .unwrap_or_default();
+            let _ = WorkGraph::with_lock(&self.root, |g| {
+                g.set_status(milestone_id, NodeStatus::Done);
+                Ok(())
+            });
+            // Trace: MilestoneStatus
+            self.observer_set.on_point(&crate::trace::types::PointEvent {
+                ts: crate::trace::types::now_ts(),
+                kind: crate::trace::types::EventKind::MilestoneStatus {
+                    id: milestone_id,
+                    title: title.clone(),
+                    old_status,
+                    new_status: "done".to_string(),
+                },
+                meta: serde_json::json!({}),
+            });
+            let _ = event_tx.send(AgentEvent::Notice(format!(
+                "milestone #{} ({}) completed",
+                milestone_id, title,
+            )));
         }
         // The loop exhausted MAX_AUTO; if a milestone is still ready, more work
         // remains — surface it rather than stopping silently mid-graph.
@@ -3401,8 +3364,16 @@ mod tests {
     #[test]
     fn self_observe_injects_previous_turn_trace_when_enabled() {
         let _g = SELF_OBSERVE_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        unsafe { std::env::set_var("CODECODER_SELF_OBSERVE", "1"); }
         let dir = tempfile::tempdir().unwrap();
+        // Point root at the temp dir and write project config to enable self_observe
+        // (env-based config removed; Config::load() reads <root>/.codecoder/codecoder.json)
+        let root_str = dir.path().to_string_lossy().to_string();
+        unsafe { std::env::set_var("CODECODER_ROOT", &root_str); }
+        std::fs::create_dir_all(dir.path().join(".codecoder")).unwrap();
+        std::fs::write(
+            dir.path().join(".codecoder").join("codecoder.json"),
+            r#"{"self_observe": true}"#,
+        ).unwrap();
         let provider = Arc::new(ScriptedProvider {
             calls: AtomicUsize::new(0),
             path: String::new(),
@@ -3421,7 +3392,6 @@ mod tests {
         let obs = agent.self_observation.as_ref().unwrap();
         assert!(obs.contains("Tool Call Sequence") || obs.contains("turn") || obs.contains("LLM"),
             "self-observation should contain execution summary, got: {obs}");
-        unsafe { std::env::remove_var("CODECODER_SELF_OBSERVE"); }
         let _ = std::fs::remove_dir_all(&dir);
     }
 

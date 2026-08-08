@@ -2,12 +2,23 @@
 //! `<root>/bg_ledger.jsonl`;`mission_exit_code` 把 mission_state 映射成进程退出码,
 //! 供外部调度器(systemd OnFailure / cron)告警。纯函数 + 文件 IO,不经 daemon。
 //! 写账本失败仅记 stderr,绝不拖垮主流程。
-use crate::background::{BgOutcome, SubgoalVerdict};
-use crate::bg_gate::MissionState;
+//!
+//! Task 4: MissionState 简化为 Running/Completed/EmptyGraph/Error(String),
+//! 不再需要 blocked_at / StuckNeedsFix / CircuitBreaker / BlockedAt 等 gate 专用状态。
+use crate::background::{BgOutcome, SubgoalOutcome};
 use serde::{Deserialize, Serialize};
 use std::fs::OpenOptions;
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
+
+/// BG 任务终态（去掉 gate 专用状态）。
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum MissionState {
+    Running,
+    Completed,
+    EmptyGraph,
+    Error(String),
+}
 
 /// 一条账本记录(JSONL 一行)。
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -17,9 +28,6 @@ pub struct LedgerRecord {
     /// "workgraph" | "<explicit task>" | "no task"。
     pub task: String,
     pub mission_state: MissionState,
-    /// 若 mission_state == BlockedAt(id),冗余存 id 便于 grep/过滤。
-    #[serde(skip_serializing_if = "Option::is_none", default)]
-    pub blocked_at: Option<u64>,
     pub subgoals: Vec<crate::background::SubgoalOutcome>,
     pub counts: LedgerCounts,
 }
@@ -40,35 +48,22 @@ pub fn ledger_path(root: &Path) -> PathBuf {
 /// mission_state → 进程退出码。保守:未知 → 0(不误报)。
 pub fn mission_exit_code(state: &MissionState) -> i32 {
     match state {
-        MissionState::CompletedAllReady | MissionState::Running => 0,
+        MissionState::Completed | MissionState::Running => 0,
         MissionState::EmptyGraph => 5,
-        MissionState::BlockedAt(_) | MissionState::StuckNeedsFix(_) => 2,
-        MissionState::CircuitBreaker => 3,
         MissionState::Error(_) => 4,
     }
 }
 
 /// 从 BgOutcome 聚合 counts。
 pub fn counts_of(outcome: &BgOutcome) -> LedgerCounts {
-    let passed = outcome
-        .subgoals
-        .iter()
-        .filter(|s| matches!(s.verdict, SubgoalVerdict::Pass))
-        .count();
-    let failed = outcome.subgoals.len() - passed;
+    let passed = outcome.subgoals.len();
+    let failed = 0;
     LedgerCounts {
         tools: outcome.tool_calls.len(),
         denied: outcome.denied.len(),
         milestones: outcome.subgoals.len(),
         passed,
         failed,
-    }
-}
-
-fn blocked_at_of(state: &MissionState) -> Option<u64> {
-    match state {
-        MissionState::BlockedAt(id) | MissionState::StuckNeedsFix(id) => Some(*id),
-        _ => None,
     }
 }
 
@@ -81,7 +76,6 @@ pub fn record_of(outcome: &BgOutcome, task: &str) -> LedgerRecord {
     LedgerRecord {
         ts,
         task: task.to_string(),
-        blocked_at: blocked_at_of(&outcome.mission_state),
         mission_state: outcome.mission_state.clone(),
         subgoals: outcome.subgoals.clone(),
         counts: counts_of(outcome),
@@ -102,7 +96,7 @@ pub fn append(root: &Path, outcome: &BgOutcome, task: &str) -> anyhow::Result<()
 }
 
 /// 读最近 n 条(文件顺序的最后 n,旧→新)。only_failed=true 只回
-/// mission_state≠CompletedAllReady 的。损坏行跳过(JSONL 容错)。
+/// mission_state≠Completed 的。损坏行跳过(JSONL 容错)。
 pub fn read_recent(root: &Path, n: usize, only_failed: bool) -> Vec<LedgerRecord> {
     let path = ledger_path(root);
     let f = match std::fs::File::open(&path) {
@@ -118,7 +112,7 @@ pub fn read_recent(root: &Path, n: usize, only_failed: bool) -> Vec<LedgerRecord
         .collect();
     let filtered: Vec<LedgerRecord> = if only_failed {
         all.into_iter()
-            .filter(|r| !matches!(r.mission_state, MissionState::CompletedAllReady))
+            .filter(|r| !matches!(r.mission_state, MissionState::Completed))
             .collect()
     } else {
         all
@@ -170,7 +164,7 @@ pub fn truncate(root: &Path, max_lines: u32) -> anyhow::Result<usize> {
 /// 单行摘要(供 `cc ledger` 默认输出)。
 pub fn summarize_line(r: &LedgerRecord) -> String {
     let st = match &r.mission_state {
-        MissionState::BlockedAt(id) => format!("BlockedAt(#{id})"),
+        MissionState::Error(msg) => format!("Error({msg})"),
         other => format!("{other:?}"),
     };
     format!(
@@ -189,7 +183,6 @@ pub fn summarize_line(r: &LedgerRecord) -> String {
 mod tests {
     use super::*;
     use crate::background::{BgOutcome, SubgoalOutcome};
-    use crate::bg_gate::MissionState;
     use tempfile::tempdir;
 
     fn outcome(state: MissionState) -> BgOutcome {
@@ -199,50 +192,22 @@ mod tests {
         o.denied = vec!["run_command: x".into()];
         o.subgoals = vec![SubgoalOutcome {
             milestone_id: 1,
-            verdict: SubgoalVerdict::NeedsFix,
-            gate_reason: "gate failed".into(),
             tool_cap_hit: false,
             touched_files: vec!["a.rs".into()],
-            gate_kind: crate::bg_gate::GateKind::None,
         }];
         o
     }
 
     #[test]
-    fn subgoal_outcome_serializes_gate_kind() {
-        let sg = SubgoalOutcome {
-            milestone_id: 1,
-            verdict: SubgoalVerdict::Pass,
-            gate_reason: "gate pass".into(),
-            tool_cap_hit: false,
-            touched_files: vec![],
-            gate_kind: crate::bg_gate::GateKind::Command,
-        };
-        let j = serde_json::to_string(&sg).unwrap();
-        assert!(j.contains("Command"), "gate_kind should serialize: {j}");
-    }
-
-    #[test]
-    fn legacy_subgoal_json_without_gate_kind_defaults_none() {
-        // 旧账本记录缺 gate_kind 字段 → 反序列化落 GateKind::None。
-        let j = r#"{"milestone_id":1,"verdict":"Pass","gate_reason":"x","tool_cap_hit":false,"touched_files":[]}"#;
-        let sg: SubgoalOutcome = serde_json::from_str(j).unwrap();
-        assert_eq!(sg.gate_kind, crate::bg_gate::GateKind::None);
-    }
-
-    #[test]
     fn exit_code_mapping() {
-        assert_eq!(mission_exit_code(&MissionState::CompletedAllReady), 0);
+        assert_eq!(mission_exit_code(&MissionState::Completed), 0);
         assert_eq!(mission_exit_code(&MissionState::Running), 0);
-        assert_eq!(mission_exit_code(&MissionState::BlockedAt(3)), 2);
-        assert_eq!(mission_exit_code(&MissionState::StuckNeedsFix(3)), 2);
-        assert_eq!(mission_exit_code(&MissionState::CircuitBreaker), 3);
         assert_eq!(mission_exit_code(&MissionState::Error("e".into())), 4);
     }
 
     #[test]
     fn empty_graph_exit_code_is_5() {
-        assert_eq!(mission_exit_code(&crate::bg_gate::MissionState::EmptyGraph), 5);
+        assert_eq!(mission_exit_code(&MissionState::EmptyGraph), 5);
     }
 
     #[test]
@@ -256,17 +221,16 @@ mod tests {
     #[test]
     fn append_then_read_roundtrip() {
         let dir = tempdir().unwrap();
-        append(dir.path(), &outcome(MissionState::BlockedAt(3)), "workgraph").unwrap();
+        append(dir.path(), &outcome(MissionState::Error("x".into())), "workgraph").unwrap();
         let recs = read_recent(dir.path(), 10, false);
         assert_eq!(recs.len(), 1);
         let r = &recs[0];
         assert_eq!(r.task, "workgraph");
-        assert!(matches!(r.mission_state, MissionState::BlockedAt(3)));
-        assert_eq!(r.blocked_at, Some(3));
+        assert!(matches!(r.mission_state, MissionState::Error(_)));
         assert_eq!(r.subgoals.len(), 1);
         assert_eq!(
             r.counts,
-            LedgerCounts { tools: 2, denied: 1, milestones: 1, passed: 0, failed: 1 }
+            LedgerCounts { tools: 2, denied: 1, milestones: 1, passed: 1, failed: 0 }
         );
     }
 
@@ -285,8 +249,8 @@ mod tests {
     #[test]
     fn read_recent_only_failed() {
         let dir = tempdir().unwrap();
-        append(dir.path(), &outcome(MissionState::CompletedAllReady), "ok").unwrap();
-        append(dir.path(), &outcome(MissionState::BlockedAt(1)), "bad").unwrap();
+        append(dir.path(), &outcome(MissionState::Completed), "ok").unwrap();
+        append(dir.path(), &outcome(MissionState::Error("x".into())), "bad").unwrap();
         let recs = read_recent(dir.path(), 10, true);
         assert_eq!(recs.len(), 1);
         assert_eq!(recs[0].task, "bad");
@@ -365,15 +329,14 @@ mod tests {
         let r = LedgerRecord {
             ts: 1784678507,
             task: "wg".into(),
-            mission_state: MissionState::BlockedAt(3),
-            blocked_at: Some(3),
+            mission_state: MissionState::Error("x".into()),
             subgoals: vec![],
             counts: LedgerCounts { tools: 15, denied: 2, milestones: 3, passed: 1, failed: 2 },
         };
         let s = summarize_line(&r);
         assert!(
             s.contains("2026-07-22")
-                && s.contains("BlockedAt(#3)")
+                && s.contains("Error(x)")
                 && s.contains("3m(1✓ 2✗)")
                 && s.contains("15t")
                 && s.contains("2d"),

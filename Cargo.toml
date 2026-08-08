@@ -5,12 +5,16 @@ edition = "2024"
 description = "Autonomous AI agent — event-driven, filesystem-as-self"
 
 [[bin]]
-name = "codecoder"
-path = "src/main.rs"
+name = "ccda"
+path = "src/bin/ccda.rs"
 
 [[bin]]
-name = "cc"
-path = "src/bin/cc.rs"
+name = "ccli"
+path = "src/bin/ccli.rs"
+
+[[bin]]
+name = "ccweb"
+path = "src/bin/ccweb.rs"
 
 [dependencies]
 # Serialization: unified message model + session persistence (ADR 0015, 0004, 0017)
@@ -40,9 +44,9 @@ wasmtime = "27"
 wasmtime-wasi = "27"
 # Advisory file lock for WorkGraph concurrent-write protection (ADR 0035).
 fs2 = "0.4"
-# File-watcher for cc-web: live-reload on skill/capability changes (Task 1)
+# File-watcher for ccweb: live-reload on skill/capability changes (Task 1)
 notify = { version = "6", features = [] }
-# Lightweight HTTP server for cc-web (Task 1)
+# Lightweight HTTP server for ccweb (Task 1)
 tiny_http = "0.12"
 
 [dev-dependencies]

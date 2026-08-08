@@ -1,9 +1,9 @@
 ---
 name: driver-codecoder
 description: >
-  Drive codecoder (cc/ccd/headless BG_WORKGRAPH) to build a project autonomously.
+  Drive codecoder (ccda/ccli/ccweb/headless BG_WORKGRAPH) to build a project autonomously.
   Use when orchestrating codecoder's own binaries to construct a software project
-  from spec, including: launching daemon, sending messages via `cc`, managing
+  from spec, including: launching daemon, sending messages via `ccli`, managing
   trust/allowlist, driving workgraph milestones headlessly, reading bg_ledger,
   and handling the 5 exit codes. Also use for dogfooding — using codecoder to
   build codecoder itself or any other project.
@@ -16,9 +16,9 @@ description: >
 ## 核心原则：这技能是写给 codecoder 自己看的
 
 你是 codecoder 自己。这份技能告诉你如何**驱动自己**去构建项目：
-- 你的二进制（cc/ccd）放在哪里
+- 你的二进制（ccda/ccli/ccweb）放在哪里
 - 在 headless 模式下如何配置 trust 和 allowlist 才能跑起来
-- 哪些 env 需要设，哪些不必设
+- 哪些配置需要在 codecoder.json 里设，哪些不必设
 - workgraph 跑完后退出码是什么意思，怎么排查
 - 驱动时有哪些陷阱
 
@@ -32,7 +32,7 @@ description: >
 
 | 模式 | 触发 | 用户在场 | 用途 |
 |------|------|---------|------|
-| **Daemon + Client** | `CODECODER_DAEMON=1` → `cargo run` + `cargo run --bin cc` | ✓ | 交互式开发调试 |
+| **Daemon + Client** | `cargo run --bin ccda` + `cargo run --bin ccli` | ✓ | 交互式开发调试 |
 | **Headless BG (显式 task)** | `CODECODER_BG_TASK=<task>` | ✗ | 跑完一条指令即退出 |
 | **Headless Workgraph** | `CODECODER_BG_WORKGRAPH=1` | ✗ | 自动推进 workgraph 里程碑 |
 
@@ -45,16 +45,16 @@ cd /Users/rong.zhu/Code/codecoder
 cargo build
 
 # 启动 daemon（后台）
-CODECODER_DAEMON=1 cargo run &
+cargo run --bin ccda &
 
 # 连接客户端（交互式）
-cargo run --bin cc
+cargo run --bin ccli
 
 # 或者单次发消息（自动连接→发消息→收结果→退出）
-cargo run --bin cc -- "列出当前目录的文件"
+cargo run --bin ccli -- "列出当前目录的文件"
 ```
 
-注意：`cc "msg1" && cc "msg2"` 这种方式**串行发出**是安全的——每个 `cc` 等待前一个 turn 完成再退出，`&&` 保证下一个 `cc` 在前一个退出后才启动。但如果 agent 的 `drive_workgraph` 空闲线程与用户 turn 同时写文件，仍可能产生竞争。
+注意：`ccli "msg1" && ccli "msg2"` 这种方式**串行发出**是安全的——每个 `ccli` 等待前一个 turn 完成再退出，`&&` 保证下一个 `ccli` 在前一个退出后才启动。但如果 agent 的 `drive_workgraph` 空闲线程与用户 turn 同时写文件，仍可能产生竞争。
 
 ---
 
@@ -104,17 +104,15 @@ export CODECODER_DEFAULT_TRUST=always
 ```bash
 export CODECODER_DEFAULT_TRUST=always
 export CODECODER_BG_WORKGRAPH=1
-export CODECODER_MAX_TOKENS=16384
-cargo run
+cargo run --bin ccda
 ```
 
 执行流程：
 1. `main.rs` 检测到 `CODECODER_BG_WORKGRAPH=1` → 进入 `run_background_cfg`
 2. 读 `workgraph.json` → 找 `next_ready()`（依赖已满足的 pending 里程碑）
-3. 驱动 agent 完成该里程碑 → 验收门检查（`acceptance` 被当 shell 命令执行）
-4. 验收通过 → 标记 `done`；验收失败 → 标记 `needs_fix`，自动重试
-5. 重复直到 `max_auto` 耗尽或遇到不可恢复错误
-6. 退出码反映最终状态
+3. 驱动 agent 完成该里程碑 → agent 自报完成，标记 `done`
+4. 重复直到 `max_auto` 耗尽或遇到不可恢复错误
+5. 退出码反映最终状态
 
 ### 退出码
 
@@ -126,30 +124,24 @@ cargo run
 | 3 | 连续失败熔断（`CircuitBreaker`） | 检查连续的失败原因 |
 | 4 | 系统错误（`Error`） | 查 stderr 输出 |
 
-### 自恢复机制
+### 里程碑验收
 
-你（codecoder）在 headless workgraph 模式中内置了自恢复能力：
+**Task 4 起，per-milestone 客观验收门（bg_gate.rs 的命令门/review 门）已移除。** 里程碑是简单的依赖有序节点，**agent 自报完成**（标记 `done`）。验收与验证是 agent 自己的责任——建议在里程碑序列中包含独立的验证节点（如运行 `cargo test`），不要依赖门禁自动拦截。
 
-- **`CODECODER_BG_MAX_FIX_ATTEMPTS`**（默认 3）——单里程碑验收 `needs_fix` 后最多自动重试次数
-- 重试时，`retry_one_milestone` 调用 `build_repair_prompt` 将上一轮失败原因注入修复 prompt
-- 重试不计入 `max_auto` 推进预算和 `consecutive_fail` 熔断计数
-- 预算耗尽仍 `needs_fix` 才落 `StuckNeedsFix`，退出码 2
-- 重试计数 `fix_attempts` 持久化在 `workgraph.json` 的里程碑上，跨进程尊重预算
+### 关键配置（codecoder.json）
 
-**注意**：自恢复仅限 headless runner（`run_background_cfg`）。交互式 `drive_workgraph` 与 daemon 空闲推进线程仍只标记 `needs_fix`，不会自动重试。
-
-### 关键环境变量
-
-| 变量 | 默认值 | 说明 |
+| 配置字段 | 默认值 | 说明 |
 |------|--------|------|
-| `CODECODER_BG_MAX_AUTO` | 3 | 单次调用最多推进的里程碑数 |
-| `CODECODER_BG_CIRCUIT_K` | 2 | 连续失败熔断阈值 |
-| `CODECODER_BG_MILESTONE_TOOL_CAP` | 8 | 单里程碑 turn 的工具迭代上限 |
-| `CODECODER_BG_MAX_FIX_ATTEMPTS` | 3 | needs_fix 后最多自动重试次数（0=禁用） |
-| `CODECODER_MAX_TOKENS` | 8192 | 单次生成 max_tokens（写大文件时建议 16384） |
-| `CODECODER_MAX_TOKENS_CEILING` | 32768 | 截断自适应上调封顶值 |
-| `CODECODER_NOOP_NUDGE_THRESHOLD` | 3 | 连续纯探索步后注入 steering nudge（0=禁用） |
-| `CODECODER_MAX_TOOL_OUTPUT` | 262144 | 工具输出截断阈值（字节） |
+| `bg_max_auto` | 0 | 单次调用最多推进的里程碑数 |
+| `bg_circuit_k` | 2 | 连续失败熔断阈值 |
+| `bg_milestone_tool_cap` | 15 | 单里程碑 turn 的工具迭代上限 |
+| `bg_max_fix_attempts` | 3 | needs_fix 后最多自动重试次数（0=禁用） |
+| `max_tokens` | 8192 | 单次生成 max_tokens（写大文件时建议 16384） |
+| `max_tokens_ceiling` | 32768 | 截断自适应上调封顶值 |
+| `noop_nudge_threshold` | 3 | 连续纯探索步后注入 steering nudge（0=禁用） |
+| `max_tool_output` | 262144 | 工具输出截断阈值（字节） |
+
+这些配置也可用对应的 `CODECODER_*` 环境变量临时覆写（示例 `CODECODER_MAX_TOKENS=16384`），但推荐写入 `codecoder.json`。
 
 ### 账本查询
 
@@ -157,36 +149,32 @@ cargo run
 
 ```bash
 # 最近 10 次
-cc ledger
+ccli ledger
 
 # 最近 N 次
-cc ledger --last 50
+ccli ledger --last 50
 
 # 仅失败记录
-cc ledger --failed
+ccli ledger --failed
 
 # 最近一次完整详情
-cc ledger --detail
+ccli ledger --detail
 ```
 
 ---
 
 ## 编写 workgraph 里程碑
 
-### 验收门规则
+### 里程碑验收
 
-milestone 的 `acceptance` 字段就是验收条件。`bg_gate.rs` 会扫描 `acceptance` 文本，如果包含 `cargo test`/`cargo build`/`make ` 等模式的行，**整行提取为 shell 命令执行**。这意味着：
+**Task 4 起，`bg_gate.rs` 的命令门/review 门已移除。** milestone 的 `acceptance` 字段不再作为客观验收条件执行。agent 完成任务后自报 done；验证由 agent 自行通过工具（如 `run_command: cargo test`）完成。
 
-- **`acceptance` 中独占一行的裸命令**（如 `cargo test`）会被自动执行
-- 中文 prose 行可能导致 gate 报 "unexpected argument"
-- 不希望走命令门的验收，用纯 prose 描述
+### 如何处理失败
 
-### 如何处理 needs_fix
+当里程碑未能正确完成时：
 
-当里程碑标记 `needs_fix` 时：
-
-**headless 模式**：自动通过 `build_repair_prompt` 重试（`CODECODER_BG_MAX_FIX_ATTEMPTS` 次内）。
-**交互式模式**：你需要人工读取 `workgraph.json` 中的 `last_failure` 字段，修复问题后，将 status 改回 `pending`。
+**headless 模式**：agent 自报完成后即标记 `done`；如 agent 检测到失败，可标记 `needs_fix` 并重试（`bg_max_fix_attempts` 次内）。
+**交互式模式**：你需要人工读取 `workgraph.json` 中的状态，修复问题后，将 status 改回 `pending`。
 
 ---
 
@@ -214,25 +202,21 @@ milestone 的 `acceptance` 字段就是验收条件。`bg_gate.rs` 会扫描 `ac
 
 ### 2. 不要并发驱动同一 daemon
 
-`cc` 向同一 daemon 并发发消息 → agent 共享会话历史 → 异步写文件版本竞争。**必须串行**，等每条 turn 完成后再发下一条。如果你需要并发工作，用独立 root/daemon。
+`ccli` 向同一 daemon 并发发消息 → agent 共享会话历史 → 异步写文件版本竞争。**必须串行**，等每条 turn 完成后再发下一条。如果你需要并发工作，用独立 root/daemon。
 
-### 3. 客观验收门会执行 shell 命令
+### 3. 验证纪律
 
-milestone `acceptance` 中含 `cargo test`/`cargo build`/`make` 的行会被提取为 shell 命令执行。验收门结果影响里程碑状态（`done`/`needs_fix`）。
+headless 模式下你（或 agent）可能谎报测试通过。**务必独立运行 `cargo test` 验证**，不要相信 "all pass"。由于客观验收门已移除，这一纪律比以往更重要——在里程碑序列中加入独立的验证节点。
 
-### 4. 验证纪律
-
-headless 模式下你（或 agent）可能谎报测试通过。**务必独立运行 `cargo test` 验证**，不要相信 "all pass"。
-
-### 5. 弱模型在 headless 下容易过度探索
+### 4. 弱模型在 headless 下容易过度探索
 
 弱模型（如小参数模型）倾向于把整个 turn 花在 `read_file` 上而不动手。通过在指令中明确"禁止探索"并给出内联类型签名可以有效破解。
 
-### 6. `.ccd.env` 安全限制
+### 5. 配置走 codecoder.json
 
-`.ccd.env` 只注入安全调参白名单（`MODEL`/`MAX_TOKENS`/`TEMPERATURE`/`BG_*` 等），**不覆盖**已设进程 env。API key、trust 门、PATH 变量一律拒绝注入——这些必须来自真实 shell。
+配置已从环境变量迁移到三层 JSON 配置（内置默认 → 用户级 `~/.codecoder/codecoder.json` → 项目级 `<root>/.codecoder/codecoder.json`）。`.ccd.env` 已废弃移除。仅保留 `CODECODER_ROOT`/`CODECODER_DAEMON`/`CODECODER_BG_TASK`/`CODECODER_BG_WORKGRAPH`/`CODECODER_SCRIPT` 用于进程路由。
 
-### 7. 编译后运行
+### 6. 编译后运行
 
 修改代码后需先 `cargo build` 再运行。`cargo run` 虽会自动编译，但可能忽略未跟踪的文件变更。
 
@@ -246,7 +230,7 @@ headless 模式下你（或 agent）可能谎报测试通过。**务必独立运
 cargo build \
   && export CODECODER_DEFAULT_TRUST=always \
   && export CODECODER_API_KEY=sk-... \
-  && CODECODER_DAEMON=1 cargo run &
+  && cargo run --bin ccda &
 
 sleep 2
 
@@ -256,7 +240,7 @@ cat > codecoder.json << 'EOF'
 EOF
 
 # 发指令
-cargo run --bin cc -- "请实现一个 Rust 函数：parse_config 从文件路径读取 TOML 配置"
+cargo run --bin ccli -- "请实现一个 Rust 函数：parse_config 从文件路径读取 TOML 配置"
 
 # 独立验证
 cargo test
@@ -267,16 +251,15 @@ cargo test
 ```bash
 export CODECODER_DEFAULT_TRUST=always
 export CODECODER_BG_WORKGRAPH=1
-export CODECODER_MAX_TOKENS=16384
 
-cargo run
+cargo run --bin ccda
 ret=$?
 
 if [ $ret -eq 0 ]; then
   echo "✅ 成功"
 elif [ $ret -eq 2 ]; then
   echo "⚠️ 需要人工介入，检查 workgraph.json 和 bg_ledger.jsonl"
-  cargo run --bin cc -- "ledger --detail"
+  cargo run --bin ccli -- "ledger --detail"
 elif [ $ret -eq 3 ]; then
   echo "⚠️ 熔断，检查连续失败原因"
 elif [ $ret -eq 4 ]; then
@@ -288,7 +271,7 @@ fi
 
 ```bash
 # 1. 查看账本
-cargo run --bin cc -- "ledger --detail"
+cargo run --bin ccli -- "ledger --detail"
 
 # 2. 查看 workgraph 状态
 cat workgraph.json | python3 -m json.tool | grep -A5 '"status"'
@@ -296,7 +279,7 @@ cat workgraph.json | python3 -m json.tool | grep -A5 '"status"'
 # 3. 修复后重置
 # 编辑 workgraph.json，把 needs_fix/blocked 改为 pending
 # 然后重新运行 headless
-CODECODER_BG_WORKGRAPH=1 cargo run
+CODECODER_BG_WORKGRAPH=1 cargo run --bin ccda
 ```
 
 ### 场景 4：使用 engineer-* skills 的 headless 开发流程
@@ -308,42 +291,37 @@ CODECODER_BG_WORKGRAPH=1 cargo run
   {
     "id": 1,
     "title": "需求分析与架构设计",
-    "acceptance": "REQUIREMENTS.md 和 CONTEXT.md 已生成，包含领域词汇表、数据模型、API 契约、里程碑依赖树",
     "deps": [],
     "status": "pending"
   },
   {
     "id": 2,
     "title": "核心数据模型与数据库",
-    "acceptance": "数据模型已实现，数据库迁移脚本可运行，单元测试通过",
     "deps": [1],
     "status": "pending"
   },
   {
     "id": 3,
     "title": "后端 API 核心业务逻辑",
-    "acceptance": "核心 API 端点已实现，集成测试通过，cargo test 全部通过",
     "deps": [2],
     "status": "pending"
   },
   {
     "id": 4,
     "title": "前端框架与页面框架",
-    "acceptance": "前端项目已初始化，路由框架已搭建，基础组件已实现",
     "deps": [3],
     "status": "pending"
   },
   {
     "id": 5,
     "title": "功能页面与集成",
-    "acceptance": "所有功能页面已实现，前后端联调通过，E2E 测试通过",
     "deps": [4],
     "status": "pending"
   }
 ]
 ```
 
-**关键规则：** 后端里程碑（1-3）必须优先于前端里程碑（4-5）。AGENTS.md 中已包含 engineer-* 方法论，codecoder 在推进每个里程碑时会自动调用对应的 skill。
+**关键规则：** 后端里程碑（1-3）必须优先于前端里程碑（4-5）。AGENTS.md 中已包含 engineer-* 方法论，codecoder 在推进每个里程碑时会自动调用对应的 skill。由于客观验收门已移除，建议在每个里程碑后加入独立的验证步骤（如 `cargo test`）作为额外节点。
 
 ### 场景 5：使用 `use_skill` 手动激活 engineer-* 技能
 
@@ -351,24 +329,23 @@ CODECODER_BG_WORKGRAPH=1 cargo run
 
 ```bash
 # 启动 daemon 后连接客户端
-cargo run --bin cc
+cargo run --bin ccli
 
-# 在 cc 中输入以下命令（交互式）
+# 在 ccli 中输入以下命令（交互式）
 # use_skill engineer-architect
 # use_skill engineer-inspector
 # use_skill engineer-qa
 ```
 
-### 推荐环境变量组合
+### 推荐配置组合
 
-```bash
-# 使用 engineer-* 方法论进行全自动构建
-export CODECODER_DEFAULT_TRUST=always
-export CODECODER_BG_WORKGRAPH=1
-export CODECODER_MAX_TOKENS=16384
-export CODECODER_BG_MAX_AUTO=10
-export CODECODER_BG_MAX_FIX_ATTEMPTS=3
-export CODECODER_BG_CIRCUIT_K=2
+```json
+{
+  "bg_max_auto": 10,
+  "bg_max_fix_attempts": 3,
+  "bg_circuit_k": 2,
+  "max_tokens": 16384
+}
 ```
 
 ---
@@ -376,14 +353,14 @@ export CODECODER_BG_CIRCUIT_K=2
 ## 运行时架构速查
 
 ```
-cc 客户端 (stdin/stdout)  ←→  ccd daemon (Unix socket)  ←→  AgentLoop (线程)
+ccli 客户端 (stdin/stdout)  ←→  ccda daemon (Unix socket)  ←→  AgentLoop (线程)
                                 │
                             AgentEvent 流
                             (StreamDelta / ToolStarted / ToolFinished / TurnComplete /
                              Prompt / Notice / Error)
 ```
 
-- `ccd` 监听 `$CODECODER_ROOT/.ccd.sock`
-- `cc` 无状态，每次连接发送 `ClientRequest`，接收 `ServerEvent` 流
+- `ccda` 监听 `$CODECODER_ROOT/.ccd.sock`
+- `ccli` 无状态，每次连接发送 `ClientRequest`，接收 `ServerEvent` 流
 - 5 种交互式提示（Permission/Ask/Confirm/Plan/Trust）经 `Prompt`/`PromptReply` 往返
 - 工具串行执行，取消是协作式（`SigInt` 翻转 `CancelToken`）

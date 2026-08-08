@@ -11,6 +11,73 @@ use std::time::Duration;
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
+
+    let help_spec = codecoder::help::HelpSpec {
+        binary: "ccweb",
+        title: "CodeCoder web UI",
+        description: "Web-based UI that connects to the ccd daemon",
+        usage: &[
+            "ccweb [FLAGS]",
+            "ccweb --port 9876",
+            "ccweb --daemon-socket /path/to/.ccd.sock",
+        ],
+        config_note: concat!(
+            "Environment variables:\n",
+            "  CC_WEB_PORT            HTTP port (default: 9876)\n",
+            "  CODECODER_ROOT         Project root (default: CWD)\n",
+        ),
+        skills: &[
+            codecoder::help::SkillEntry {
+                name: "server",
+                description: "Start the HTTP server",
+                usage: &["ccweb", "ccweb --port 9876"],
+                schema: None,
+                template: Some("CC_WEB_PORT=9876 ccweb"),
+            },
+            codecoder::help::SkillEntry {
+                name: "config",
+                description: "Configure daemon socket path",
+                usage: &["ccweb --daemon-socket /path/to/.ccd.sock"],
+                schema: None,
+                template: Some("ccweb --daemon-socket /tmp/ccd.sock"),
+            },
+        ],
+    };
+
+    // Help request handling (before arg parsing loop)
+    if let Some(req) = codecoder::help::parse_help_request(&args[1..]) {
+        let skills_dir = {
+            let root = std::env::var("CODECODER_ROOT")
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(|_| std::env::current_dir().expect("no cwd"));
+            root.join("skills")
+        };
+        match req {
+            codecoder::help::HelpRequest::Help { json: true } => {
+                println!("{}", serde_json::to_string_pretty(&codecoder::help::help_json(&help_spec)).unwrap());
+                return;
+            }
+            codecoder::help::HelpRequest::Help { json: false } => {
+                println!("{}", codecoder::help::render_help(&help_spec));
+                return;
+            }
+            codecoder::help::HelpRequest::Skill { name, json: true } => {
+                match codecoder::help::skill_json(&help_spec, &name, &skills_dir) {
+                    Some(v) => println!("{}", serde_json::to_string_pretty(&v).unwrap()),
+                    None => eprintln!("ccweb: unknown skill '{name}'"),
+                }
+                return;
+            }
+            codecoder::help::HelpRequest::Skill { name, json: false } => {
+                match codecoder::help::render_skill(&help_spec, &name, &skills_dir) {
+                    Some(s) => println!("{s}"),
+                    None => eprintln!("ccweb: unknown skill '{name}'"),
+                }
+                return;
+            }
+        }
+    }
+
     let mut port: u16 = std::env::var("CC_WEB_PORT")
         .ok()
         .and_then(|v| v.parse().ok())
@@ -29,7 +96,7 @@ fn main() {
                 i += 2;
             }
             other => {
-                eprintln!("cc-web: unknown flag {other}");
+                eprintln!("ccweb: unknown flag {other}");
                 std::process::exit(1);
             }
         }
@@ -49,12 +116,12 @@ fn main() {
         .unwrap_or_else(|_| std::env::current_dir().expect("no cwd"));
 
     // Connect to daemon
-    eprintln!("cc-web: connecting to daemon at {}", sock_path.display());
+    eprintln!("ccweb: connecting to daemon at {}", sock_path.display());
     let mut client = match SocketClient::connect(&sock_path) {
         Ok(c) => c,
         Err(e) => {
-            eprintln!("cc-web: failed to connect to daemon: {e}");
-            eprintln!("cc-web: make sure the daemon is running (CODECODER_DAEMON=1 cargo run)");
+            eprintln!("ccweb: failed to connect to daemon: {e}");
+            eprintln!("ccweb: make sure the daemon is running (cargo run --bin ccda)");
             std::process::exit(1);
         }
     };
@@ -75,7 +142,7 @@ fn main() {
     let mut file_watcher = match FileWatcher::new(&root, router.clone()) {
         Ok(w) => w,
         Err(e) => {
-            eprintln!("cc-web: file watcher init failed (non-fatal): {e}");
+            eprintln!("ccweb: file watcher init failed (non-fatal): {e}");
             FileWatcher::dummy()
         }
     };
@@ -106,7 +173,7 @@ fn main() {
         Some(root.clone()),
     )
     .unwrap_or_else(|e| {
-            eprintln!("cc-web: failed to start HTTP server: {e}");
+            eprintln!("ccweb: failed to start HTTP server: {e}");
             std::process::exit(1);
         });
 
@@ -114,17 +181,17 @@ fn main() {
     // serve() returns cleanly (mirrors the daemon, ADR 0026/0032). No SIGKILL needed.
     let shutdown = Arc::new(AtomicBool::new(false));
     if let Err(e) = signal_hook::flag::register(signal_hook::consts::SIGINT, Arc::clone(&shutdown)) {
-        eprintln!("cc-web: SIGINT handler not registered: {e}");
+        eprintln!("ccweb: SIGINT handler not registered: {e}");
     }
     if let Err(e) = signal_hook::flag::register(signal_hook::consts::SIGTERM, Arc::clone(&shutdown)) {
-        eprintln!("cc-web: SIGTERM handler not registered: {e}");
+        eprintln!("ccweb: SIGTERM handler not registered: {e}");
     }
 
-    println!("cc-web: listening on http://localhost:{port}");
-    println!("cc-web: press Ctrl+C to stop");
+    println!("ccweb: listening on http://localhost:{port}");
+    println!("ccweb: press Ctrl+C to stop");
 
     // Serve HTTP (blocks until shutdown flag is set).
     Arc::new(http).serve(Arc::clone(&shutdown));
 
-    println!("cc-web: shut down gracefully");
+    println!("ccweb: shut down gracefully");
 }
