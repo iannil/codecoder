@@ -477,8 +477,10 @@ pub fn advance_one_milestone(
     }
 
     // ── Phase 2: Exec Turn ──
-    let plan = crate::milestone_plan::read_plan(&root, milestone_id)
-        .unwrap_or_else(|_| panic!("plan should exist for milestone #{milestone_id}"));
+    let plan = match crate::milestone_plan::read_plan(&root, milestone_id) {
+        Ok(p) => p,
+        Err(e) => return Err(anyhow::anyhow!("plan vanished for milestone #{milestone_id}: {e}")),
+    };
 
     let checkpoint = read_bg_checkpoint(&root);
     let criteria_str = plan.acceptance_criteria.iter()

@@ -5,6 +5,7 @@
 //!
 //! Task 4: MissionState 简化为 Running/Completed/EmptyGraph/Error(String),
 //! 不再需要 blocked_at / StuckNeedsFix / CircuitBreaker / BlockedAt 等 gate 专用状态。
+//! 后续叠加了 NeedsReview(外循环上限已达,需人工介入)。
 use crate::background::{BgOutcome, SubgoalOutcome};
 use serde::{Deserialize, Serialize};
 use std::fs::OpenOptions;

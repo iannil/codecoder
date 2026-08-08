@@ -5,7 +5,7 @@
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MilestonePlan {
     pub milestone_id: u64,
     pub title: String,
@@ -17,7 +17,7 @@ pub struct MilestonePlan {
     pub test_requirements: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MilestoneScope {
     pub files_to_create: Vec<String>,
     pub files_to_modify: Vec<String>,
@@ -74,6 +74,7 @@ pub fn all_plans(root: &Path) -> Vec<MilestonePlan> {
             }
         }
     }
+    plans.sort_by_key(|p| p.milestone_id);
     plans
 }
 
@@ -116,10 +117,52 @@ mod tests {
         write_plan(&dir, &plan).unwrap();
         assert!(plan_exists(&dir, 1));
         let back = read_plan(&dir, 1).unwrap();
-        assert_eq!(back.milestone_id, 1);
-        assert_eq!(back.title, "Build data model");
-        assert_eq!(back.skill_used, "engineer-architect");
+        assert_eq!(back, plan, "full roundtrip should match");
         // Cleanup
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn read_plan_corrupt_json_returns_err() {
+        let dir = std::env::temp_dir().join(format!("cc_plan_corrupt_{}", std::process::id()));
+        std::fs::create_dir_all(plan_dir(&dir)).unwrap();
+        let path = plan_path(&dir, 1);
+        std::fs::write(&path, "not valid json").unwrap();
+        assert!(read_plan(&dir, 1).is_err());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn all_plans_returns_sorted_by_id() {
+        let dir = std::env::temp_dir().join(format!("cc_plan_sort_{}", std::process::id()));
+        std::fs::create_dir_all(plan_dir(&dir)).unwrap();
+        let plan2 = MilestonePlan {
+            milestone_id: 2,
+            title: "Second".into(),
+            skill_used: "coach".into(),
+            created_at: "2026-08-08T00:00:00Z".into(),
+            acceptance_criteria: vec![],
+            scope: MilestoneScope { files_to_create: vec![], files_to_modify: vec![], estimated_lines: 0 },
+            risks: vec![],
+            test_requirements: String::new(),
+        };
+        let plan1 = MilestonePlan {
+            milestone_id: 1,
+            title: "First".into(),
+            skill_used: "architect".into(),
+            created_at: "2026-08-08T00:00:00Z".into(),
+            acceptance_criteria: vec![],
+            scope: MilestoneScope { files_to_create: vec![], files_to_modify: vec![], estimated_lines: 0 },
+            risks: vec![],
+            test_requirements: String::new(),
+        };
+        // Write in reverse order to test sorting
+        write_plan(&dir, &plan2).unwrap();
+        write_plan(&dir, &plan1).unwrap();
+        let all = all_plans(&dir);
+        assert_eq!(all.len(), 2);
+        assert_eq!(all[0].milestone_id, 1, "should be sorted by milestone_id");
+        assert_eq!(all[1].milestone_id, 2);
         std::fs::remove_dir_all(&dir).ok();
     }
 
