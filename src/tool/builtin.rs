@@ -1108,10 +1108,19 @@ mod tests {
             f.write_all("a".repeat(100_000).as_bytes()).unwrap();
         }
         let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        unsafe { std::env::set_var("CODECODER_MAX_TOOL_OUTPUT", "1024"); }
+        // Point root at temp dir and write project config to set max_tool_output
+        // (env-based config removed; Config::load() reads from CODECODER_ROOT)
+        let root_str = dir.to_string_lossy().to_string();
+        unsafe { std::env::set_var("CODECODER_ROOT", &root_str); }
+        std::fs::create_dir_all(dir.join(".codecoder")).unwrap();
+        std::fs::write(
+            dir.join(".codecoder").join("codecoder.json"),
+            r#"{"max_tool_output": 1024}"#,
+        ).unwrap();
         let mut ctx = crate::tool::ToolCtx::new(&dir);
         let out = ReadFile.run(json!({ "path": "big.txt" }), &mut ctx).unwrap();
-        unsafe { std::env::remove_var("CODECODER_MAX_TOOL_OUTPUT"); }
+        unsafe { std::env::remove_var("CODECODER_ROOT"); }
+        let _ = std::fs::remove_dir_all(&dir);
         drop(_g);
         assert!(!out.is_error, "{}", out.content);
         assert!(out.content.contains("truncated"), "marker present: {}", out.content);
@@ -1125,13 +1134,21 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        unsafe { std::env::set_var("CODECODER_MAX_TOOL_OUTPUT", "512"); }
+        // Point root at temp dir and write project config to set max_tool_output
+        let root_str = dir.to_string_lossy().to_string();
+        unsafe { std::env::set_var("CODECODER_ROOT", &root_str); }
+        std::fs::create_dir_all(dir.join(".codecoder")).unwrap();
+        std::fs::write(
+            dir.join(".codecoder").join("codecoder.json"),
+            r#"{"max_tool_output": 512}"#,
+        ).unwrap();
         let mut ctx = crate::tool::ToolCtx::new(&dir);
         // seq 1 5000 产出 ~20KB >> 512
         let out = RunCommand
             .run(json!({ "cmd": "seq 1 5000" }), &mut ctx)
             .unwrap();
-        unsafe { std::env::remove_var("CODECODER_MAX_TOOL_OUTPUT"); }
+        unsafe { std::env::remove_var("CODECODER_ROOT"); }
+        let _ = std::fs::remove_dir_all(&dir);
         drop(_g);
         assert!(out.content.contains("truncated"), "marker present: {}", out.content);
         let _ = std::fs::remove_dir_all(&dir);

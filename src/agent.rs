@@ -3401,8 +3401,16 @@ mod tests {
     #[test]
     fn self_observe_injects_previous_turn_trace_when_enabled() {
         let _g = SELF_OBSERVE_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        unsafe { std::env::set_var("CODECODER_SELF_OBSERVE", "1"); }
         let dir = tempfile::tempdir().unwrap();
+        // Point root at the temp dir and write project config to enable self_observe
+        // (env-based config removed; Config::load() reads <root>/.codecoder/codecoder.json)
+        let root_str = dir.path().to_string_lossy().to_string();
+        unsafe { std::env::set_var("CODECODER_ROOT", &root_str); }
+        std::fs::create_dir_all(dir.path().join(".codecoder")).unwrap();
+        std::fs::write(
+            dir.path().join(".codecoder").join("codecoder.json"),
+            r#"{"self_observe": true}"#,
+        ).unwrap();
         let provider = Arc::new(ScriptedProvider {
             calls: AtomicUsize::new(0),
             path: String::new(),
@@ -3421,7 +3429,6 @@ mod tests {
         let obs = agent.self_observation.as_ref().unwrap();
         assert!(obs.contains("Tool Call Sequence") || obs.contains("turn") || obs.contains("LLM"),
             "self-observation should contain execution summary, got: {obs}");
-        unsafe { std::env::remove_var("CODECODER_SELF_OBSERVE"); }
         let _ = std::fs::remove_dir_all(&dir);
     }
 
