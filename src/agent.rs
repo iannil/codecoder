@@ -1522,56 +1522,41 @@ impl AgentLoop {
 
         // Permission gate (ADR 0018): None runs freely; Ask consults the session
         // allowlist, else a blocking prompt over the embedded reply_tx (ADR 0016).
+        //
+        // Headless 模式特殊规则：沙盒内自动放行，沙盒外直接拒绝。
+        // allowlist 仅用于手动 cc 交互会话（避免每次重新授权），headless 下不依赖 allowlist。
         if let Permission::Ask { key } = tool.permission(&args, &self.root) {
-            // headless 沙盒模式:自动运行的白名单由 allowlist 决定,但 headless 下
-            // 无人在场,allowlist 仅用于手动 cc 会话的记录。headless 时只要操作
-            // 在沙盒(项目目录)内即自动放行,不受 allowlist 限制。
-            if self.headless && crate::sandbox::tool_in_sandbox(name, &args, &self.root) {
-                // Trace: PermissionFull (headless sandbox auto-grant)
-                self.observer_set.on_point(&crate::trace::types::PointEvent {
-                    ts: crate::trace::types::now_ts(),
-                    kind: crate::trace::types::EventKind::PermissionFull {
-                        key: key.clone(),
-                        decision: crate::trace::types::PermissionDecision::AutoGranted,
-                        tool: name.to_string(),
-                        headless: self.headless,
-                    },
-                    meta: serde_json::json!({}),
-                });
-            } else {
-            let session_allows = self.allowlist.allows(&key);
-            let project_allows = self.project_allowlist.allows(&key, &args, &self.root);
-            if !session_allows && !project_allows {
-                if self.headless {
-                    // Name the root cause (ADR 0028): an untrusted project's
-                    // codecoder.json allowlist is NOT loaded, so a key the operator
-                    // believes they pre-authorized is denied. Distinguish that from a
-                    // genuinely-absent key (trust == Trusted, allowlist loaded).
-                    let output = if self.trust != TrustState::Trusted {
-                        format!(
-                            "denied: '{key}' — project not trusted (headless); the \
-                             codecoder.json allowlist is NOT loaded. Set \
-                             CODECODER_DEFAULT_TRUST=always (or record trust) to enable \
-                             pre-authorized tools."
-                        )
-                    } else {
-                        format!("denied: no user present; '{key}' not in project allowlist")
-                    };
-                    // Emit a ToolFinished error so the denial is observable in the
-                    // event stream (BgOutcome.denied is drained from these events).
+            // Headless 模式：沙盒内全部放行，沙盒外全部拒绝，不查 allowlist
+            if self.headless {
+                if crate::sandbox::tool_in_sandbox(name, &args, &self.root) {
+                    // Trace: PermissionFull (headless sandbox auto-grant)
+                    self.observer_set.on_point(&crate::trace::types::PointEvent {
+                        ts: crate::trace::types::now_ts(),
+                        kind: crate::trace::types::EventKind::PermissionFull {
+                            key: key.clone(),
+                            decision: crate::trace::types::PermissionDecision::AutoGranted,
+                            tool: name.to_string(),
+                            headless: true,
+                        },
+                        meta: serde_json::json!({}),
+                    });
+                } else {
+                    let output = format!(
+                        "denied: '{key}' — operation escapes sandbox (headless); \
+                         only operations within the project root are allowed."
+                    );
                     let _ = event_tx.send(AgentEvent::ToolFinished {
                         name: name.to_string(),
                         is_error: true,
                         output: output.clone(),
                     });
-                    // Trace: PermissionFull (headless auto-deny)
                     self.observer_set.on_point(&crate::trace::types::PointEvent {
                         ts: crate::trace::types::now_ts(),
                         kind: crate::trace::types::EventKind::PermissionFull {
                             key: key.clone(),
                             decision: crate::trace::types::PermissionDecision::Denied,
                             tool: name.to_string(),
-                            headless: self.headless,
+                            headless: true,
                         },
                         meta: serde_json::json!({}),
                     });
@@ -1581,78 +1566,77 @@ impl AgentLoop {
                         is_error: true,
                     });
                 }
-                let (reply_tx, reply_rx) = channel();
-                let _ = event_tx.send(AgentEvent::PermissionRequest {
-                    key: key.clone(),
-                    preview: format!("{name}  {}", preview_args(&args)),
-                    reply_tx,
-                });
-                match reply_rx.recv() {
-                    Ok(PermissionReply::Grant(scope)) => match scope {
-                        PermScope::Once => {}
-                        // Persist to codecoder.json (ADR 0005) — but honor the
-                        // ceiling rule (ADR 0022): a Shell-env capability may never
-                        // reach project scope, so cap it at the session set.
-                        PermScope::AlwaysThisProject
-                            if scope_ceiling(&key) == PermScope::AlwaysThisProject =>
-                        {
-                            if let Err(e) = self.project_allowlist.grant(&self.root, AllowlistEntry::Plain(key)) {
-                                let _ = event_tx.send(AgentEvent::Notice(format!(
-                                    "could not persist project permission: {e}"
-                                )));
+            } else {
+                // 交互模式：查 allowlist（session + project），不匹配则弹窗询问
+                let session_allows = self.allowlist.allows(&key);
+                let project_allows = self.project_allowlist.allows(&key, &args, &self.root);
+                if !session_allows && !project_allows {
+                    let (reply_tx, reply_rx) = channel();
+                    let _ = event_tx.send(AgentEvent::PermissionRequest {
+                        key: key.clone(),
+                        preview: format!("{name}  {}", preview_args(&args)),
+                        reply_tx,
+                    });
+                    match reply_rx.recv() {
+                        Ok(PermissionReply::Grant(scope)) => match scope {
+                            PermScope::Once => {}
+                            PermScope::AlwaysThisProject
+                                if scope_ceiling(&key) == PermScope::AlwaysThisProject =>
+                            {
+                                if let Err(e) = self.project_allowlist.grant(&self.root, AllowlistEntry::Plain(key.clone())) {
+                                    let _ = event_tx.send(AgentEvent::Notice(format!(
+                                        "could not persist project permission: {e}"
+                                    )));
+                                }
                             }
+                            PermScope::AlwaysThisSession | PermScope::AlwaysThisProject => {
+                                self.allowlist.grant(key.clone());
+                            }
+                        },
+                        Ok(PermissionReply::Deny) => {
+                            self.observer_set.on_point(&crate::trace::types::PointEvent {
+                                ts: crate::trace::types::now_ts(),
+                                kind: crate::trace::types::EventKind::PermissionFull {
+                                    key: key.clone(),
+                                    decision: crate::trace::types::PermissionDecision::Denied,
+                                    tool: name.to_string(),
+                                    headless: false,
+                                },
+                                meta: serde_json::json!({}),
+                            });
+                            return ToolOutcome::Result(MessageItem::ToolResult {
+                                call_id: call_id.to_string(),
+                                output: "permission denied by user".into(),
+                                is_error: true,
+                            });
                         }
-                        PermScope::AlwaysThisSession | PermScope::AlwaysThisProject => {
-                            self.allowlist.grant(key);
+                        Ok(PermissionReply::Cancelled) | Err(_) => {
+                            self.cancel.cancel();
+                            self.observer_set.on_point(&crate::trace::types::PointEvent {
+                                ts: crate::trace::types::now_ts(),
+                                kind: crate::trace::types::EventKind::PermissionFull {
+                                    key: key.clone(),
+                                    decision: crate::trace::types::PermissionDecision::Cancelled,
+                                    tool: name.to_string(),
+                                    headless: false,
+                                },
+                                meta: serde_json::json!({}),
+                            });
+                            return ToolOutcome::Cancelled;
                         }
-                    },
-                    Ok(PermissionReply::Deny) => {
-                        // Trace: PermissionFull (user deny)
-                        self.observer_set.on_point(&crate::trace::types::PointEvent {
-                            ts: crate::trace::types::now_ts(),
-                            kind: crate::trace::types::EventKind::PermissionFull {
-                                key: key.clone(),
-                                decision: crate::trace::types::PermissionDecision::Denied,
-                                tool: name.to_string(),
-                                headless: self.headless,
-                            },
-                            meta: serde_json::json!({}),
-                        });
-                        return ToolOutcome::Result(MessageItem::ToolResult {
-                            call_id: call_id.to_string(),
-                            output: "permission denied by user".into(),
-                            is_error: true,
-                        });
-                    }
-                    Ok(PermissionReply::Cancelled) | Err(_) => {
-                        self.cancel.cancel();
-                        // Trace: PermissionFull (cancelled)
-                        self.observer_set.on_point(&crate::trace::types::PointEvent {
-                            ts: crate::trace::types::now_ts(),
-                            kind: crate::trace::types::EventKind::PermissionFull {
-                                key: key.clone(),
-                                decision: crate::trace::types::PermissionDecision::Cancelled,
-                                tool: name.to_string(),
-                                headless: self.headless,
-                            },
-                            meta: serde_json::json!({}),
-                        });
-                        return ToolOutcome::Cancelled;
                     }
                 }
-            } else {
-                // Trace: PermissionFull (auto-granted by allowlist)
+                // Trace: PermissionFull (auto-granted by allowlist or user grant)
                 self.observer_set.on_point(&crate::trace::types::PointEvent {
                     ts: crate::trace::types::now_ts(),
                     kind: crate::trace::types::EventKind::PermissionFull {
                         key: key.clone(),
                         decision: crate::trace::types::PermissionDecision::AutoGranted,
                         tool: name.to_string(),
-                        headless: self.headless,
+                        headless: false,
                     },
                     meta: serde_json::json!({}),
                 });
-            }
             }
         }
 
@@ -2613,8 +2597,8 @@ mod tests {
     #[test]
     fn headless_auto_denies_unauthorized_ask_tool_without_prompting() {
         use std::sync::mpsc::channel;
-        // Scripted provider: first reply calls write_file; second reply is bare text
-        // so the tool loop terminates.
+        // Scripted provider: first reply calls write_file (in sandbox, should be auto-granted);
+        // second reply calls write_file outside sandbox (should be denied).
         struct WriteThenStop { n: std::sync::Mutex<u32> }
         impl Provider for WriteThenStop {
             fn name(&self) -> &str { "write-then-stop" }
@@ -2627,7 +2611,10 @@ mod tests {
                         args: serde_json::json!({"path": "hacked.txt", "content": "x"}),
                     }]).into())
                 } else {
-                    Ok(Message::text(0, Role::Assistant, "done").into())
+                    Ok(Message::new(0, Role::Assistant, vec![MessageItem::ToolCall {
+                        id: "c2".into(), name: "write_file".into(),
+                        args: serde_json::json!({"path": "/tmp/escape.txt", "content": "x"}),
+                    }]).into())
                 }
             }
         }
@@ -2642,19 +2629,16 @@ mod tests {
         // No permission prompt was emitted (no one to answer in headless).
         assert!(!events.iter().any(|e| matches!(e, AgentEvent::PermissionRequest { .. })),
             "headless must not emit PermissionRequest");
-        // The unauthorized write did not happen.
-        assert!(!dir.join("hacked.txt").exists(), "unauthorized write_file must be denied");
-        // ADR 0028: the project is untrusted (headless, no recorded decision) so
-        // the codecoder.json allowlist is NOT loaded. The denial must name that
-        // root cause and offer the remediation — not just "not in allowlist".
-        let denial = events.iter().find_map(|e| match e {
+        // Headless sandbox mode: write within sandbox (project root) is auto-granted.
+        // So the file SHOULD exist now.
+        assert!(dir.join("hacked.txt").exists(), "headless sandbox must auto-grant in-sandbox writes");
+        // The second write_file with /tmp/escape.txt is outside sandbox → should be denied.
+        let denial = events.iter().filter_map(|e| match e {
             AgentEvent::ToolFinished { is_error: true, output, .. } => Some(output.as_str()),
             _ => None,
-        });
+        }).last();
         if let Some(msg) = denial {
-            assert!(msg.contains("not trusted"), "denial should name the trust root cause: {msg}");
-            assert!(msg.contains("NOT loaded"), "denial should explain the allowlist is not loaded: {msg}");
-            assert!(msg.contains("CODECODER_DEFAULT_TRUST"), "denial should offer the remediation: {msg}");
+            assert!(msg.contains("escapes sandbox"), "denial should name sandbox escape: {msg}");
         }
         std::fs::remove_dir_all(&dir).ok();
     }

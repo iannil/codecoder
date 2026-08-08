@@ -5,13 +5,46 @@
 use std::path::{Path, PathBuf};
 use serde_json::Value;
 
-/// 判断路径是否在沙箱（CODECODER_ROOT）范围内。
-/// 使用 canonicalize 规范化路径，防止 `../` 绕过。
-pub fn in_sandbox(path: &Path, root: &Path) -> bool {
-    match (path.canonicalize(), root.canonicalize()) {
-        (Ok(p), Ok(r)) => p.starts_with(&r),
-        _ => false,
+/// 解析路径用于沙箱判定：优先 canonicalize（处理符号链接与 `../`），当文件
+/// 尚不存在时（如首次 write_file 新文件）回退到「最近存在的祖先 + 尾部缺失段」，
+/// 使沙箱判定对尚不存在的写入目标同样成立。返回的路径为绝对路径。
+fn resolve_for_sandbox(p: &Path) -> PathBuf {
+    if let Ok(c) = p.canonicalize() {
+        return c;
     }
+    // 文件不存在：向上找最近存在的祖先，canonicalize 它，再挂回缺失的尾部段。
+    let mut tail: Vec<std::ffi::OsString> = Vec::new();
+    let mut cur = p;
+    loop {
+        match cur.canonicalize() {
+            Ok(base) => {
+                let mut out = base;
+                for seg in tail.iter().rev() {
+                    out.push(seg);
+                }
+                return out;
+            }
+            Err(_) => match (cur.file_name(), cur.parent()) {
+                (Some(n), Some(par)) => {
+                    tail.push(n.to_os_string());
+                    cur = par;
+                }
+                _ => return p.to_path_buf(),
+            },
+        }
+    }
+}
+
+/// 判断路径是否在沙箱（CODECODER_ROOT）范围内。
+/// 使用 canonicalize 规范化路径，防止 `../` 绕过；对尚不存在的写入目标
+/// （新文件）回退到词法解析，使沙箱判定对新文件同样稳健。
+pub fn in_sandbox(path: &Path, root: &Path) -> bool {
+    let root_c = match root.canonicalize() {
+        Ok(r) => r,
+        Err(_) => return false, // root 不存在则无可为沙箱
+    };
+    let resolved = resolve_for_sandbox(path);
+    resolved.starts_with(&root_c)
 }
 
 /// 根据工具名和参数判断该工具操作是否在沙箱范围内。
