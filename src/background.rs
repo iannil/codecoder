@@ -224,10 +224,12 @@ pub(crate) fn run_background_cfg(
             Ok(())
         });
     }
-    let mut advanced = 0usize;
     let mut cycle = 0usize;
     let max_cycles = crate::config::Config::load().bg_max_auto_cycles;
     loop {
+        // 每轮外循环重置推进预算：返工后重新 seed 的新里程碑
+        // 必须能在外层循环的下一轮获得新的 `max_auto` 配额。
+        let mut advanced = 0usize;
         // ── 内层 milestone 推进循环 ──
         let mut inner_error = None;
         loop {

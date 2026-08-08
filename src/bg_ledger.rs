@@ -11,7 +11,7 @@ use std::fs::OpenOptions;
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 
-/// BG 任务终态（去掉 gate 专用状态）。
+/// BG 任务终态。
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum MissionState {
     Running,
